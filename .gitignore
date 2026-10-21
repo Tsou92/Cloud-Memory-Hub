@@ -1,0 +1,41 @@
+# Local credentials and personal configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials/
+secrets/
+.codex/
+.claude/settings.local.json
+
+# User data must never become source code
+data/
+backups/
+exports/
+logs/
+.local/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# Tooling and generated artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+node_modules/
+dist/
+build/
+coverage/
+test-results/
+playwright-report/
+*.log
+
