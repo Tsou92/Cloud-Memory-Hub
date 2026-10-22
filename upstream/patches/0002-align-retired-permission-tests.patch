@@ -1,0 +1,74 @@
+diff --git a/memhub/apps/core/tests/test_active_credentials.py b/memhub/apps/core/tests/test_active_credentials.py
+index c6c83ed..d29a627 100644
+--- a/memhub/apps/core/tests/test_active_credentials.py
++++ b/memhub/apps/core/tests/test_active_credentials.py
+@@ -161,7 +161,7 @@ def test_profile_change_during_secret_read_rejects_old_credentials(setup, change
+                     )
+ 
+     secrets.after_read = change_identity
+-    with pytest.raises(HyMemoryBridgeError, match="^model_content_profile_changed$"):
++    with pytest.raises(HyMemoryBridgeError, match="^model_profile_changed$"):
+         asyncio.run(supervisor._active_credentials())
+     assert len(secrets.reads) == 1
+     assert supervisor._bridges == {}
+diff --git a/memhub/apps/core/tests/test_active_memory_window.py b/memhub/apps/core/tests/test_active_memory_window.py
+index dd349ec..1a999cf 100644
+--- a/memhub/apps/core/tests/test_active_memory_window.py
++++ b/memhub/apps/core/tests/test_active_memory_window.py
+@@ -239,8 +239,8 @@ def test_active_window_defers_tasks_older_than_ninety_days(tmp_path):
+     assert deferred.last_error_code == "outside_extraction_window"
+ 
+ 
+-def test_active_window_keeps_old_continuous_ingest_pending(tmp_path):
+-    """Continuous eligibility follows ingest sequence, not message time."""
++def test_retired_continuous_marker_cannot_override_current_window(tmp_path):
++    """Migration 054 retires this marker; it cannot grant a window exemption."""
+     stores = _stores(tmp_path)
+     evidence, _profiles, tasks, _governance, _secrets, profile = stores
+     old = _put(
+@@ -266,14 +266,15 @@ def test_active_window_keeps_old_continuous_ingest_pending(tmp_path):
+         extraction_window=EXTRACTION_WINDOW,
+     )
+ 
+-    assert [item.task.task_id for item in window] == [task.task_id]
+-    assert tasks.require(task.task_id).status is MemoryTaskStatus.PENDING
++    assert window == []
++    assert tasks.require(task.task_id).status is MemoryTaskStatus.DEFERRED_OUTSIDE_WINDOW
++    assert tasks.require(task.task_id).last_error_code == "outside_extraction_window"
+ 
+ 
+-def test_continuous_old_task_does_not_take_the_writer(tmp_path):
+-    """A continuous exemption is not a defer candidate.
++def test_all_history_old_task_does_not_take_the_writer(tmp_path):
++    """An explicitly unbounded window admits old evidence without deferring it.
+ 
+-    The old task is eligible by ingest sequence, so the window must read it
++    The old task is eligible under the selected all-history window, so read it
+     without setting `outside_extraction_window`; touching the sole writer for
+     that read would recreate the contention the no-defer path removes.
+     """
+@@ -288,13 +289,6 @@ def test_continuous_old_task_does_not_take_the_writer(tmp_path):
+         workspace="workspace:v1:test",
+     )
+     task = _task(tasks, profile, old, suffix="old-continuous-writer")
+-    with sqlite3.connect(tasks.database_path) as connection:
+-        connection.execute(
+-            "CREATE TABLE memory_task_continuous_permissions (task_id TEXT PRIMARY KEY)"
+-        )
+-        connection.execute(
+-            "INSERT INTO memory_task_continuous_permissions VALUES (?)", (task.task_id,)
+-        )
+     before = tasks._connect  # noqa: SLF001
+     writer_checkouts: list[bool] = []
+ 
+@@ -306,8 +300,9 @@ def test_continuous_old_task_does_not_take_the_writer(tmp_path):
+     window = tasks.active_window(
+         now=datetime.now(UTC),
+         fresh_window=FRESH_WINDOW,
+-        extraction_window=EXTRACTION_WINDOW,
++        extraction_window=None,
+     )
+ 
+     assert [item.task.task_id for item in window] == [task.task_id]
+     assert writer_checkouts == [False]
++    assert tasks.require(task.task_id).status is MemoryTaskStatus.PENDING
