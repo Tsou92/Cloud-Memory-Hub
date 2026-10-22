@@ -25,8 +25,10 @@ LOGIN_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <style>body{font:16px system-ui;background:#f5f7fa;color:#162b38;margin:0}
 main{max-width:380px;margin:15vh auto;padding:32px;background:white;border-radius:16px}
 input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:12px;font:inherit}
-button{background:#126b65;color:white;border:0;border-radius:8px}p{line-height:1.7}</style>
+button{background:#126b65;color:white;border:0;border-radius:8px}p{line-height:1.7}
+[role=alert]{color:#9b2424}</style>
 <main><h1>Cloud Memory Hub</h1><p>输入初始化时生成的管理员凭证，进入记忆管理。</p>
+{{error}}
 <form method="post" action="/hub/login"><label for="credential">管理员凭证</label>
 <input id="credential" name="credential" type="password" autocomplete="current-password"
 required maxlength="256"><button>登录</button></form></main></html>"""
@@ -116,7 +118,7 @@ class CloudBoundary:
 
     async def _login(self, request: Request):
         if request.method == "GET":
-            return HTMLResponse(LOGIN_PAGE)
+            return HTMLResponse(LOGIN_PAGE.replace("{{error}}", ""))
         if request.method != "POST":
             return JSONResponse({"detail": "method_not_allowed"}, status_code=405)
         if request.headers.get("origin") != self.config.public_origin:
@@ -125,12 +127,12 @@ class CloudBoundary:
         while self.failed_logins and self.failed_logins[0] < now - 60:
             self.failed_logins.popleft()
         if len(self.failed_logins) >= 20:
-            return JSONResponse({"detail": "login_rate_limited"}, status_code=429)
+            return self._login_error(request, "login_rate_limited", 429)
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
             if len(body) > 4096:
-                return JSONResponse({"detail": "request_too_large"}, status_code=413)
+                return self._login_error(request, "request_too_large", 413)
         try:
             if request.headers.get("content-type", "").startswith("application/json"):
                 value = json.loads(body).get("credential", "")
@@ -140,7 +142,7 @@ class CloudBoundary:
             value = ""
         if not isinstance(value, str) or not self._valid_token(value):
             self.failed_logins.append(now)
-            return JSONResponse({"detail": "invalid_credential"}, status_code=401)
+            return self._login_error(request, "invalid_credential", 401)
         code, _ = self.sessions.issue_exchange()
         session_id = self.sessions.consume_exchange(code)
         response = RedirectResponse("/", status_code=303)
@@ -154,6 +156,19 @@ class CloudBoundary:
             path="/",
         )
         return response
+
+    @staticmethod
+    def _login_error(request: Request, detail: str, status: int):
+        if request.headers.get("content-type", "").startswith("application/json"):
+            return JSONResponse({"detail": detail}, status_code=status)
+        messages = {
+            "invalid_credential": "凭证不正确，请重新输入。",
+            "login_rate_limited": "尝试次数较多，请稍后再试。",
+            "request_too_large": "输入内容过长，请重新输入管理员凭证。",
+        }
+        # Only constant, trusted messages enter HTML; never echo submitted credentials.
+        message = '<p role="alert">' + messages[detail] + "</p>"
+        return HTMLResponse(LOGIN_PAGE.replace("{{error}}", message), status_code=status)
 
     @staticmethod
     async def _respond(response, scope, receive, send) -> None:
