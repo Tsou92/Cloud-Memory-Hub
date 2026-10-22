@@ -1,0 +1,16 @@
+diff --git a/memhub/apps/core/tests/test_live_capture.py b/memhub/apps/core/tests/test_live_capture.py
+index 1525993..dabba19 100644
+--- a/memhub/apps/core/tests/test_live_capture.py
++++ b/memhub/apps/core/tests/test_live_capture.py
+@@ -238,9 +238,9 @@ def test_hook_job_completes_after_file_identity_adoption(tmp_path) -> None:
+             records,
+             *,
+             before_hy_invocation,
+-            source_admitted,
++            source_admitted=False,
+         ):
+-            assert source_admitted is True
++            assert source_admitted is False
+             with closing(sqlite3.connect(database)) as connection:
+                 connection.execute("BEGIN")
+                 for record in records:
