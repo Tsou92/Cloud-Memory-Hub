@@ -2,7 +2,9 @@
 
 部署在 NAS 上、连接不同设备与 Agent 的共享记忆服务。
 
-**当前阶段：工程基线与技术可行性评估。尚未实现或发布可运行的产品。**
+**当前阶段：G1 复用与可行性验证。已实现可在本地容器运行的实验性管理入口，尚未发布完整产品。**
+
+实验入口直接复用固定版本的 MemHub Core 和管理网页，增加 NAS 认证边界及加密凭证存储。跨设备自动采集、同步、离线缓存、删除传播等能力仍在开发，当前不应接入真实历史或用作唯一记忆存储。
 
 项目默认提供跨 Agent 的任务接续，同时保留原始记录追溯能力。首批目标入口为 Claude Code CLI、Codex 桌面版、OpenCode 终端、Hermes 终端、Cherry Studio 客户端和 Open Design 客户端；通过通用接口持续扩展其他 Agent。
 
@@ -22,18 +24,23 @@
 | 上游代码复用清单及差距 | [Hy-Memory / MemHub 评估](docs/research/upstream-assessment.md) |
 | 架构方向与备选方案 | [架构草案](docs/architecture/overview.md) |
 | 决策记录 | [ADR-0001：复用优先](docs/adr/0001-reuse-first.md) |
+| 容器运行与配置 | [实验运行指南](docs/development-runtime.md) · [ADR-0002：NAS 边界](docs/adr/0002-nas-runtime-boundary.md) |
 | 测试与需求追踪 | [验证计划](docs/verification.md) |
 | 分阶段交付 | [里程碑](docs/roadmap.md) |
 | 本轮工程评审状态 | [评审记录](docs/reviews/2026-10-21-foundation.md) |
+| 运行时验证进展 | [容器与上游验证记录](docs/reviews/2026-10-22-runtime.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查
 
-需要 Git、Python 3.12–3.14，以及 uv。仓库工具使用 `uv.lock` 锁定依赖；它们不是产品运行时选型。
+工程检查需要 Git、Python 3.12–3.14，以及 uv。运行时使用 Python 3.12、uv 0.12.5 和上游约束版本；各自使用锁文件。
 
 ```sh
 uv sync --locked
 make check
+make check-runtime
+# 需要 Docker；构建 Linux amd64 并在独立临时卷中验证
+make check-container
 ```
 
 检查包括格式、静态检查、工程门禁测试、文档链接、禁止入库的数据路径和源码凭证扫描。当前通过这些检查**不代表产品功能已通过验收**。

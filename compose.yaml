@@ -1,0 +1,42 @@
+name: cloud-memory-hub
+services:
+  setup:
+    image: cloud-memory-hub:development
+    build: .
+    command: ["init"]
+    profiles: ["setup"]
+    volumes:
+      - hub_config:/config
+    network_mode: none
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+
+  hub:
+    image: cloud-memory-hub:development
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CMH_PORT:-8800}:8800"
+    environment:
+      CMH_PUBLIC_ORIGIN: ${CMH_PUBLIC_ORIGIN:-http://localhost:8800}
+    volumes:
+      - hub_data:/data
+      - hub_config:/config
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 3g
+    cpus: 2.0
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  hub_data:
+  hub_config:

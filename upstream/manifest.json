@@ -7,11 +7,18 @@
   "memhub_version": "1.0.4",
   "memhub_pinned_sdk_version": "2.0.4",
   "license": "Apache-2.0",
-  "integration_status": "assessment_only",
+  "integration_status": "isolated_baseline_in_progress",
   "copied_business_code": false,
   "notes": [
     "Source main and the SDK pinned by MemHub differ; do not mix them implicitly.",
     "Reuse code and corresponding tests before creating replacements.",
     "Record introduced paths, license notices and local patches when integration begins."
+  ],
+  "patches": [
+    {
+      "path": "patches/0001-align-live-capture-test-double.patch",
+      "scope": "test_only",
+      "digest": "sha256:f0c813fc357784d422e63afbfa1aef6615440d39855e38f6c18463583886e8a3"
+    }
   ]
 }
