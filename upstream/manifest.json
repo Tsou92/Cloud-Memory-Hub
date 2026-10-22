@@ -19,6 +19,11 @@
       "path": "patches/0001-align-live-capture-test-double.patch",
       "scope": "test_only",
       "digest": "sha256:f0c813fc357784d422e63afbfa1aef6615440d39855e38f6c18463583886e8a3"
+    },
+    {
+      "path": "patches/0002-align-retired-permission-tests.patch",
+      "scope": "test_only",
+      "digest": "sha256:e549e7a502ae736e7001f0ef41025293ff7650958de3f0c4e702d0c631fe8d71"
     }
   ]
 }
