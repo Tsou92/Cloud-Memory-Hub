@@ -8,6 +8,8 @@ from pydantic import SecretStr
 
 from cloud_memory_hub.boundary import CloudBoundary
 from cloud_memory_hub.config import HubConfig
+from cloud_memory_hub.remote_access import DeviceAccessStore
+from cloud_memory_hub.remote_api import create_remote_api
 from cloud_memory_hub.secret_store import EncryptedSecretStore
 
 
@@ -26,4 +28,5 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         config.config_dir / "model-credentials.sqlite3", config.encryption_key
     )
     core = create_app(settings, secret_store=store, manage_runtime=True)
-    return CloudBoundary(core, config, internal_token)
+    devices = DeviceAccessStore(config.config_dir / "remote-access.sqlite3")
+    return CloudBoundary(core, config, internal_token, remote_api=create_remote_api(devices))
