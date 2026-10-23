@@ -1,7 +1,7 @@
 name: cloud-memory-hub
 services:
   verify-model:
-    image: cloud-memory-hub:development
+    image: ${CMH_IMAGE:-cloud-memory-hub:development}
     profiles: ["test"]
     entrypoint: ["/opt/cmh/venv/bin/python", "-"]
     network_mode: none
@@ -13,7 +13,7 @@ services:
     cpus: 2.0
 
   setup:
-    image: cloud-memory-hub:development
+    image: ${CMH_IMAGE:-cloud-memory-hub:development}
     build: .
     command: ["init"]
     profiles: ["setup"]
@@ -26,7 +26,7 @@ services:
     security_opt: ["no-new-privileges:true"]
 
   hub:
-    image: cloud-memory-hub:development
+    image: ${CMH_IMAGE:-cloud-memory-hub:development}
     build: .
     restart: unless-stopped
     ports:
