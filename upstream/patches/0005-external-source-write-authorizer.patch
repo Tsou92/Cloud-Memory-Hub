@@ -1,0 +1,35 @@
+--- a/memhub/apps/core/src/one_memory/api.py
++++ b/memhub/apps/core/src/one_memory/api.py
+@@ -824,6 +824,7 @@
+     manage_runtime: bool = False,
+     source_catalog: dict[str, SourceRegistration] | None = None,
+     secret_store: SecretStore | None = None,
++    source_write_authorizer: Callable[[str], bool | None] | None = None,
+ ) -> FastAPI:
+     runtime_settings = settings or load_settings()
+     if runtime_settings.retrieval_index_enabled and not manage_runtime:
+@@ -1608,6 +1609,7 @@
+         allow_headers=["*"],
+     )
+     app.state.settings = runtime_settings
++    app.state.source_write_authorizer = source_write_authorizer
+
+     @app.middleware("http")
+     async def reject_legacy_memory_authority(
+@@ -5415,6 +5417,16 @@
+
+ def _source_writes_on(app: FastAPI, source_id: str) -> bool:
+     """Whether this source's conversations may become memories."""
++    # An embedding runtime can own non-filesystem sources without granting
++    # them local import roots. None retains the original source policy.
++    authorizer = getattr(app.state, "source_write_authorizer", None)
++    if authorizer is not None:
++        try:
++            decision = authorizer(source_id)
++        except Exception:
++            return False
++        if decision is not None:
++            return decision is True
+     if source_id == "one-memory-manual":
+         receipt = _grant_store(app).receipt(user_id="local", source_id=source_id)
+         return receipt is not None and receipt.revoked_at is None

@@ -57,6 +57,7 @@ def smoke() -> None:
         ready()
         payload = (ROOT / "scripts/probe_runtime.py").read_text()
         access_payload = (ROOT / "scripts/probe_remote_access.py").read_text()
+        ingest_payload = (ROOT / "scripts/probe_remote_ingest.py").read_text()
         for phase in ("before", "after", "revoked"):
             if phase != "before":
                 run(["restart", "hub"])
@@ -72,6 +73,13 @@ def smoke() -> None:
                 run(
                     ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase],
                     input=access_payload,
+                ),
+                end="",
+            )
+            print(
+                run(
+                    ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase],
+                    input=ingest_payload,
                 ),
                 end="",
             )

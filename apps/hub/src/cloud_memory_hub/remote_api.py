@@ -8,6 +8,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from cloud_memory_hub.events import EventEnvelope
+from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, PrivacyError, parse_json
 from cloud_memory_hub.remote_access import (
     AccessError,
     DeviceAccessStore,
@@ -16,6 +18,7 @@ from cloud_memory_hub.remote_access import (
     NamedResource,
     RevisionRequest,
 )
+from cloud_memory_hub.remote_ingest import RemoteIngest, SourceRegistration
 
 MAX_BODY_BYTES = 64 * 1024
 
@@ -33,17 +36,17 @@ def require_admin(request: Request) -> None:
         raise AccessError("administrator_required", 403)
 
 
-async def read_body(request: Request, model):
+async def read_body(request: Request, model, *, max_bytes=MAX_BODY_BYTES):
     if request.headers.get("content-type", "").split(";")[0].lower() != "application/json":
         raise AccessError("json_required", 422)
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > MAX_BODY_BYTES:
+        if len(body) + len(chunk) > max_bytes:
             raise AccessError("request_too_large", 413)
         body.extend(chunk)
     try:
-        return model.model_validate_json(body)
-    except (ValidationError, ValueError):
+        return model.model_validate(parse_json(body))
+    except (ValidationError, ValueError, PrivacyError):
         # Pydantic's normal errors contain input values. Never send them back.
         raise AccessError("invalid_request", 422) from None
 
@@ -54,7 +57,14 @@ def issued_response(issued: IssuedCredential, status: int = 200) -> JSONResponse
     )
 
 
-def create_remote_api(store: DeviceAccessStore) -> Starlette:
+def device_credential(request: Request) -> str:
+    scheme, _, credential = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer":
+        raise AccessError("invalid_device_credential", 401)
+    return credential
+
+
+def create_remote_api(store: DeviceAccessStore, ingest: RemoteIngest) -> Starlette:
     async def projects(request: Request):
         require_admin(request)
         if request.method in {"GET", "HEAD"}:
@@ -93,17 +103,45 @@ def create_remote_api(store: DeviceAccessStore) -> Starlette:
         )
 
     async def session(request: Request):
-        scheme, _, credential = request.headers.get("authorization", "").partition(" ")
-        if scheme.lower() != "bearer":
-            raise AccessError("invalid_device_credential", 401)
-        device = await run_in_threadpool(store.authenticate, credential)
+        device = await run_in_threadpool(store.authenticate, device_credential(request))
         return response(
             {
                 "protocol_version": 1,
                 "instance_id": store.instance_id,
                 "device": device,
-                "features": ["device_identity"],
+                "features": ["device_identity", "source_registration", "event_upload"],
             }
+        )
+
+    async def sources(request: Request):
+        require_admin(request)
+        if request.method in {"GET", "HEAD"}:
+            return response({"sources": await run_in_threadpool(ingest.list_sources)})
+        body = await read_body(request, SourceRegistration)
+        return response(await run_in_threadpool(ingest.create_source, body), 201)
+
+    async def revoke_source(request: Request):
+        require_admin(request)
+        body = await read_body(request, RevisionRequest)
+        return response(
+            await run_in_threadpool(
+                ingest.revoke_source, str(request.path_params["source_id"]), body
+            )
+        )
+
+    async def events(request: Request):
+        credential = device_credential(request)
+        await run_in_threadpool(store.authenticate, credential)
+        event = await read_body(request, EventEnvelope, max_bytes=MAX_CONTENT_BYTES + 4096)
+        return response(await run_in_threadpool(ingest.accept, credential, event), 202)
+
+    async def event_status(request: Request):
+        return response(
+            await run_in_threadpool(
+                ingest.event_status,
+                device_credential(request),
+                str(request.path_params["event_id"]),
+            )
         )
 
     async def access_error(request: Request, error: AccessError):
@@ -123,6 +161,10 @@ def create_remote_api(store: DeviceAccessStore) -> Starlette:
             Route("/hub/v1/devices/{device_id:uuid}/rotate", rotate, methods=["POST"]),
             Route("/hub/v1/devices/{device_id:uuid}/revoke", revoke, methods=["POST"]),
             Route("/hub/v1/session", session, methods=["GET"]),
+            Route("/hub/v1/sources", sources, methods=["GET", "POST"]),
+            Route("/hub/v1/sources/{source_id:uuid}/revoke", revoke_source, methods=["POST"]),
+            Route("/hub/v1/events", events, methods=["POST"]),
+            Route("/hub/v1/events/{event_id:uuid}", event_status, methods=["GET"]),
         ],
         exception_handlers={AccessError: access_error, HTTPException: http_error},
     )
