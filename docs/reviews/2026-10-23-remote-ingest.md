@@ -16,7 +16,11 @@
 - 上游固定检出与补丁校验通过。原始输出保存在忽略目录 `.local/remote-ingest-tests.log` 和 `.local/remote-ingest-upstream.log`。
 - `make check`：19 项工程门禁及格式、静态、文档链接、路径、源码凭证扫描和空白检查通过，输出为 `.local/remote-ingest-check.log`。
 
-本地／NAS 容器探针已编写，镜像运行和升级回滚尚待本轮执行；不能把探针源码当作通过证据。
+本地 Linux amd64 镜像 `cloud-memory-hub:dev-fd7b5ad` 已通过完整容器检查：禁网编码／分词、基础认证、模型配置密文、设备身份、已安装本地连接库过滤后通过真实 HTTP 接纳、丢失回执后的重启重放、原任务计数、确认本地队列、来源撤销和再次重启。测试没有激活模型，任务保持 pending。结果为 `.local/remote-ingest-container.log`。
+
+首次容器探针失败在只读任务计数查询：探针使用了不存在的 `source_id` 列，上游实际列为 `source_key`。已按固定源码表结构修复，重新运行整套容器检查通过；上传实现和镜像未改动，未放宽断言。初始失败保留在 `.local/remote-ingest-container-before.log`，诊断只在忽略的私有文件中保存。
+
+NAS 容器验证和升级回滚尚待本轮执行，不将本地容器结果当作 NAS 证据。
 
 ## 审查与剩余范围
 

@@ -38,7 +38,7 @@ def request(path, credential, method="GET", body=None):
 def job_count(source_id):
     with sqlite3.connect("file:/data/one-memory.sqlite3?mode=ro", uri=True) as db:
         return db.execute(
-            "SELECT COUNT(*) FROM memory_write_jobs WHERE source_id=?", ("cmh:" + source_id,)
+            "SELECT COUNT(*) FROM memory_write_jobs WHERE source_key=?", ("cmh:" + source_id,)
         ).fetchone()[0]
 
 
