@@ -35,10 +35,11 @@ required maxlength="256"><button>登录</button></form></main></html>"""
 
 
 class CloudBoundary:
-    def __init__(self, core, config: HubConfig, internal_token: str) -> None:
+    def __init__(self, core, config: HubConfig, internal_token: str, *, remote_api=None) -> None:
         self.core = core
         self.config = config
         self.internal_token = internal_token
+        self.remote_api = remote_api
         self.sessions = UISessionStore(instance_id=internal_token)
         self.failed_logins: deque[float] = deque(maxlen=20)
 
@@ -70,6 +71,23 @@ class CloudBoundary:
         bearer = scheme.lower() == "bearer" and self._valid_token(supplied)
         cookie = request.cookies.get("cmh_session", "")
         session = self.sessions.valid_session(cookie)
+        if path == "/hub/v1" or path.startswith("/hub/v1/"):
+            if session and not bearer and request.method not in {"GET", "HEAD"}:
+                if origin != self.config.public_origin:
+                    await self._respond(
+                        JSONResponse({"detail": "origin_required"}, status_code=403),
+                        scope,
+                        receive,
+                        send,
+                    )
+                    return
+            if self.remote_api is None:
+                await JSONResponse({"detail": "not_found"}, status_code=404)(scope, receive, send)
+            else:
+                # Trusted ASGI state, never an external header or a Core grant.
+                state = {**scope.get("state", {}), "cmh_admin": bearer or session}
+                await self.remote_api({**scope, "state": state}, receive, send)
+            return
         if path == "/hub/login":
             response = await self._login(request)
             await self._respond(response, scope, receive, send)
