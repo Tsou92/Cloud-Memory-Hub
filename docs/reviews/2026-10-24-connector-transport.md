@@ -22,7 +22,29 @@
 
 首个容器镜像的直接 CLI 验证实际失败：虚拟环境从构建目录复制到 `/opt/cmh/venv` 后，脚本 shebang 仍为 `/workspace/apps/hub/.venv/bin/python`，容器返回 no such file or directory。修复为在构建阶段就安装到最终 `/opt/cmh/venv` 路径，并增加构建时实际 CLI help 检查；最终镜像还要运行完整发送探针，不以构建时检查代替。原失败输出保存于 `.local/connector-transport-cli-image.log`，有问题的 `dev-f209249` 未传输或部署到 NAS。
 
-`make check` 的 19 项工程门禁及格式、静态、文档链接、路径、源码凭证扫描、空白检查通过。日志为忽略目录 `.local/connector-transport-tests.log`、`.local/connector-transport-upstream.log`、`.local/connector-transport-check.log`。容器／NAS 结果在执行后补充。
+`make check` 的 19 项工程门禁及格式、静态、文档链接、路径、源码凭证扫描、空白检查通过。日志为忽略目录 `.local/connector-transport-tests.log`、`.local/connector-transport-upstream.log`、`.local/connector-transport-check.log`。
+
+## Linux amd64 容器证据
+
+修复后的运行源码 `9bbb834` 构建为 `cloud-memory-hub:dev-9bbb834`。完整容器探针通过：禁网模型摘要／实际编码、初始化与认证、模型凭证密文、设备身份，以及真实安装的 CLI send 在重启后重放此前丢失回执的事件。确认本地 accepted 后上游仍只有一个任务；来源撤销后新增待传记录，CLI 返回固定权限错误并保留 queued，服务端队列不增加。再次重启后记录和撤销均保留。
+
+探针实际调用 `/opt/cmh/venv/bin/cloud-memory-connector`，覆盖了最终镜像中的脚本入口与依赖路径，不只是在 Python 中导入发送函数。结果为 `.local/connector-transport-container.log`。模型未激活，不能把接纳状态算作提炼完成。
+
+镜像归档已在 NAS 校验并加载。使用 `DOCKER_HOST=ssh://nas` 运行同一套探针，所有阶段通过，独立随机项目及卷随后清理，结果为 `.local/connector-transport-nas.log`。这里的 CLI 与 HTTP 服务均在 NAS 测试容器中运行，不能据此宣称 Mac 到 NAS 的正式 HTTPS 网络或真实 Agent 已验证。制品信息如下：
+
+| 项目 | 值 |
+| --- | --- |
+| 运行源码／OCI revision | `9bbb834` |
+| 归档字节数 | 261035520 |
+| 归档 SHA-256 | `3643d3917fc8efc6c08d8d8fb46bcb802da72cb53110adb47350d4b37353eaac` |
+| OCI manifest-list | `sha256:2990933b04efdb01053578b702307beee1155bf016daaba430616427d62ec3be` |
+| NAS 加载后的镜像配置摘要 | `sha256:47bf5138d92c83ca762f01f7b28398948c5bff603dcd4d62b0a99eee756b58ab` |
+
+## NAS 实验实例更新
+
+独立项目 `cmh-nas-validation` 升级前停止服务，保存并校验 config／data 的 0600 私有归档。完成 `fd7b5ad → 9bbb834 → fd7b5ad → 9bbb834`；每个阶段健康，管理员凭证和加密密钥摘要、实例 ID、SDK 权威状态、空记忆库及未配置模型状态均一致。未创建设备授权或覆盖权限库。该结果只覆盖空实验实例的版本兼容，不能代替真实内容和治理状态的完整恢复演练。
+
+最终镜像固定为 `cloud-memory-hub:dev-9bbb834`，配置摘要与归档一致，3 GiB／2 CPU、只读根目录及回环端口保持不变。日志为 `.local/connector-transport-nas-upgrade.log`，旧镜像及私有备份保留。没有修改 SSH 或现有 Agent 配置。
 
 ## 待完成范围
 
