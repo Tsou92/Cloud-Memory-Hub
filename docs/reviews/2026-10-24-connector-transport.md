@@ -20,6 +20,8 @@
 
 自审发现私有配置普通 open 可能在 FIFO 上先阻塞、无法走到类型校验。改为非阻塞打开再 fstat，新增 FIFO 拒绝用例通过。源码扫描曾将合成 Basic Auth URL 误报，测试改为运行时生成样例；没有改扫描器或增加豁免。
 
+首个容器镜像的直接 CLI 验证实际失败：虚拟环境从构建目录复制到 `/opt/cmh/venv` 后，脚本 shebang 仍为 `/workspace/apps/hub/.venv/bin/python`，容器返回 no such file or directory。修复为在构建阶段就安装到最终 `/opt/cmh/venv` 路径，并增加构建时实际 CLI help 检查；最终镜像还要运行完整发送探针，不以构建时检查代替。原失败输出保存于 `.local/connector-transport-cli-image.log`，有问题的 `dev-f209249` 未传输或部署到 NAS。
+
 `make check` 的 19 项工程门禁及格式、静态、文档链接、路径、源码凭证扫描、空白检查通过。日志为忽略目录 `.local/connector-transport-tests.log`、`.local/connector-transport-upstream.log`、`.local/connector-transport-check.log`。容器／NAS 结果在执行后补充。
 
 ## 待完成范围
