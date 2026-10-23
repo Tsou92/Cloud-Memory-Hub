@@ -434,6 +434,7 @@ version = "0.1.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
+    { name = "httpx" },
     { name = "one-memory" },
 ]
 
@@ -445,6 +446,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = "==50.0.1" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "one-memory", editable = "../../.local/upstream/hy-memory/memhub/apps/core" },
 ]
 

@@ -269,6 +269,28 @@ class RemoteIngest:
         except AccessError:
             return False
 
+    def source_access(self, credential: str, source_id: str) -> dict:
+        """Current permission receipt, containing no content or other devices' sources."""
+        with self._database() as db:
+            device = self.access._authenticate(db, credential)
+            source = db.execute(
+                "SELECT * FROM cmh_sources WHERE source_id=?", (source_id,)
+            ).fetchone()
+            if source is None or not self._source_allowed(
+                db, device, source_id, source["scope_id"]
+            ):
+                raise AccessError("source_not_allowed", 403)
+            return {
+                "protocol_version": 1,
+                "instance_id": self.access.instance_id,
+                "device_id": device["device_id"],
+                "device_revision": device["revision"],
+                "source_id": source_id,
+                "source_revision": source["revision"],
+                "scope_id": source["scope_id"],
+                "allowed": True,
+            }
+
     def _queue(self):
         try:
             return self.queue_provider()
