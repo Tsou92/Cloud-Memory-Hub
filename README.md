@@ -8,6 +8,8 @@
 
 已增加版本化的设备身份接口：独立凭证、项目授权、轮换、撤销及握手。它目前只提供身份能力，不代表记忆写入、检索或客户端同步已经接通；接口和兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)。
 
+本地连接组件已提供凭证过滤、持久投递队列及隔离 CLI，尚未接通自动采集与远程发送；使用与限制见 [连接组件说明](docs/local-connector.md)。
+
 项目默认提供跨 Agent 的任务接续，同时保留原始记录追溯能力。首批目标入口为 Claude Code CLI、Codex 桌面版、OpenCode 终端、Hermes 终端、Cherry Studio 客户端和 Open Design 客户端；通过通用接口持续扩展其他 Agent。
 
 ## 开发原则

@@ -11,6 +11,7 @@ dependencies = ["one-memory", "cryptography==50.0.1"]
 
 [project.scripts]
 cloud-memory-hub = "cloud_memory_hub.__main__:main"
+cloud-memory-connector = "cloud_memory_hub.connector:main"
 
 [dependency-groups]
 dev = ["pytest==9.1.1"]
