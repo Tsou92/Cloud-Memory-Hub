@@ -45,6 +45,13 @@ def smoke() -> None:
         raise RuntimeError("Disposable container did not become healthy")
 
     try:
+        print(
+            run(
+                ["run", "--rm", "-T", "verify-model"],
+                input=(ROOT / "scripts/probe_embeddings.py").read_text(),
+            ),
+            end="",
+        )
         run(["run", "--rm", "setup"])
         run(["up", "-d", "--no-build", "hub"])
         ready()

@@ -1,0 +1,13 @@
+diff --git a/memhub/apps/core/src/one_memory/api.py b/memhub/apps/core/src/one_memory/api.py
+index 991eec0..69f4a69 100644
+--- a/memhub/apps/core/src/one_memory/api.py
++++ b/memhub/apps/core/src/one_memory/api.py
+@@ -3144,7 +3144,7 @@ def create_app(
+             store = SdkDataPlaneMigrationStore(_evidence_store(app).database_path)
+         marker = store.cutover()
+         return MemoryAuthorityResponse(
+-            authority="sdk" if marker is not None else "legacy",
++            authority="sdk" if store.authority() is MemoryAuthority.SDK else "legacy",
+             migration_id=marker.migration_id if marker is not None else None,
+         )
+ 
