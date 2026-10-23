@@ -50,7 +50,11 @@ def test_device_lifecycle_through_real_core_boundary(tmp_path):
                 session = await client.get("/hub/v1/session", headers=credentials)
                 assert session.status_code == 200
                 assert session.json()["device"]["grants"] == []
-                assert session.json()["features"] == ["device_identity"]
+                assert session.json()["features"] == [
+                    "device_identity",
+                    "source_registration",
+                    "event_upload",
+                ]
                 assert token not in session.text
                 instance_id = session.json()["instance_id"]
                 for path in ["/api/v1/model-profiles", "/api/v2/memory-library"]:

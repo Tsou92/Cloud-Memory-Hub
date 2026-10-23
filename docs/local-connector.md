@@ -1,6 +1,6 @@
 # 本地连接组件的隔离验证
 
-当前实现本地过滤和持久投递队列，还不发送网络请求，也不自动查找、安装或修改任何 Agent。源注册、自动采集、服务器接纳、离线召回缓存和删除协调仍待接通。本阶段请使用合成记录，不导入真实历史。
+当前实现本地过滤和持久投递队列，CLI 还不发送网络请求，也不自动查找、安装或修改任何 Agent。服务端已提供[来源注册和持久接纳接口](remote-ingest.md)；自动采集、网络发送器、离线召回缓存和删除协调仍待接通。本阶段请使用合成记录，不导入真实历史。
 
 协议与限制见 [ADR-0005](adr/0005-local-filtered-delivery.md)。组件复用项目中固定版本的上游文本脱敏器，并补充 Cookie、中文凭证标签、嵌套结构和 URL 规则。已知凭证可通过私有 JSON 文件在本机内存中加入过滤；不能据此宣称任意格式／多模态秘密均已识别。
 
@@ -35,7 +35,7 @@ uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub \
 | `revision` | 正整数；记录修改使用新事件 ID 和新的 revision |
 | `kind` | `conversation_turn` 或 `operation` |
 | `occurred_at` | 可选带时区时间 |
-| `content` | 非空 JSON 对象；对话正文、工具结果和所有自由元数据都放在这里 |
+| `content` | 对话为 `{messages:[{role,text,metadata?}],metadata?}`，操作为 `{text,metadata?}`；正文、工具结果和所有自由元数据都放在这里，服务端严格验证对应结构 |
 
 顶层未知字段拒绝。成功仅返回事件 ID、`queued`／`accepted` 状态和可用的接纳回执 ID，不打印正文。`queued` 表示本机提交成功；`accepted` 表示匹配的服务端持久接纳回执已保存，仍不等于记忆已处理或另一台设备可检索。本批 CLI 没有网络发送或人工确认成功的命令。
 

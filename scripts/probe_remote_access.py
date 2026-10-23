@@ -45,7 +45,7 @@ def probe(phase: str) -> None:
         original = issued["credential"]
         status, session = request("/hub/v1/session", original)
         assert status == 200 and session["device"]["grants"] == []
-        assert session["features"] == ["device_identity"]
+        assert session["features"] == ["device_identity", "source_registration", "event_upload"]
         assert request("/hub/v1/devices", original)[0] == 403
         assert request("/api/v1/model-profiles", original)[0] == 401
         grants = [{"scope_id": project["project_id"], "permissions": ["memory:read"]}]
@@ -93,7 +93,11 @@ def probe(phase: str) -> None:
             )
         assert request("/hub/v1/session", credential)[0] == 401
         status, listing = request("/hub/v1/devices", admin)
-        assert status == 200 and listing["devices"][0]["status"] == "revoked"
+        assert status == 200
+        device = next(
+            item for item in listing["devices"] if item["device_id"] == state["device_id"]
+        )
+        assert device["status"] == "revoked"
         assert "credential" not in json.dumps(listing)
     print(f"Device identity, scope receipts and revocation checks passed ({phase})")
 

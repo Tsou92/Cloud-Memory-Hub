@@ -24,6 +24,11 @@
       "path": "patches/0004-show-sdk-library-on-first-open.patch",
       "scope": "runtime_compatibility_with_regression_tests",
       "digest": "sha256:7201d14d74a8688d7aee3d11181d565f817054a3afd7b5ed7e65b14d57902332"
+    },
+    {
+      "path": "patches/0005-external-source-write-authorizer.patch",
+      "scope": "remote_source_authorization_with_hub_regression_tests",
+      "digest": "sha256:0e9797ec5b970802f1fabfe32b1458e2fb65cfb53cc969b64cd9cc9f1b668786"
     }
   ]
 }
