@@ -17,6 +17,8 @@ docker compose ps
 
 Apple Silicon 开发主机可为 Compose 命令设置 `DOCKER_DEFAULT_PLATFORM=linux/amd64`。首次初始化创建管理员凭证与加密密钥；重复初始化会拒绝覆盖，不作为重启步骤。
 
+Compose 支持用 `CMH_IMAGE` 指定本次已验证的镜像标签，默认仍为 `cloud-memory-hub:development`。NAS 验证使用独立的提交标签，并设置独立 Compose 项目名；不得复用已有服务的数据卷。构建时传入 `--build-arg CMH_REVISION=<提交编号>`，可在镜像标签中追踪来源。`CMH_IMAGE` 同时作用于初始化、服务和禁网模型检查，避免混用版本。
+
 打开 `http://localhost:8800`，输入初始化产生的管理员凭证。可在自己的终端查看：
 
 ```sh
@@ -40,6 +42,8 @@ docker compose exec hub cat /config/admin-token
 
 当前 Compose 只发布本机回环端口。远程入口必须配置明确的 HTTPS Origin（`CMH_PUBLIC_ORIGIN`）并经过认证边界；还未提供或验证生产反向代理配置。Tailscale、绿联转发和节点小宝均待实际验证。容器地址不能作为 NAS 外部可达地址使用。
 
+SSH 能连接不等于可以操作 Docker。部署前在同一账户执行 `docker info` 和 `docker compose version`；如果 Docker socket 返回权限错误，应先由 NAS 管理员配置账户权限。不能通过放宽 socket 的全局访问权限来绕过。当前核对结果见 [NAS 运行记录](reviews/2026-10-23-nas-preflight.md)。
+
 ## 可复现验证
 
 ```sh
@@ -54,6 +58,8 @@ make check-container
 
 `check-web` 使用固定 Node 镜像构建网页并测试首启、SDK 记忆库／历史和原有记忆空间。它针对本次兼容补丁，不等于整个网页测试集或完整产品验收。
 
-容器检查创建随机命名的独立 Compose 项目和临时卷，先在禁网、只读容器中验证模型摘要及真实向量生成，再验证初始化、身份／跨源拒绝、网页登录会话、模型配置密文存储、重启后的配置和密钥可读性，随后仅清理该次测试资源。它不访问用户模型、真实 Agent、NAS 或生产卷。
+容器检查在当前 Docker 端点创建随机命名的独立 Compose 项目和临时卷，先在禁网、只读容器中验证模型摘要及真实向量生成，再验证初始化、身份／跨源拒绝、网页登录会话、模型配置密文存储、重启后的配置和密钥可读性，随后仅清理该次测试资源。它不访问用户模型、真实 Agent 或生产卷。
+
+远程验证可在目标 NAS 已加载镜像后，设置 `DOCKER_HOST=ssh://nas` 和相应的 `CMH_IMAGE`，直接运行 `uv run --locked python -m scripts.smoke_container`，复用同一测试。先用相同环境执行 `docker info` 确认目标端点；必须具备 NAS Docker 权限，并将远程结果与本地结果分开记录。此处的 `nas` 是开发主机 SSH 配置中的连接别名。
 
 认证测试不代表浏览器全流程、六入口、跨设备同步或外部模型已经通过；以验证记录的证据范围为准。
