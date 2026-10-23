@@ -20,7 +20,30 @@
 
 首次容器探针失败在只读任务计数查询：探针使用了不存在的 `source_id` 列，上游实际列为 `source_key`。已按固定源码表结构修复，重新运行整套容器检查通过；上传实现和镜像未改动，未放宽断言。初始失败保留在 `.local/remote-ingest-container-before.log`，诊断只在忽略的私有文件中保存。
 
-NAS 容器验证和升级回滚尚待本轮执行，不将本地容器结果当作 NAS 证据。
+## NAS 独立容器证据
+
+同一镜像归档通过 SSH 传输并在 NAS 校验 SHA-256 后加载。已用 `DOCKER_HOST=ssh://nas` 运行同一组探针，禁网编码、认证／密文配置、设备身份、过滤后 HTTP 接纳、重启补传和来源撤销的全部阶段通过；独立随机项目及卷随后清理。结果为 `.local/remote-ingest-nas.log`。
+
+这是连接库与 NAS 容器 HTTP／Core 队列的真实组合，HTTP 请求在 NAS 的测试容器内执行；不宣称已验证 Mac 到 NAS 的正式访问入口、后台自动发送或两个真实 Agent 的接续。模型没有激活，接纳任务处于 pending。
+
+| 制品 | 核对值 |
+| --- | --- |
+| 运行源码／OCI revision | `fd7b5ad` |
+| 镜像 | `cloud-memory-hub:dev-fd7b5ad`，Linux amd64 |
+| 归档字节数 | 259788288 |
+| 归档 SHA-256 | `ef9f3847c2ef8e054c93117929c3c413aaadc747462165106dbd95c1d944ca55` |
+| OCI manifest-list | `sha256:6311e085112c52a509ff4dfce964bdd82025004f23d8cce6e1e99504e9b4f1f8` |
+| NAS 加载后的镜像配置摘要 | `sha256:a3151b617d9dc9c1156822d18344564bf8b5406567aa0d3b93440e258bb662ba` |
+
+探针列名修复位于后续提交 `27306f8`，探针通过 stdin 送入容器，不在发行镜像中；应用源码仍准确对应 `fd7b5ad`。
+
+## NAS 实验实例升级与回滚
+
+对独立项目 `cmh-nas-validation` 执行 `4ce3724 → fd7b5ad → 4ce3724 → fd7b5ad`。升级前停止该实例，保存 config／data 的私有 0600 归档并验证可读取；原镜像和数据卷保留。回滚验证只切换镜像，不用旧备份覆盖当前授权库。
+
+各阶段均确认健康；管理员凭证、加密密钥摘要、SDK authority、空记忆库和未配置模型状态一致。原 instance ID 保持一致，升级不自动授权设备。附加接纳 schema 为 v1，旧镜像仍可打开原设备权限库，再升级后来源／回执表继续存在。此处是空实例结构兼容性验证，不是有真实内容时的完整业务恢复演练。
+
+最终 `.env` 固定 `cloud-memory-hub:dev-fd7b5ad`，容器镜像配置摘要与制品核对一致，状态 healthy；3 GiB／2 CPU、只读根目录及原回环端口不变。日志为 `.local/remote-ingest-nas-upgrade.log`，私有备份保留在 NAS 本批制品目录。没有修改 SSH、激活模型或接入真实 Agent。
 
 ## 审查与剩余范围
 
