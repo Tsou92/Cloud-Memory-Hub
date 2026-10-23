@@ -45,7 +45,12 @@ def probe(phase: str) -> None:
         original = issued["credential"]
         status, session = request("/hub/v1/session", original)
         assert status == 200 and session["device"]["grants"] == []
-        assert session["features"] == ["device_identity", "source_registration", "event_upload"]
+        assert session["features"] == [
+            "device_identity",
+            "source_registration",
+            "event_upload",
+            "source_preflight",
+        ]
         assert request("/hub/v1/devices", original)[0] == 403
         assert request("/api/v1/model-profiles", original)[0] == 401
         grants = [{"scope_id": project["project_id"], "permissions": ["memory:read"]}]

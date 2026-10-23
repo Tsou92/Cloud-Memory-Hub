@@ -54,6 +54,7 @@ def test_device_lifecycle_through_real_core_boundary(tmp_path):
                     "device_identity",
                     "source_registration",
                     "event_upload",
+                    "source_preflight",
                 ]
                 assert token not in session.text
                 instance_id = session.json()["instance_id"]

@@ -9,6 +9,7 @@
 | `/hub/v1/sources` | 管理员 GET | 返回 `{sources:[...]}`；不含设备凭证 |
 | `/hub/v1/sources` | 管理员 POST | `{display_name,device_id,scope_id,adapter_id}`；201 返回服务器生成的 source_id、输入字段、revision=1、status=active |
 | `/hub/v1/sources/{source_id}/revoke` | 管理员 POST | `{expected_revision}`；200 返回新 revision 和 revoked 状态 |
+| `/hub/v1/sources/{source_id}/access` | 设备 GET | 返回当前 protocol_version、instance_id、device_id／device_revision、source_id／source_revision、scope_id、allowed=true；不匹配／无授权统一 403 |
 
 `device_id` 必须是已签发的活动设备，`scope_id` 必须是已创建的项目 UUID 或 `global`。注册来源不授予权限；设备还需该 scope 的 `events:write`。`adapter_id` 是 1–64 个小写字母、数字、点、下划线或连字符，首字符为字母／数字；它是扩展标识，不是固定的 Agent 品牌列表。
 
@@ -48,6 +49,6 @@
 
 ## 当前边界
 
-握手 features 公布 device_identity、source_registration、event_upload；并未公布检索或同步能力。上传端直接使用已有 Core 持久队列，不另设模型调度；服务端过滤只是复核，不能补救已上传的秘密。
+握手 features 公布 device_identity、source_registration、event_upload、source_preflight；并未公布检索或同步能力。来源访问回执使用当前设备身份、来源归属、活动状态和 events:write 授权，不返回其他设备的来源信息。它供客户端在正文出站前预检；接纳事务仍复核权限，预检不能撤回已发出的网络请求。
 
-现有 CLI 尚无自动配对／发送命令。远程读取、客户端自动采集和注入、跨源历史去重、忘记与删除传播、完整备份及防复活仍需完成。原始字段随 SDK 输入保存来源资料；后续召回必须将其当作历史数据，不能当作系统指令或操作授权。
+连接 CLI 已提供 send／watch，见 [配置说明](local-connector.md)，自动配对界面仍待完成。上传端直接使用已有 Core 持久队列，不另设模型调度；服务端过滤只是复核，不能补救已上传的秘密。远程读取、客户端自动采集和注入、跨源历史去重、忘记与删除传播、完整备份及防复活仍需完成。原始字段随 SDK 输入保存来源资料；后续召回必须将其当作历史数据，不能当作系统指令或操作授权。

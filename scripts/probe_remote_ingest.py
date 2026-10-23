@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from urllib.error import HTTPError
@@ -12,7 +13,25 @@ from cloud_memory_hub.local_outbox import LocalOutbox
 
 BASE = "http://localhost:8800"
 STATE = Path("/data/remote-ingest-smoke.json")
-OUTBOX = Path("/data/ingest-connector/queue.sqlite3")
+OUTBOX = Path("/data/ingest-connector/outbox.sqlite3")
+CONNECTION = Path("/data/ingest-connector/connection.json")
+
+
+def send_from_cli():
+    result = subprocess.run(
+        [
+            "/opt/cmh/venv/bin/cloud-memory-connector",
+            "send",
+            "--state-dir",
+            str(OUTBOX.parent),
+            "--connection-file",
+            str(CONNECTION),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result.returncode, json.loads(result.stdout if result.returncode == 0 else result.stderr)
 
 
 def request(path, credential, method="GET", body=None):
@@ -127,6 +146,18 @@ def probe(phase):
         }
         STATE.touch(mode=0o600, exist_ok=False)
         STATE.write_text(json.dumps(state))
+        CONNECTION.touch(mode=0o600, exist_ok=False)
+        CONNECTION.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "origin": BASE,
+                    "instance_id": state["instance_id"],
+                    "device_id": device_id,
+                    "credential": credential,
+                }
+            )
+        )
         # Deliberately lose the first acknowledgement; resend after process restart.
         assert outbox.status()["queued"] == 1
     else:
@@ -138,22 +169,9 @@ def probe(phase):
             outgoing = outbox.pending()[0]
             status, persisted = request(status_path, credential)
             assert status == 200 and persisted == receipt
-            status, replay = request(
-                "/hub/v1/events", credential, "POST", json.loads(outgoing.payload)
-            )
-            assert status == 202 and replay == receipt
-            outbox.acknowledge(
-                **{
-                    key: receipt[key]
-                    for key in (
-                        "instance_id",
-                        "device_id",
-                        "event_id",
-                        "payload_digest",
-                        "receipt_id",
-                    )
-                }
-            )
+            code, report = send_from_cli()
+            assert code == 0 and report == {"accepted": 1, "queued": 0}
+            assert request(status_path, credential) == (200, receipt)
             assert outbox.status()["accepted"] == 1 and not outbox.pending()
             assert (
                 request(
@@ -168,6 +186,14 @@ def probe(phase):
                 request("/hub/v1/events", credential, "POST", json.loads(outgoing.payload))[0]
                 == 403
             )
+            outbox.enqueue(
+                {**json.loads(outgoing.payload), "event_id": str(uuid4()), "revision": 2}
+            )
+            code, report = send_from_cli()
+            assert code == 2 and report == {
+                "error": "source_permission_required",
+                "retryable": False,
+            }
         assert request(status_path, credential)[0] == 403
         status, listing = request("/hub/v1/sources", admin)
         assert status == 200
@@ -176,6 +202,7 @@ def probe(phase):
         )
         assert source["status"] == "revoked" and source["revision"] == 2
         assert job_count(state["source_id"]) == 1
+        assert outbox.status()["queued"] == 1 and outbox.status()["accepted"] == 1
     print(f"Filtered HTTP intake, durable replay and source revocation passed ({phase})")
 
 

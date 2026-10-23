@@ -109,7 +109,12 @@ def create_remote_api(store: DeviceAccessStore, ingest: RemoteIngest) -> Starlet
                 "protocol_version": 1,
                 "instance_id": store.instance_id,
                 "device": device,
-                "features": ["device_identity", "source_registration", "event_upload"],
+                "features": [
+                    "device_identity",
+                    "source_registration",
+                    "event_upload",
+                    "source_preflight",
+                ],
             }
         )
 
@@ -126,6 +131,15 @@ def create_remote_api(store: DeviceAccessStore, ingest: RemoteIngest) -> Starlet
         return response(
             await run_in_threadpool(
                 ingest.revoke_source, str(request.path_params["source_id"]), body
+            )
+        )
+
+    async def source_access(request: Request):
+        return response(
+            await run_in_threadpool(
+                ingest.source_access,
+                device_credential(request),
+                str(request.path_params["source_id"]),
             )
         )
 
@@ -163,6 +177,7 @@ def create_remote_api(store: DeviceAccessStore, ingest: RemoteIngest) -> Starlet
             Route("/hub/v1/session", session, methods=["GET"]),
             Route("/hub/v1/sources", sources, methods=["GET", "POST"]),
             Route("/hub/v1/sources/{source_id:uuid}/revoke", revoke_source, methods=["POST"]),
+            Route("/hub/v1/sources/{source_id:uuid}/access", source_access, methods=["GET"]),
             Route("/hub/v1/events", events, methods=["POST"]),
             Route("/hub/v1/events/{event_id:uuid}", event_status, methods=["GET"]),
         ],
