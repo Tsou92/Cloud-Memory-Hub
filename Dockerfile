@@ -15,10 +15,22 @@ RUN pnpm --filter @one-memory/web... install --frozen-lockfile --ignore-scripts
 ENV VITE_CORE_URL=/
 RUN pnpm --filter @one-memory/web... -r build
 
+FROM web AS web-tests
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
+    src/MemorySpace.sdk-start.test.tsx src/MemorySpace.test.tsx \
+    src/MemorySpace.library.test.tsx src/SdkMemoryLibrary.test.tsx src/SdkRawHistory.test.tsx
+
 FROM source AS python-build
 RUN python -m pip install --no-cache-dir uv==0.12.5
+RUN python .local/upstream/hy-memory/memhub/scripts/fetch_embedding_model.py \
+    --target /embedding-assets
 COPY apps/hub ./apps/hub
 RUN uv sync --locked --no-dev --no-editable --directory apps/hub
+# Check the installed package, not a source directory absent from the final image.
+RUN apps/hub/.venv/bin/python -c \
+    "import shutil; from one_memory.embedding_assets import resolve_asset_dir, verify_assets; shutil.copytree('/embedding-assets', resolve_asset_dir(), dirs_exist_ok=True); verify_assets()"
 
 FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 ca-certificates \

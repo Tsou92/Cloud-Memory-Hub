@@ -1,29 +1,29 @@
 {
   "schema_version": 1,
   "repository": "https://github.com/Tencent-Hunyuan/Hy-Memory",
-  "reviewed_commit": "0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766",
-  "reviewed_on": "2026-10-21",
+  "reviewed_commit": "b7d9f0e0f417eae30b192882f848b432484c20a6",
+  "reviewed_on": "2026-10-22",
   "root_sdk_source_version": "2.0.5.dev3",
   "memhub_version": "1.0.4",
-  "memhub_pinned_sdk_version": "2.0.4",
+  "memhub_pinned_sdk_version": "2.0.5.dev3",
   "license": "Apache-2.0",
   "integration_status": "isolated_baseline_in_progress",
   "copied_business_code": false,
   "notes": [
-    "Source main and the SDK pinned by MemHub differ; do not mix them implicitly.",
+    "SDK owns the memory data plane; Core owns management and the durable queue.",
     "Reuse code and corresponding tests before creating replacements.",
     "Record introduced paths, license notices and local patches when integration begins."
   ],
   "patches": [
     {
-      "path": "patches/0001-align-live-capture-test-double.patch",
-      "scope": "test_only",
-      "digest": "sha256:f0c813fc357784d422e63afbfa1aef6615440d39855e38f6c18463583886e8a3"
+      "path": "patches/0003-report-fresh-sdk-authority.patch",
+      "scope": "runtime_compatibility",
+      "digest": "sha256:4f80d575af1671200420500647d4c57a0b5faf7c1f527df5a723bd7201c7002c"
     },
     {
-      "path": "patches/0002-align-retired-permission-tests.patch",
-      "scope": "test_only",
-      "digest": "sha256:e549e7a502ae736e7001f0ef41025293ff7650958de3f0c4e702d0c631fe8d71"
+      "path": "patches/0004-show-sdk-library-on-first-open.patch",
+      "scope": "runtime_compatibility_with_regression_tests",
+      "digest": "sha256:7201d14d74a8688d7aee3d11181d565f817054a3afd7b5ed7e65b14d57902332"
     }
   ]
 }

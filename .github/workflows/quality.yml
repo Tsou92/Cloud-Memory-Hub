@@ -48,11 +48,9 @@ jobs:
         run: python -m pip install uv==0.12.5
       - name: Check upstream provenance and Hub integration
         run: make check-runtime
-      - name: Run reused authentication, capture, search and restore regressions
-        working-directory: .local/upstream/hy-memory/memhub
-        run: >-
-          uv run --no-project -- bash scripts/run-tests-isolated.sh core
-          tests/test_auth.py tests/test_managed_restore.py tests/test_live_capture.py
-          tests/test_memory_write_registry.py tests/test_context_search.py -q
-      - name: Build Linux amd64 image and verify restart persistence
+      - name: Run upstream Core PR regressions with verified model assets
+        run: make check-upstream
+      - name: Verify reused web components and fresh SDK startup
+        run: make check-web
+      - name: Build Linux amd64 image, verify offline model and restart persistence
         run: make check-container

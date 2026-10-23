@@ -1,0 +1,240 @@
+diff --git a/memhub/apps/web/src/MemorySpace.sdk-start.test.tsx b/memhub/apps/web/src/MemorySpace.sdk-start.test.tsx
+new file mode 100644
+index 0000000..54f088a
+--- /dev/null
++++ b/memhub/apps/web/src/MemorySpace.sdk-start.test.tsx
+@@ -0,0 +1,64 @@
++// @vitest-environment jsdom
++import {
++  cleanup,
++  render,
++  screen,
++  waitFor,
++  within,
++} from "@testing-library/react";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { MemorySpace } from "./MemorySpace";
++
++const api = vi.hoisted(() => ({ sdk: vi.fn(), legacy: vi.fn() }));
++vi.mock("./api", async (importOriginal) => ({
++  ...(await importOriginal<typeof import("./api")>()),
++  getMemoryAuthority: async () => ({ authority: "sdk", migration_id: null }),
++  getSdkMemoryLibrary: api.sdk,
++  getMemoryLibrary: api.legacy,
++  getMemories: api.legacy,
++  getMemoryGraph: api.legacy,
++  getMemoryProcessing: async () => null,
++  getModelProfiles: async () => [],
++}));
++vi.mock("./GraphWidthPrompt", () => ({ GraphWidthPrompt: () => null }));
++vi.mock("./MemoryNoteComposer", () => ({ MemoryNoteComposer: () => null }));
++
++afterEach(cleanup);
++beforeEach(() => {
++  vi.clearAllMocks();
++  api.sdk.mockResolvedValue({ memories: [], total: 0, offset: 0, limit: 100 });
++});
++
++it("shows an empty fresh SDK library in the default simplified view", async () => {
++  render(<MemorySpace simplified />);
++  const library = await screen.findByRole("region", { name: "SDK 记忆库" });
++  await waitFor(() => expect(within(library).queryByRole("status")).toBeNull());
++  expect(within(library).getByText("共 0 条")).toBeTruthy();
++  expect(screen.getByText("查看已保存的记忆")).toBeTruthy();
++  expect(screen.getByRole("tab", { name: "问记忆" })).toBeTruthy();
++  expect(screen.getByRole("tab", { name: "历史对话" })).toBeTruthy();
++  expect(api.legacy).not.toHaveBeenCalled();
++});
++
++it("shows stored SDK content without consulting the retired library", async () => {
++  api.sdk.mockResolvedValue({
++    memories: [{ memory_id: "m1", content: "用中文回复", status: "active" }],
++    total: 1,
++    offset: 0,
++    limit: 100,
++  });
++  render(<MemorySpace simplified />);
++  expect(
++    await screen.findByRole("button", { name: "用中文回复" }),
++  ).toBeTruthy();
++  expect(api.legacy).not.toHaveBeenCalled();
++});
++
++it("shows a failed SDK read instead of leaving the legacy loading view", async () => {
++  api.sdk.mockRejectedValue(new Error("synthetic failure"));
++  render(<MemorySpace simplified />);
++  expect((await screen.findByRole("alert")).textContent).toContain(
++    "记忆库读取失败",
++  );
++  expect(api.legacy).not.toHaveBeenCalled();
++});
+diff --git a/memhub/apps/web/src/MemorySpace.tsx b/memhub/apps/web/src/MemorySpace.tsx
+index 9406d62..9499e3e 100644
+--- a/memhub/apps/web/src/MemorySpace.tsx
++++ b/memhub/apps/web/src/MemorySpace.tsx
+@@ -150,11 +150,16 @@ export function MemorySpace({
+     "unknown" | "legacy" | "sdk"
+   >("unknown");
+   const [managementOpen, setManagementOpen] = useState(false);
+-  const displayedMode = simplified
+-    ? managementOpen
++  const sdkSimplified = simplified && memoryAuthority === "sdk";
++  const displayedMode = sdkSimplified
++    ? mode === "map"
+       ? "library"
+-      : "map"
+-    : mode;
++      : mode
++    : simplified
++      ? managementOpen
++        ? "library"
++        : "map"
++      : mode;
+   useEffect(() => {
+     if ((!active && !preload) || typeof getMemoryAuthority !== "function")
+       return;
+@@ -1411,17 +1416,19 @@ export function MemorySpace({
+         <div>
+           <h1 id="memory-title">{simplified ? "记忆" : "记忆空间"}</h1>
+           <span className="memory-loaded-count">
+-            {simplified && !management
+-              ? mapLibrary.failed
+-                ? "记忆读取失败"
+-                : mapLibrary.stale
+-                  ? "正在导入历史会话，记忆将陆续出现"
+-                  : mapLibrary.page
+-                    ? `已沉淀 ${mapLibrary.page.total} 条${settledFilterLabel ? `（${settledFilterLabel}）` : ""} · 当前展示 ${mapLibrary.page.items.length} 条`
+-                    : "正在读取…"
+-              : loaded
+-                ? `已加载 ${memories.filter((m) => m.status !== "deleted").length} 条记忆`
+-                : "正在读取…"}
++            {memoryAuthority === "sdk"
++              ? "查看已保存的记忆"
++              : simplified && !management
++                ? mapLibrary.failed
++                  ? "记忆读取失败"
++                  : mapLibrary.stale
++                    ? "正在导入历史会话，记忆将陆续出现"
++                    : mapLibrary.page
++                      ? `已沉淀 ${mapLibrary.page.total} 条${settledFilterLabel ? `（${settledFilterLabel}）` : ""} · 当前展示 ${mapLibrary.page.items.length} 条`
++                      : "正在读取…"
++                : loaded
++                  ? `已加载 ${memories.filter((m) => m.status !== "deleted").length} 条记忆`
++                  : "正在读取…"}
+           </span>
+         </div>
+         <MemoryNoteComposer
+@@ -1436,7 +1443,7 @@ export function MemorySpace({
+           }}
+           onConfigureModel={onConfigureModel}
+         />
+-        {!simplified && (
++        {(!simplified || sdkSimplified) && (
+           <div
+             className="memory-mode-tabs"
+             role="tablist"
+@@ -1445,7 +1452,9 @@ export function MemorySpace({
+               // A `role="tablist"` is expected to move selection with the arrow
+               // keys (WAI-ARIA tabs pattern). Without this the four tabs were
+               // reachable by Tab but could only be changed with the mouse.
+-              const order = ["map", "library", "ask", "history"] as const;
++              const order: readonly MemoryMode[] = sdkSimplified
++                ? ["library", "ask", "history"]
++                : ["map", "library", "ask", "history"];
+               const current = order.indexOf(displayedMode);
+               if (current < 0) return;
+               const next =
+@@ -1477,29 +1486,31 @@ export function MemorySpace({
+                 ["ask", "问记忆", MessageCircle],
+                 ["history", "历史对话", TextSearch],
+               ] as const
+-            ).map(([value, label, Icon]) => (
+-              <button
+-                key={value}
+-                type="button"
+-                role="tab"
+-                data-tour-id={`memory-${value}-tab`}
+-                ref={(node) => {
+-                  modeTabs.current[value] = node;
+-                }}
+-                // Roving tabindex: exactly one tab (the selected one) is in the
+-                // Tab order, as the tabs pattern requires.
+-                tabIndex={displayedMode === value ? 0 : -1}
+-                aria-controls={`memory-mode-panel-${value}`}
+-                aria-selected={displayedMode === value}
+-                onClick={() => {
+-                  setMode(value);
+-                  setAnswer(null);
+-                }}
+-              >
+-                <Icon size={16} aria-hidden="true" />
+-                {label}
+-              </button>
+-            ))}
++            )
++              .filter(([value]) => !sdkSimplified || value !== "map")
++              .map(([value, label, Icon]) => (
++                <button
++                  key={value}
++                  type="button"
++                  role="tab"
++                  data-tour-id={`memory-${value}-tab`}
++                  ref={(node) => {
++                    modeTabs.current[value] = node;
++                  }}
++                  // Roving tabindex: exactly one tab (the selected one) is in the
++                  // Tab order, as the tabs pattern requires.
++                  tabIndex={displayedMode === value ? 0 : -1}
++                  aria-controls={`memory-mode-panel-${value}`}
++                  aria-selected={displayedMode === value}
++                  onClick={() => {
++                    setMode(value);
++                    setAnswer(null);
++                  }}
++                >
++                  <Icon size={16} aria-hidden="true" />
++                  {label}
++                </button>
++              ))}
+           </div>
+         )}
+       </header>
+@@ -1615,13 +1626,15 @@ export function MemorySpace({
+         </p>
+       ) : null}
+ 
+-      {!simplified && (
++      {(!simplified || sdkSimplified) && (
+         <div
+           id="memory-mode-panel-history"
+           hidden={displayedMode !== "history"}
+         >
+           {memoryAuthority === "sdk" ? (
+-            <SdkRawHistory />
++            active && displayedMode === "history" ? (
++              <SdkRawHistory />
++            ) : null
+           ) : memoryAuthority === "legacy" ? (
+             <ConversationSearch
+               onOpenMemory={(memoryId) => {
+@@ -1638,7 +1651,10 @@ export function MemorySpace({
+       <form
+         className="memory-query-bar"
+         data-tour-id="memory-query-bar"
+-        hidden={displayedMode !== "ask" && displayedMode !== "library"}
++        hidden={
++          (displayedMode !== "ask" && displayedMode !== "library") ||
++          (memoryAuthority === "sdk" && displayedMode === "library")
++        }
+         onSubmit={async (event) => {
+           event.preventDefault();
+           if (management) {
+@@ -1868,7 +1884,7 @@ export function MemorySpace({
+       >
+         {memoryAuthority === "sdk" ? (
+           <SdkMemoryLibrary
+-            active={active}
++            active={active && displayedMode === "library"}
+             focusedMemoryId={sdkFocusedMemoryId}
+           />
+         ) : (

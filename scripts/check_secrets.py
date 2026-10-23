@@ -8,8 +8,11 @@ from pathlib import Path
 
 from scripts.check_repository import REPOSITORY, path_problem, source_files
 
-# Public Git commit verified in upstream/manifest.json; exclude this exact value only.
-PUBLIC_UPSTREAM_COMMIT = "0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766"  # pragma: allowlist secret
+# Reviewed public Git commits, including the historical baseline in documentation.
+PUBLIC_UPSTREAM_COMMITS = (
+    "0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766",  # pragma: allowlist secret
+    "b7d9f0e0f417eae30b192882f848b432484c20a6",  # pragma: allowlist secret
+)
 
 
 def parse_findings(output: str) -> list[str]:
@@ -50,7 +53,7 @@ def scan_paths(root: Path, paths: list[Path]) -> list[str]:
                     "--no-verify",
                     "--all-files",
                     "--exclude-secrets",
-                    f"^{PUBLIC_UPSTREAM_COMMIT}$",
+                    "^(?:" + "|".join(PUBLIC_UPSTREAM_COMMITS) + ")$",
                     "--",
                     *[str(root / path) for path in batch],
                 ],

@@ -1,14 +1,14 @@
 # Hy-Memory / MemHub 复用评估
 
-评估日期：2026-10-21。结论来自公开文档和指定源码的阅读，**尚未运行上游测试或完成真实客户端验收**。
+初评日期：2026-10-21。本文件保留当时的源码阅读结论和路径；后续实测见[运行记录](../reviews/2026-10-22-runtime.md)。2026-10-22 已完成[新基线评估](2026-10-22-upstream-candidate.md)并采用 SDK 权威存储版本；旧治理／session 表的描述不能继续当作现有能力。真实客户端验收仍未完成。
 
 ## 1. 基线与结论
 
-审查基线为 [Tencent-Hunyuan/Hy-Memory 固定提交](https://github.com/Tencent-Hunyuan/Hy-Memory/tree/0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766)，机器可读记录见 [manifest](../../upstream/manifest.json)。
+本次初评基线为 [Tencent-Hunyuan/Hy-Memory 历史提交](https://github.com/Tencent-Hunyuan/Hy-Memory/tree/0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766)。当前基线见 [manifest](../../upstream/manifest.json) 和 [ADR-0003](../adr/0003-sdk-authority-baseline.md)。
 
 上游不仅提供记忆 SDK，还包含 MemHub 产品：Core、来源导入、采集和召回桥接、治理、任务队列、网页界面及恢复能力。首选方向是扩展 MemHub，并保留上游测试；只采用 SDK 后重写其他现有模块不符合复用要求。
 
-版本必须分开看：根目录 SDK 源码为 `2.0.5.dev3`，MemHub 为 `1.0.4`，其 Core 固定依赖已发布的 `hy-memory==2.0.4`。不能把主分支新增能力直接当作固定 SDK 的能力。实施前要建立一致、可复现的上游基线。
+初评版本必须分开看：当时根目录 SDK 源码为 `2.0.5.dev3`，MemHub 为 `1.0.4`，其 Core 固定依赖 `hy-memory==2.0.4`。现已通过独立测试切换至 Core／SDK `2.0.5.dev3` 的一致组合；不能将不同提交的源码和依赖混用。
 
 上游采用 [Apache-2.0](https://github.com/Tencent-Hunyuan/Hy-Memory/blob/0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766/LICENSE)。引入源码时保留许可、适用的 NOTICE、第三方声明和修改记录。Cloud Memory Hub 自身许可证尚未选定。
 

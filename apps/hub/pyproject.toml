@@ -16,7 +16,7 @@ cloud-memory-hub = "cloud_memory_hub.__main__:main"
 dev = ["pytest==9.1.1"]
 
 [tool.uv.sources]
-one-memory = { path = "../../.local/upstream/hy-memory/memhub/apps/core" }
+one-memory = { path = "../../.local/upstream/hy-memory/memhub/apps/core", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -62,7 +62,7 @@ constraint-dependencies = [
   "httpx==0.28.1",
   "huggingface-hub==1.29.0",
   "humanfriendly==10.0",
-  "hy-memory==2.0.4",
+  "hy-memory==2.0.5.dev3",
   "idna==3.19",
   "importlib-resources==7.1.0",
   "iniconfig==2.3.0",

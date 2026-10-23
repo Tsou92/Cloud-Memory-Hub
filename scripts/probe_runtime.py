@@ -36,6 +36,12 @@ def probe(phase: str) -> None:
     assert request("/healthz")[0] == 200
     assert request("/api/v1/model-profiles")[0] == 401
     assert request("/api/v1/health", headers=auth)[0] == 200
+    status, body = request("/api/v2/memory-authority", headers=auth)
+    assert status == 200 and json.loads(body) == {"authority": "sdk", "migration_id": None}
+    status, body = request("/api/v2/memory-library", headers=auth)
+    assert status == 200 and json.loads(body)["total"] == 0
+    status, body = request("/api/v2/home-summary", headers=auth)
+    assert status == 200 and json.loads(body)["memory_count"] == 0
     assert request("/api/v1/health", headers={**auth, "Origin": "https://invalid.test"})[0] == 403
     assert request("/internal/test", headers=auth)[0] == 404
     assert request("/api/v1/ui/session", headers=auth)[0] == 404

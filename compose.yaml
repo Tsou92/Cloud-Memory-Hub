@@ -1,5 +1,17 @@
 name: cloud-memory-hub
 services:
+  verify-model:
+    image: cloud-memory-hub:development
+    profiles: ["test"]
+    entrypoint: ["/opt/cmh/venv/bin/python", "-"]
+    network_mode: none
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 3g
+    cpus: 2.0
+
   setup:
     image: cloud-memory-hub:development
     build: .

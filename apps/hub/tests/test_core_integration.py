@@ -29,6 +29,16 @@ def test_real_memhub_core_boots_behind_authenticated_boundary(tmp_path):
                 profiles = await client.get("/api/v1/model-profiles", headers=headers)
                 assert profiles.status_code == 200
                 assert (await client.get("/api/v1/onboarding", headers=headers)).status_code == 200
+                authority = await client.get("/api/v2/memory-authority", headers=headers)
+                assert authority.status_code == 200
+                assert authority.json() == {"authority": "sdk", "migration_id": None}
+                library = await client.get("/api/v2/memory-library", headers=headers)
+                assert library.status_code == 200
+                assert library.json()["memories"] == []
+                assert library.json()["total"] == 0
+                summary = await client.get("/api/v2/home-summary", headers=headers)
+                assert summary.status_code == 200
+                assert summary.json()["memory_count"] == 0
                 assert (config.data_dir / "one-memory.sqlite3").is_file()
 
     asyncio.run(scenario())

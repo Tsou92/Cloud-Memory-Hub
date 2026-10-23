@@ -25,6 +25,7 @@
 | 架构方向与备选方案 | [架构草案](docs/architecture/overview.md) |
 | 决策记录 | [ADR-0001：复用优先](docs/adr/0001-reuse-first.md) |
 | 容器运行与配置 | [实验运行指南](docs/development-runtime.md) · [ADR-0002：NAS 边界](docs/adr/0002-nas-runtime-boundary.md) |
+| 上游升级与数据边界 | [ADR-0003：SDK 权威存储基线](docs/adr/0003-sdk-authority-baseline.md) |
 | 测试与需求追踪 | [验证计划](docs/verification.md) |
 | 分阶段交付 | [里程碑](docs/roadmap.md) |
 | 本轮工程评审状态 | [评审记录](docs/reviews/2026-10-21-foundation.md) |
@@ -39,7 +40,10 @@
 uv sync --locked
 make check
 make check-runtime
-# 需要 Docker；构建 Linux amd64 并在独立临时卷中验证
+make check-upstream
+# 以下两项需要 Docker
+make check-web
+# 构建 Linux amd64 并在独立临时卷中验证
 make check-container
 ```
 

@@ -87,6 +87,6 @@ CI 构建与发布管线在相关制品实现阶段建立，上传 GitHub 前必
 ## 9. 当前与后续检查
 
 当前 `make check` 验证仓库规范、脚本质量与凭证误提交。它不验证上游运行环境、Docker 制品、NAS、真实 Agent 或外部模型。
-`make check-runtime` 验证固定上游和 Hub 集成；`make check-container` 构建 Linux amd64 并验证独立临时容器的认证、配置和重启持久性。运行时工作流还执行 67 项上游定向回归；这不是完整上游回归，已发现的失败项保留在[验证记录](reviews/2026-10-22-runtime.md)。
+`make check-runtime` 验证固定上游和 Hub 集成；`make check-container` 构建 Linux amd64，验证禁网模型编码及独立临时容器的认证、配置和重启持久性。运行时工作流通过 `make check-upstream` 获取校验后的模型文件并执行上游 `core-pr` 测试集；性能与真实外部服务用例不在此集内，跳过项单独列出。实际执行证据和旧基线失败保留在[验证记录](reviews/2026-10-22-runtime.md)，工作流定义不代表远程 CI 已运行。
 
 后续每一阶段在同一工作流中增加必要检查，并在 [里程碑](roadmap.md) 记录退出条件。
