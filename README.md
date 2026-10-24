@@ -36,6 +36,7 @@
 | 运行时验证进展 | [容器与上游验证记录](docs/reviews/2026-10-22-runtime.md) |
 | NAS 与设备身份验证 | [NAS 运行记录](docs/reviews/2026-10-23-nas-preflight.md) · [设备身份记录](docs/reviews/2026-10-23-device-access.md) |
 | 连接与授权读取验证 | [自动补传](docs/reviews/2026-10-24-connector-transport.md) · [记忆与来源读取](docs/reviews/2026-10-24-scoped-retrieval.md) |
+| 实际客户端合同验证 | [Claude Code CLI](docs/reviews/2026-10-24-claude-native.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查
@@ -47,6 +48,8 @@ uv sync --locked
 make check
 make check-runtime
 make check-upstream
+# 可选：本机已安装 Claude CLI 时，使用隔离配置和本地模型替身
+make check-claude
 # 以下两项需要 Docker
 make check-web
 # 构建 Linux amd64 并在独立临时卷中验证
