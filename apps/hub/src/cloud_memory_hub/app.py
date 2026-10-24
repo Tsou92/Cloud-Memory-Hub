@@ -2,7 +2,7 @@
 
 import secrets
 
-from one_memory.api import create_app
+from one_memory.api import _sdk_library_bridge, create_app
 from one_memory.config import Settings
 from pydantic import SecretStr
 
@@ -11,6 +11,7 @@ from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.remote_access import DeviceAccessStore
 from cloud_memory_hub.remote_api import create_remote_api
 from cloud_memory_hub.remote_ingest import RemoteIngest
+from cloud_memory_hub.remote_read import RemoteRead
 from cloud_memory_hub.secret_store import EncryptedSecretStore
 
 
@@ -37,6 +38,8 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         source_write_authorizer=ingest.source_write_authorizer,
     )
     core.state.cmh_ingest = ingest
+    reads = RemoteRead(devices, lambda: _sdk_library_bridge(core))
+    core.state.cmh_reads = reads
     return CloudBoundary(
-        core, config, internal_token, remote_api=create_remote_api(devices, ingest)
+        core, config, internal_token, remote_api=create_remote_api(devices, ingest, reads)
     )

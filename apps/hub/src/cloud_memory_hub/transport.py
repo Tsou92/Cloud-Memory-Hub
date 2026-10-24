@@ -21,6 +21,7 @@ from cloud_memory_hub.events import (
 )
 from cloud_memory_hub.local_outbox import LocalOutbox, OutboxError
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError, parse_json
+from cloud_memory_hub.read_contract import READ_OPERATIONS, GetRequest, ListRequest, ReadReply
 from cloud_memory_hub.remote_access import TOKEN_PATTERN
 
 MAX_RESPONSE_BYTES = 128 * 1024
@@ -245,6 +246,98 @@ async def send_pending(connection: RemoteConnection, outbox: LocalOutbox, *, tra
                 raise TransportError("remote_receipt_not_saved") from None
             sent += 1
     return sent
+
+
+async def read_remote(
+    connection: RemoteConnection,
+    operation: str,
+    raw: object,
+    *,
+    privacy: CredentialFilter | None = None,
+    transport=None,
+) -> ReadReply:
+    """Filter locally, prove scope access before sending a query, then verify the reply."""
+    if operation not in READ_OPERATIONS:
+        raise TransportError("read_operation_invalid")
+    path, model = READ_OPERATIONS[operation]
+    privacy = CredentialFilter(
+        (
+            *(privacy.known_credentials if privacy else ()),
+            connection.credential.get_secret_value(),
+        )
+    )
+    try:
+        request = model.model_validate(raw)
+        request = model.model_validate(privacy.protect(request.model_dump(mode="json")).value)
+    except (ValueError, PrivacyError):
+        raise TransportError("read_request_invalid") from None
+    permission = "history:read" if operation.startswith("history-") else "memory:read"
+    async with create_async_client(
+        trust_env=False,
+        follow_redirects=False,
+        timeout=httpx.Timeout(10, connect=5),
+        transport=transport,
+    ) as client:
+        session = await _request(client, connection, "/hub/v1/session")
+        _identity(session, connection)
+        device, features = session.get("device"), session.get("features")
+        if (
+            not isinstance(device, dict)
+            or device.get("device_id") != connection.device_id
+            or device.get("status") != "active"
+            or type(device.get("revision")) is not int
+            or not isinstance(features, list)
+            or "scoped_reads" not in features
+        ):
+            raise TransportError("remote_session_invalid")
+        grants = device.get("grants")
+        if not isinstance(grants, list) or not any(
+            isinstance(grant, dict)
+            and grant.get("scope_id") == request.scope_id
+            and isinstance(grant.get("permissions"), list)
+            and permission in grant["permissions"]
+            for grant in grants
+        ):
+            raise TransportError("scope_permission_required")
+        value = await _request(client, connection, path, payload=request.model_dump_json())
+    _identity(value, connection)
+    try:
+        result = ReadReply.model_validate(value)
+    except ValueError:
+        raise TransportError("remote_read_invalid") from None
+    if (
+        result.device_id != connection.device_id
+        or result.scope_id != request.scope_id
+        or result.operation != operation
+        or result.device_revision != device["revision"]
+    ):
+        raise TransportError("remote_read_mismatch")
+    expected_kind = "history" if operation.startswith("history-") else "memory"
+    expected_offset = request.content_offset if isinstance(request, GetRequest) else 0
+    if any(
+        item.kind != expected_kind
+        or item.content_offset != expected_offset
+        or (
+            item.next_content_offset is not None
+            and item.next_content_offset != item.content_offset + len(item.content)
+        )
+        or item.next_content_offset == item.content_offset
+        for item in result.items
+    ):
+        raise TransportError("remote_read_mismatch")
+    if isinstance(request, GetRequest):
+        if len(result.items) != 1 or result.items[0].record_id != request.record_id:
+            raise TransportError("remote_read_mismatch")
+    elif len(result.items) > request.limit:
+        raise TransportError("remote_read_mismatch")
+    expected_next = request.offset + request.limit if isinstance(request, ListRequest) else None
+    if result.next_offset is not None and result.next_offset != expected_next:
+        raise TransportError("remote_read_mismatch")
+    # This output is data. Callers must not treat stored history as tool/system instructions.
+    try:
+        return ReadReply.model_validate(privacy.protect(result.model_dump(mode="json")).value)
+    except (ValueError, PrivacyError):
+        raise TransportError("remote_read_invalid") from None
 
 
 async def watch_delivery(attempt, report, *, sleep=asyncio.sleep):
