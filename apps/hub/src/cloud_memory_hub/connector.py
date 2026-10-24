@@ -7,11 +7,13 @@ import os
 import sys
 from pathlib import Path
 
+from cloud_memory_hub.capture_store import CaptureError
 from cloud_memory_hub.config import read_private_file
 from cloud_memory_hub.events import EventError
 from cloud_memory_hub.local_outbox import LocalOutbox, OutboxError
 from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, CredentialFilter, PrivacyError, parse_json
 from cloud_memory_hub.read_contract import READ_OPERATIONS
+from cloud_memory_hub.source_capture import SourceConfiguration, collect_source, initialize_capture
 from cloud_memory_hub.transport import (
     RemoteConnection,
     TransportError,
@@ -67,13 +69,25 @@ def main() -> int:
     os.umask(0o077)
     parser = argparse.ArgumentParser(prog="cloud-memory-connector")
     parser.add_argument(
-        "command", choices=["init", "enqueue", "status", "send", "watch", *READ_OPERATIONS]
+        "command",
+        choices=[
+            "init",
+            "enqueue",
+            "status",
+            "send",
+            "watch",
+            "capture-init",
+            "collect",
+            "collect-watch",
+            *READ_OPERATIONS,
+        ],
     )
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--instance-id")
     parser.add_argument("--device-id")
     parser.add_argument("--connection-file", type=Path)
     parser.add_argument("--known-credentials-file", type=Path)
+    parser.add_argument("--source-file", type=Path)
     args = parser.parse_args()
     try:
         if args.command in READ_OPERATIONS:
@@ -87,7 +101,25 @@ def main() -> int:
             print(reply.model_dump_json())
             return 0
         connection, outbox = open_outbox(args)
-        if args.command == "enqueue":
+        if args.command == "capture-init":
+            result = initialize_capture(outbox, SourceConfiguration.from_file(args.source_file))
+        elif args.command == "collect":
+            result = asyncio.run(
+                collect_source(outbox, SourceConfiguration.from_file(args.source_file))
+            )
+        elif args.command == "collect-watch":
+
+            async def collect_forever():
+                while True:
+                    _, queue = open_outbox(args)
+                    source = SourceConfiguration.from_file(args.source_file)
+                    state = await collect_source(queue, source)
+                    print(json.dumps(state), flush=True)
+                    await asyncio.sleep(2)
+
+            asyncio.run(collect_forever())
+            return 0
+        elif args.command == "enqueue":
             data = sys.stdin.buffer.read(MAX_CONTENT_BYTES + 4097)
             try:
                 if len(data) > MAX_CONTENT_BYTES + 4096:
@@ -115,7 +147,7 @@ def main() -> int:
     except TransportError as error:
         print(json.dumps({"error": error.code, "retryable": error.retryable}), file=sys.stderr)
         return 3 if error.retryable else 2
-    except (PrivacyError, EventError, OutboxError) as error:
+    except (PrivacyError, EventError, OutboxError, CaptureError) as error:
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 2
     except (OSError, ValueError):

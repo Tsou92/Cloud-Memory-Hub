@@ -19,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 
+from cloud_memory_hub.local_outbox import LocalOutbox
+from cloud_memory_hub.source_capture import SourceConfiguration
 from one_memory.imports.access import AuthorizedSourceRoot
 from one_memory.imports.adapters import ScannedEvidence, ScanOptions
 from one_memory.imports.sources.claude_code import create_claude_code_adapter
@@ -222,6 +224,80 @@ class NativeSession:
         self.output.close()
 
 
+class ProductCapture:
+    """Run the installed Python entry point as a separate continuous process."""
+
+    def __init__(self, root, version):
+        self.state = root / "connector"
+        self.instance_id, self.device_id = str(uuid4()), str(uuid4())
+        source = SourceConfiguration(
+            adapter_id="claude-code",
+            source_id=str(uuid4()),
+            scope_id=str(uuid4()),
+            source_root=str(root / "config"),
+            workspace=str(root / "project"),
+            source_version=version,
+        )
+        config_file = root / "source.json"
+        config_file.write_text(source.model_dump_json())
+        self.options = [
+            "--state-dir",
+            str(self.state),
+            "--instance-id",
+            self.instance_id,
+            "--device-id",
+            self.device_id,
+            "--source-file",
+            str(config_file),
+        ]
+        self.command("init")
+        self.command("capture-init")
+        self.stdout = (root / "capture.jsonl").open("w")
+        self.stderr = (root / "capture-stderr.log").open("w")
+        self.process = subprocess.Popen(
+            [sys.executable, "-m", "cloud_memory_hub.connector", "collect-watch", *self.options],
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+
+    def command(self, name):
+        result = subprocess.run(
+            [sys.executable, "-m", "cloud_memory_hub.connector", name, *self.options],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode:
+            raise RuntimeError("product_capture_command_failed")
+        return json.loads(result.stdout)
+
+    def outbox(self):
+        return LocalOutbox(
+            self.state / "outbox.sqlite3", instance_id=self.instance_id, device_id=self.device_id
+        )
+
+    def wait_for_records(self, count):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise RuntimeError("product_capture_watch_failed")
+            if self.outbox().status()["queued"] == count:
+                return
+            time.sleep(0.1)
+        raise RuntimeError("product_capture_records_missing")
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        self.stdout.close()
+        self.stderr.close()
+
+
 async def scan(adapter, cursors):
     records = []
     async for event in adapter.scan(ScanOptions(cursors=cursors, max_messages=100)):
@@ -269,7 +345,7 @@ def probe():
     server = ModelStub("synthetic-" + uuid4().hex)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    session = None
+    session = capture = None
     try:
         adapter = create_claude_code_adapter(
             AuthorizedSourceRoot.grant(
@@ -281,12 +357,22 @@ def probe():
             source_version=version,
         )
         cursors = {}
+        capture = ProductCapture(root, version)
         session = NativeSession(root, executable, server)
         first = session.turn("Synthetic first turn.")
         records = read_new_messages(adapter, cursors, 2)
+        capture.wait_for_records(2)
         (root / "context.txt").write_text("CMH_SYNTHETIC_CONTEXT_V2")
         second = session.turn("Synthetic second turn.")
         records.extend(read_new_messages(adapter, cursors, 2))
+        capture.wait_for_records(4)
+        capture.close()
+        queued = [json.loads(item.payload) for item in capture.outbox().pending()]
+        assert [p["content"]["messages"][0]["text"] for p in queued] == [
+            r.verbatim for r in records
+        ]
+        assert len({p["record_id"] for p in queued}) == 4
+        assert capture.command("collect")["queued"] == 0
         session.finish()
         assert first["session_id"] == second["session_id"], "native_session_changed"
         assert len(server.requests) == 2, "unexpected_model_requests"
@@ -331,7 +417,9 @@ def probe():
             "full_rescan_identity_stable": True,
             "injected_context_recaptured": False,
             "model": "local_test_double",
-            "product_connector_validated": False,
+            "product_capture_validated": True,
+            "product_capture_native_records": len(queued),
+            "product_recall_validated": False,
         }
         (root / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report))
@@ -342,6 +430,8 @@ def probe():
     finally:
         if session is not None:
             session.close()
+        if capture is not None:
+            capture.close()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
