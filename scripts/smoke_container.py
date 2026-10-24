@@ -58,6 +58,27 @@ def smoke() -> None:
         payload = (ROOT / "scripts/probe_runtime.py").read_text()
         access_payload = (ROOT / "scripts/probe_remote_access.py").read_text()
         ingest_payload = (ROOT / "scripts/probe_remote_ingest.py").read_text()
+        read_payload = (ROOT / "scripts/probe_remote_read.py").read_text()
+        run(["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", "prepare"], input=read_payload)
+        # An embedded SDK has one live writer. Seed the disposable fixture with
+        # the service stopped, then reopen it through the real server process.
+        run(["stop", "hub"])
+        run(
+            [
+                "run",
+                "--rm",
+                "-T",
+                "--no-deps",
+                "--entrypoint",
+                "/opt/cmh/venv/bin/python",
+                "hub",
+                "-",
+                "seed",
+            ],
+            input=read_payload,
+        )
+        run(["start", "hub"])
+        ready()
         for phase in ("before", "after", "revoked"):
             if phase != "before":
                 run(["restart", "hub"])
@@ -80,6 +101,13 @@ def smoke() -> None:
                 run(
                     ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase],
                     input=ingest_payload,
+                ),
+                end="",
+            )
+            print(
+                run(
+                    ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase],
+                    input=read_payload,
                 ),
                 end="",
             )

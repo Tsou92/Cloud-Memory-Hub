@@ -10,6 +10,7 @@ from starlette.routing import Route
 
 from cloud_memory_hub.events import EventEnvelope
 from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, PrivacyError, parse_json
+from cloud_memory_hub.read_contract import READ_OPERATIONS
 from cloud_memory_hub.remote_access import (
     AccessError,
     DeviceAccessStore,
@@ -19,6 +20,7 @@ from cloud_memory_hub.remote_access import (
     RevisionRequest,
 )
 from cloud_memory_hub.remote_ingest import RemoteIngest, SourceRegistration
+from cloud_memory_hub.remote_read import RemoteRead
 
 MAX_BODY_BYTES = 64 * 1024
 
@@ -64,7 +66,9 @@ def device_credential(request: Request) -> str:
     return credential
 
 
-def create_remote_api(store: DeviceAccessStore, ingest: RemoteIngest) -> Starlette:
+def create_remote_api(
+    store: DeviceAccessStore, ingest: RemoteIngest, reads: RemoteRead
+) -> Starlette:
     async def projects(request: Request):
         require_admin(request)
         if request.method in {"GET", "HEAD"}:
@@ -114,6 +118,7 @@ def create_remote_api(store: DeviceAccessStore, ingest: RemoteIngest) -> Starlet
                     "source_registration",
                     "event_upload",
                     "source_preflight",
+                    "scoped_reads",
                 ],
             }
         )
@@ -161,6 +166,15 @@ def create_remote_api(store: DeviceAccessStore, ingest: RemoteIngest) -> Starlet
     async def access_error(request: Request, error: AccessError):
         return response({"detail": error.code}, error.status)
 
+    def read_endpoint(operation, model):
+        async def read(request: Request):
+            credential = device_credential(request)
+            await run_in_threadpool(store.authenticate, credential)
+            body = await read_body(request, model)
+            return response(await reads.read(credential, operation, body))
+
+        return read
+
     async def http_error(request: Request, error: HTTPException):
         return response(
             {"detail": "not_found" if error.status_code == 404 else "method_not_allowed"},
@@ -180,6 +194,10 @@ def create_remote_api(store: DeviceAccessStore, ingest: RemoteIngest) -> Starlet
             Route("/hub/v1/sources/{source_id:uuid}/access", source_access, methods=["GET"]),
             Route("/hub/v1/events", events, methods=["POST"]),
             Route("/hub/v1/events/{event_id:uuid}", event_status, methods=["GET"]),
+            *[
+                Route(path, read_endpoint(operation, model), methods=["POST"])
+                for operation, (path, model) in READ_OPERATIONS.items()
+            ],
         ],
         exception_handlers={AccessError: access_error, HTTPException: http_error},
     )
