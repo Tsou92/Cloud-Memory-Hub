@@ -50,6 +50,7 @@ def probe(phase: str) -> None:
             "source_registration",
             "event_upload",
             "source_preflight",
+            "scoped_reads",
         ]
         assert request("/hub/v1/devices", original)[0] == 403
         assert request("/api/v1/model-profiles", original)[0] == 401

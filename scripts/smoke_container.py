@@ -44,6 +44,7 @@ def smoke() -> None:
             time.sleep(1)
         raise RuntimeError("Disposable container did not become healthy")
 
+    stage = "initialization"
     try:
         print(
             run(
@@ -59,10 +60,12 @@ def smoke() -> None:
         access_payload = (ROOT / "scripts/probe_remote_access.py").read_text()
         ingest_payload = (ROOT / "scripts/probe_remote_ingest.py").read_text()
         read_payload = (ROOT / "scripts/probe_remote_read.py").read_text()
+        stage = "prepare read fixture"
         run(["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", "prepare"], input=read_payload)
         # An embedded SDK has one live writer. Seed the disposable fixture with
         # the service stopped, then reopen it through the real server process.
         run(["stop", "hub"])
+        stage = "seed read fixture"
         run(
             [
                 "run",
@@ -80,42 +83,31 @@ def smoke() -> None:
         run(["start", "hub"])
         ready()
         for phase in ("before", "after", "revoked"):
+            stage = "restart " + phase
             if phase != "before":
                 run(["restart", "hub"])
                 ready()
+            probes = [
+                ("access", access_payload),
+                ("ingest", ingest_payload),
+                ("read", read_payload),
+            ]
             if phase != "revoked":
+                probes.insert(0, ("runtime", payload))
+            for name, probe_payload in probes:
+                stage = f"{name} {phase}"
                 print(
                     run(
-                        ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase], input=payload
+                        ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase],
+                        input=probe_payload,
                     ),
                     end="",
                 )
-            print(
-                run(
-                    ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase],
-                    input=access_payload,
-                ),
-                end="",
-            )
-            print(
-                run(
-                    ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase],
-                    input=ingest_payload,
-                ),
-                end="",
-            )
-            print(
-                run(
-                    ["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", phase],
-                    input=read_payload,
-                ),
-                end="",
-            )
     except subprocess.CalledProcessError as error:
         # Docker/API output might contain user data; only report safe command metadata.
         command = " ".join(error.cmd[len(compose) :])
         raise RuntimeError(
-            f"Container smoke command failed (exit {error.returncode}): {command}"
+            f"Container smoke failed at {stage} (exit {error.returncode}): {command}"
         ) from None
     finally:
         # No user-supplied project name is accepted: only this run's resources are removed.
