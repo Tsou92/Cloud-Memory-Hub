@@ -156,23 +156,27 @@ class LocalOutbox:
 
     def _enqueue(self, raw: object) -> dict:
         event = prepare_event(raw, self.privacy)
+        with self._connection(writing=True) as db:
+            return self._insert_event(db, event)
+
+    def _insert_event(self, db: sqlite3.Connection, event: EventEnvelope) -> dict:
+        """Insert inside our caller's transaction, also used for atomic capture cursors."""
         if event.instance_id != self.instance_id or event.device_id != self.device_id:
             raise OutboxError("event_binding_mismatch")
         require_current_filter(event, self.privacy)
         payload, digest = event.canonical_payload(), event.payload_digest()
-        with self._connection(writing=True) as db:
-            row = db.execute(
-                "SELECT payload_digest, status, receipt_id FROM events WHERE event_id=?",
-                (event.event_id,),
-            ).fetchone()
-            if row is not None:
-                if row[0] != digest:
-                    raise OutboxError("event_identity_conflict")
-                return {"event_id": event.event_id, "status": row[1], "receipt_id": row[2]}
-            db.execute(
-                "INSERT INTO events(event_id,payload,payload_digest) VALUES (?,?,?)",
-                (event.event_id, payload, digest),
-            )
+        row = db.execute(
+            "SELECT payload_digest, status, receipt_id FROM events WHERE event_id=?",
+            (event.event_id,),
+        ).fetchone()
+        if row is not None:
+            if row[0] != digest:
+                raise OutboxError("event_identity_conflict")
+            return {"event_id": event.event_id, "status": row[1], "receipt_id": row[2]}
+        db.execute(
+            "INSERT INTO events(event_id,payload,payload_digest) VALUES (?,?,?)",
+            (event.event_id, payload, digest),
+        )
         return {"event_id": event.event_id, "status": "queued", "receipt_id": None}
 
     def pending(self, *, limit: int = 32) -> tuple[PendingEvent, ...]:

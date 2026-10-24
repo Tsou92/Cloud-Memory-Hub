@@ -8,7 +8,7 @@
 
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列；接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
-本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传及授权读取 CLI；自动采集、离线召回缓存与客户端注入仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md) 和 [授权读取接口](docs/remote-read.md)。
+本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。日常客户端安装、自动召回、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md) 和 [授权读取接口](docs/remote-read.md)。
 
 项目默认提供跨 Agent 的任务接续，同时保留原始记录追溯能力。首批目标入口为 Claude Code CLI、Codex 桌面版、OpenCode 终端、Hermes 终端、Cherry Studio 客户端和 Open Design 客户端；通过通用接口持续扩展其他 Agent。
 

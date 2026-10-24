@@ -60,6 +60,7 @@ def smoke() -> None:
         access_payload = (ROOT / "scripts/probe_remote_access.py").read_text()
         ingest_payload = (ROOT / "scripts/probe_remote_ingest.py").read_text()
         read_payload = (ROOT / "scripts/probe_remote_read.py").read_text()
+        capture_payload = (ROOT / "scripts/probe_source_capture.py").read_text()
         stage = "prepare read fixture"
         run(["exec", "-T", "hub", "/opt/cmh/venv/bin/python", "-", "prepare"], input=read_payload)
         # An embedded SDK has one live writer. Seed the disposable fixture with
@@ -91,6 +92,7 @@ def smoke() -> None:
                 ("access", access_payload),
                 ("ingest", ingest_payload),
                 ("read", read_payload),
+                ("capture", capture_payload),
             ]
             if phase != "revoked":
                 probes.insert(0, ("runtime", payload))
