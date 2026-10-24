@@ -212,7 +212,12 @@ class CaptureStore:
         digest = hashlib.sha256(
             json.dumps(semantic, sort_keys=True, ensure_ascii=False).encode()
         ).hexdigest()
-        native_key = self._identity("record", evidence.idempotency_key)
+        identity = evidence.idempotency_key
+        if not (evidence.message_id or evidence.correlation_id):
+            # Upstream's text-only fallback merges identical words in one
+            # conversation. File capture must retain distinct source positions.
+            identity = [identity, evidence.source_ordinal]
+        native_key = self._identity("record", identity)
         record_id = str(UUID(bytes=bytes.fromhex(native_key)[:16], version=4))
         conversation_key = self._identity(
             "conversation", [evidence.workspace, evidence.conversation_id]

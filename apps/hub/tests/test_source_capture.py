@@ -85,6 +85,19 @@ def test_real_parser_history_append_restart_and_rescan(capture):
     assert payloads(outbox)[:2] == original
 
 
+def test_identical_messages_without_native_ids_keep_distinct_positions(capture):
+    outbox, config, path = capture
+    row = native(config, "Yes.", uuid=None)
+    append(path, row, row)
+    assert collect(outbox, config)["queued"] == 2
+    original = payloads(outbox)
+    assert len({value["record_id"] for value in original}) == 2
+    with sqlite3.connect(outbox.path) as db:
+        db.execute("DELETE FROM capture_cursors")
+    assert collect(outbox, config)["duplicates"] == 2
+    assert payloads(outbox) == original
+
+
 def test_incomplete_tail_is_captured_only_after_terminator(capture):
     outbox, config, path = capture
     text = json.dumps(native(config))
