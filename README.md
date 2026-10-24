@@ -35,6 +35,7 @@
 | 本轮工程评审状态 | [评审记录](docs/reviews/2026-10-21-foundation.md) |
 | 运行时验证进展 | [容器与上游验证记录](docs/reviews/2026-10-22-runtime.md) |
 | NAS 与设备身份验证 | [NAS 运行记录](docs/reviews/2026-10-23-nas-preflight.md) · [设备身份记录](docs/reviews/2026-10-23-device-access.md) |
+| 连接与授权读取验证 | [自动补传](docs/reviews/2026-10-24-connector-transport.md) · [记忆与来源读取](docs/reviews/2026-10-24-scoped-retrieval.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查
