@@ -142,6 +142,11 @@ def _content(evidence, config):
             "native_conversation_id": evidence.conversation_id,
             "native_message_id": evidence.message_id,
             "native_correlation_id": evidence.correlation_id,
+            "native_source_ordinal": (
+                evidence.source_ordinal
+                if not (evidence.message_id or evidence.correlation_id)
+                else None
+            ),
             "origin": {
                 str(origin): metadata.model_dump(mode="json")
                 for origin, metadata in evidence.origin_meta.items()
