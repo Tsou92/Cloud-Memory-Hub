@@ -60,6 +60,8 @@ make check-container
 
 容器检查在当前 Docker 端点创建随机命名的独立 Compose 项目和临时卷，先在禁网、只读容器中验证模型摘要及真实向量生成，再验证初始化、身份／跨源拒绝、网页登录会话、模型配置密文存储、重启后的配置和密钥可读性。设备探针另验证零权限签发、项目授权、凭证轮换、重启持久性，以及撤销后再次重启仍然失效，随后仅清理该次测试资源。它不访问用户模型、真实 Agent 或生产卷。
 
+来源采集探针补充合成 Claude 格式文件 → 已安装 capture/send CLI → 真实 HTTP/Core 队列及重启验证；Mac 上实际 Claude CLI 使用单独的 `make check-claude` 隔离探针。结果和边界见[采集验证记录](reviews/2026-10-24-claude-native.md)。
+
 读取探针在停止临时 Hub 后，用真实 SDK 导入合成夹具，再启动服务，经已安装 CLI／实际 HTTP 验证项目检索、原始引用、重启持久性和撤销后拒绝。离线夹具导入不算远程事件提炼成功；详细证据见[授权读取记录](reviews/2026-10-24-scoped-retrieval.md)。
 
 远程验证可在目标 NAS 已加载镜像后，设置 `DOCKER_HOST=ssh://nas` 和相应的 `CMH_IMAGE`，直接运行 `uv run --locked python -m scripts.smoke_container`，复用同一测试。先用相同环境执行 `docker info` 确认目标端点；必须具备 NAS Docker 权限，并将远程结果与本地结果分开记录。此处的 `nas` 是开发主机 SSH 配置中的连接别名。
