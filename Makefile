@@ -1,4 +1,4 @@
-.PHONY: check format prepare-upstream check-runtime check-upstream check-web check-container check-claude
+.PHONY: check format prepare-upstream check-runtime check-upstream check-web check-container check-claude check-claude-recall
 
 check:
 	uv run --locked ruff format --check scripts tests apps/hub/src apps/hub/tests
@@ -20,6 +20,9 @@ check-runtime: prepare-upstream
 
 check-claude: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_claude_native.py
+
+check-claude-recall: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_claude_recall.py
 
 check-upstream: prepare-upstream
 	uv run --locked python .local/upstream/hy-memory/memhub/scripts/fetch_embedding_model.py

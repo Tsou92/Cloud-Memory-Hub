@@ -8,7 +8,7 @@
 
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列；接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
-本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。日常客户端安装、自动召回、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md) 和 [授权读取接口](docs/remote-read.md)。
+本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。Claude 每轮在线召回已在隔离的实际 CLI 中验证；日常客户端安装、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md)、[授权读取接口](docs/remote-read.md) 和 [Claude 召回](docs/agent-recall.md)。
 
 项目默认提供跨 Agent 的任务接续，同时保留原始记录追溯能力。首批目标入口为 Claude Code CLI、Codex 桌面版、OpenCode 终端、Hermes 终端、Cherry Studio 客户端和 Open Design 客户端；通过通用接口持续扩展其他 Agent。
 
@@ -36,7 +36,7 @@
 | 运行时验证进展 | [容器与上游验证记录](docs/reviews/2026-10-22-runtime.md) |
 | NAS 与设备身份验证 | [NAS 运行记录](docs/reviews/2026-10-23-nas-preflight.md) · [设备身份记录](docs/reviews/2026-10-23-device-access.md) |
 | 连接与授权读取验证 | [自动补传](docs/reviews/2026-10-24-connector-transport.md) · [记忆与来源读取](docs/reviews/2026-10-24-scoped-retrieval.md) |
-| 实际客户端合同验证 | [Claude Code CLI](docs/reviews/2026-10-24-claude-native.md) |
+| 实际客户端合同验证 | [Claude Code CLI 采集](docs/reviews/2026-10-24-claude-native.md) · [在线召回](docs/reviews/2026-10-25-claude-recall.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查
@@ -50,6 +50,7 @@ make check-runtime
 make check-upstream
 # 可选：本机已安装 Claude CLI 时，使用隔离配置和本地模型替身
 make check-claude
+make check-claude-recall
 # 以下两项需要 Docker
 make check-web
 # 构建 Linux amd64 并在独立临时卷中验证

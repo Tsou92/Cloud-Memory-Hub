@@ -14,6 +14,8 @@ from one_memory.hy_memory_bridge import HyMemoryBridge, builtin_retrieval_snapsh
 BASE = "http://localhost:8800"
 STATE = Path("/data/read-smoke.json")
 CONNECTION = Path("/data/read-connection.json")
+HOOK_SOURCE = Path("/data/read-hook-source.json")
+HOOK_WORKSPACE = Path("/data/read-hook-workspace")
 
 
 def request(path, token, method="GET", body=None):
@@ -47,6 +49,35 @@ def cli(operation, body):
         timeout=30,
     )
     return result.returncode, json.loads(result.stdout if result.returncode == 0 else result.stderr)
+
+
+def hook():
+    result = subprocess.run(
+        [
+            "/opt/cmh/venv/bin/cloud-memory-connector",
+            "claude-hook",
+            "--connection-file",
+            str(CONNECTION),
+            "--source-file",
+            str(HOOK_SOURCE),
+        ],
+        input=json.dumps(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "synthetic-container-session",
+                "cwd": str(HOOK_WORKSPACE),
+                "prompt": "决定使用蓝色设计方案",
+            }
+        ),
+        cwd=HOOK_WORKSPACE,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0
+    output, status = json.loads(result.stdout), json.loads(result.stderr)
+    assert output["continue"] is True
+    return output["hookSpecificOutput"]["additionalContext"], status
 
 
 async def seed(state):
@@ -137,12 +168,29 @@ def probe(phase):
                 }
             )
         )
+        HOOK_WORKSPACE.mkdir(mode=0o700)
+        HOOK_SOURCE.touch(mode=0o600, exist_ok=False)
+        HOOK_SOURCE.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "adapter_id": "claude-code",
+                    "source_id": state["source_id"],
+                    "scope_id": scope,
+                    "source_root": str(HOOK_WORKSPACE),
+                    "workspace": str(HOOK_WORKSPACE),
+                }
+            )
+        )
         return
     else:
         state = json.loads(STATE.read_text())
         token = json.loads(CONNECTION.read_text())["credential"]
     scope = {"scope_id": state["scope_id"]}
     if phase == "revoked":
+        context, status = hook()
+        assert status["state"] == "denied"
+        assert state["memory_id"] not in context and "蓝色" not in context
         assert cli("memory-list", scope) == (
             2,
             {"error": "scope_permission_required", "retryable": False},
@@ -153,8 +201,12 @@ def probe(phase):
             ]
             == 403
         )
-        print("Revoked read grant remains denied after restart")
+        print("Revoked read grant and installed recall hook remain denied after restart")
         return
+    context, status = hook()
+    assert status["state"] == "retrieved" and status["records"] == 1
+    assert state["memory_id"] in context and "蓝色" in context
+    assert state["foreign_id"] not in context
     code, result = cli("memory-search", {**scope, "query": "决定使用蓝色设计方案"})
     assert code == 0 and [i["record_id"] for i in result["items"]] == [state["memory_id"]]
     assert result["content_trust"] == "untrusted_history"
@@ -182,7 +234,7 @@ def probe(phase):
             == 200
         )
         assert cli("history-list", scope)[0] == 2
-    print(f"Real SDK scoped search, provenance and installed read CLI passed ({phase})")
+    print(f"Real SDK search, provenance, installed read CLI and recall hook passed ({phase})")
 
 
 if __name__ == "__main__":

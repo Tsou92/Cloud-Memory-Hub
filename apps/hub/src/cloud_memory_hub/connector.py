@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from cloud_memory_hub.capture_store import CaptureError
+from cloud_memory_hub.claude_hook import run_hook_process
 from cloud_memory_hub.config import read_private_file
 from cloud_memory_hub.events import EventError
 from cloud_memory_hub.local_outbox import LocalOutbox, OutboxError
@@ -79,6 +80,7 @@ def main() -> int:
             "capture-init",
             "collect",
             "collect-watch",
+            "claude-hook",
             *READ_OPERATIONS,
         ],
     )
@@ -88,7 +90,10 @@ def main() -> int:
     parser.add_argument("--connection-file", type=Path)
     parser.add_argument("--known-credentials-file", type=Path)
     parser.add_argument("--source-file", type=Path)
+    parser.add_argument("--include-global", action="store_true")
     args = parser.parse_args()
+    if args.command == "claude-hook":
+        return run_hook_process(args, open_configuration)
     try:
         if args.command in READ_OPERATIONS:
             connection, options = open_configuration(args)
