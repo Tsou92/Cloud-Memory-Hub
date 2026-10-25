@@ -15,7 +15,7 @@ docker compose up -d --no-build hub
 docker compose ps
 ```
 
-Apple Silicon 开发主机可为 Compose 命令设置 `DOCKER_DEFAULT_PLATFORM=linux/amd64`。首次初始化创建管理员凭证与加密密钥；重复初始化会拒绝覆盖，不作为重启步骤。
+Apple Silicon 开发主机可为 Compose 命令设置 `DOCKER_DEFAULT_PLATFORM=linux/amd64`。首次初始化创建管理员凭证、加密密钥、实例身份和独立治理记录；重复初始化会拒绝覆盖，不作为重启步骤。
 
 Compose 支持用 `CMH_IMAGE` 指定本次已验证的镜像标签，默认仍为 `cloud-memory-hub:development`。NAS 验证使用独立的提交标签，并设置独立 Compose 项目名；不得复用已有服务的数据卷。构建时传入 `--build-arg CMH_REVISION=<提交编号>`，可在镜像标签中追踪来源。`CMH_IMAGE` 同时作用于初始化、服务和禁网模型检查，避免混用版本。
 
@@ -30,9 +30,27 @@ docker compose exec hub cat /config/admin-token
 ## 数据与停止
 
 - `hub_data` 保存 Core 数据、接纳的处理任务及索引；`hub_config` 保存管理员凭证、加密密钥、加密的模型凭证数据库，以及设备身份／项目授权、来源和事件回执库。设备权限协议见 [ADR-0004](adr/0004-remote-device-access.md)，上传及回滚语义见 [ADR-0006](adr/0006-remote-ingest.md)。
+- `hub_governance` 保存不含正文的治理意图，独立挂载至 `/governance`；普通业务快照恢复不能覆盖或删除它。自定义 `CMH_GOVERNANCE_DIR` 时，目录不能位于 data/config 内，也不能包含它们。机制与限制见 [ADR-0011](adr/0011-governance-authority-and-offline-sync.md)。
 - 普通停止使用 `docker compose down`；不加 `--volumes`。保留卷后再次启动会复用配置和数据。
 - 配置密钥丢失会导致加密凭证无法读取；当前还没有密钥轮换、灾难恢复或完整备份功能，不应依赖此实验版本承载唯一数据。
 - 初始化中断后不要直接删除既有凭证重试；先检查配置卷并保留副本，避免覆盖已经使用的密钥。
+
+## 已有实验实例的治理迁移
+
+本轮镜像要求设备权威库版本 2，旧实例不会在普通启动时自动迁移。先停止 Hub，确认旧容器已经退出，并完整备份现有 config/data；保存原镜像标签、Compose 配置及校验值。然后使用本轮镜像与包含治理卷的新 Compose 文件执行：
+
+```sh
+docker compose stop hub
+docker compose ps -a hub
+# 确认停服并完成私有备份后
+docker compose run --rm setup migrate-governance --writers-stopped
+docker compose up -d --no-build hub
+docker compose ps
+```
+
+`--writers-stopped` 只是已停服的显式声明；命令不会代替操作者停止其他挂载相同卷的容器。应使用同一个 Compose 项目名及既有 config/data 卷。迁移保留实例 ID、设备凭证和授权，不执行真实历史导入或启用模型。重复执行只核验既有绑定；不能修复缺失或不可信的治理记录。缺失身份库、密钥错误、记录损坏和水位倒退都应保持停服并恢复可信副本。
+
+版本 2 身份库不能交给旧镜像运行。治理操作已经存在时，不允许通过回滚身份库、丢弃治理卷或恢复旧镜像来重新开放。当前仍未开放完整忘记／彻底删除：检测到待执行的治理意图会暂停整个实例；上游不满足 Hub 删除语义的直接删除入口返回 409。这里只验证迁移和故障保护，不把暂停服务当作产品治理完成。
 
 ## NAS 目标与当前边界
 

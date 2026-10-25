@@ -19,6 +19,7 @@ services:
     profiles: ["setup"]
     volumes:
       - hub_config:/config
+      - hub_governance:/governance
     network_mode: none
     read_only: true
     tmpfs: ["/tmp"]
@@ -36,6 +37,7 @@ services:
     volumes:
       - hub_data:/data
       - hub_config:/config
+      - hub_governance:/governance
     read_only: true
     tmpfs: ["/tmp"]
     cap_drop: ["ALL"]
@@ -52,3 +54,4 @@ services:
 volumes:
   hub_data:
   hub_config:
+  hub_governance:

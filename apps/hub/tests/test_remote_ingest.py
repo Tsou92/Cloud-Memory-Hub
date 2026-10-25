@@ -9,6 +9,7 @@ import pytest
 from cloud_memory_hub.app import create_hub
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.events import EventEnvelope, prepare_event
+from cloud_memory_hub.governance_authority import activate_authority
 from cloud_memory_hub.local_outbox import LocalOutbox
 from cloud_memory_hub.privacy import CredentialFilter
 from cloud_memory_hub.remote_access import AccessError, GrantRequest, RevisionRequest
@@ -19,13 +20,16 @@ from one_memory.api import _source_writes_on
 
 
 def config_for(tmp_path):
-    return HubConfig(
+    config = HubConfig(
         tmp_path / "data",
         tmp_path / "config",
         "http://localhost:8800",
         "a" * 40,
         Fernet.generate_key(),
+        governance_dir=tmp_path / "governance",
     )
+    activate_authority(config.config_dir, config.governance_dir, config.encryption_key, new=True)
+    return config
 
 
 async def provision(client, config):

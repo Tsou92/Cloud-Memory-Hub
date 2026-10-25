@@ -91,16 +91,23 @@ class IssuedCredential(BaseModel):
 
 
 class DeviceAccessStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, require_existing: bool = False) -> None:
         self.path = path.absolute()
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._check_private(self.path.parent, directory=True)
-        descriptor = os.open(self.path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        os.close(descriptor)
-        self._check_private(self.path)
+        try:
+            if not require_existing:
+                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                self._check_private(self.path.parent, directory=True)
+                descriptor = os.open(self.path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                os.close(descriptor)
+            self._check_private(self.path.parent, directory=True)
+            self._check_private(self.path)
+        except OSError:
+            raise AccessError("access_store_unavailable", 503) from None
         with self._connection(writing=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
+                if require_existing:
+                    raise AccessError("access_store_unrecognized", 503)
                 if db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchone():
                     raise AccessError("access_store_unrecognized", 503)
                 for statement in (
@@ -122,7 +129,8 @@ class DeviceAccessStore:
                     "INSERT INTO projects VALUES ('global', 'Global preferences', ?)", (_now(),)
                 )
                 db.execute("PRAGMA user_version=1")
-            elif version != 1:
+                version = 1
+            elif version not in {1, 2}:
                 raise AccessError("access_store_version_unsupported", 503)
             # Validate existing schema too; never recreate a partly damaged store.
             row = db.execute("SELECT instance_id FROM instance WHERE id=1").fetchone()
@@ -133,6 +141,14 @@ class DeviceAccessStore:
             if not valid_instance:
                 raise AccessError("access_store_unrecognized", 503)
             self.instance_id = row[0]
+            self.schema_version = version
+            if version == 2:
+                binding = db.execute("SELECT ledger_id FROM cmh_governance_binding").fetchall()
+                if len(binding) != 1:
+                    raise AccessError("access_store_unrecognized", 503)
+                db.execute(
+                    "SELECT scope_id, checkpoint, signature FROM cmh_governance_floors LIMIT 0"
+                )
             db.execute("SELECT device_id, credential_hash, revision, status FROM devices LIMIT 0")
             db.execute("SELECT project_id, display_name, created_at FROM projects LIMIT 0")
             db.execute("SELECT device_id, scope_id, permissions FROM grants LIMIT 0")
@@ -164,6 +180,7 @@ class DeviceAccessStore:
             db.row_factory = sqlite3.Row
             try:
                 db.execute("PRAGMA foreign_keys=ON")
+                db.execute("PRAGMA synchronous=FULL")
                 db.execute("BEGIN IMMEDIATE" if writing else "BEGIN")
                 try:
                     if hasattr(self, "instance_id"):
@@ -171,7 +188,11 @@ class DeviceAccessStore:
                         instance = db.execute(
                             "SELECT instance_id FROM instance WHERE id=1"
                         ).fetchone()
-                        if version != 1 or instance is None or instance[0] != self.instance_id:
+                        if (
+                            version != self.schema_version
+                            or instance is None
+                            or instance[0] != self.instance_id
+                        ):
                             raise AccessError("access_store_changed", 503)
                     yield db
                     db.commit()

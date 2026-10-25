@@ -268,6 +268,16 @@ class GovernanceJournal:
         with self._connection() as db:
             return self._head(db, scope)
 
+    def scopes(self) -> tuple[str, ...]:
+        """Include orphan scopes too so a damaged head cannot hide an intent."""
+        with self._connection() as db:
+            return tuple(
+                self._scope(row[0])
+                for row in db.execute(
+                    "SELECT scope_id FROM heads UNION SELECT DISTINCT scope_id FROM intents"
+                )
+            )
+
     def append(self, intent: Intent) -> Checkpoint:
         try:
             intent = Intent.model_validate(intent)

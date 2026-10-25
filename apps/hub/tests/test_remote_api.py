@@ -2,6 +2,7 @@ import asyncio
 
 from cloud_memory_hub.app import create_hub
 from cloud_memory_hub.config import HubConfig
+from cloud_memory_hub.governance_authority import activate_authority
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 
@@ -13,7 +14,9 @@ def configured(tmp_path):
         "https://memory.example.test",
         "synthetic-admin-" + "a" * 40,
         Fernet.generate_key(),
+        governance_dir=tmp_path / "governance",
     )
+    activate_authority(config.config_dir, config.governance_dir, config.encryption_key, new=True)
     return config, create_hub(config)
 
 

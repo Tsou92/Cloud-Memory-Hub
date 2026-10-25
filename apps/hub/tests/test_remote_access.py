@@ -142,7 +142,7 @@ def test_contract_rejects_ambiguous_or_widened_grants(payload):
 def test_private_store_rejects_links_and_insecure_permissions(store):
     link = store.path.parent / "alias.sqlite3"
     link.symlink_to(store.path)
-    with pytest.raises(OSError):
+    with pytest.raises(AccessError, match="access_store_unavailable"):
         DeviceAccessStore(link)
     link.unlink()
     os.link(store.path, link)
