@@ -19,6 +19,7 @@ import httpx
 import uvicorn
 from cloud_memory_hub.app import create_hub
 from cloud_memory_hub.config import HubConfig
+from cloud_memory_hub.governance_authority import activate_authority
 from cloud_memory_hub.transport import RemoteConnection
 from cryptography.fernet import Fernet
 from one_memory.api import _sdk_library_bridge
@@ -50,6 +51,10 @@ class LiveHub:
             self.origin,
             uuid4().hex + uuid4().hex,
             Fernet.generate_key(),
+            governance_dir=root / "hub-governance",
+        )
+        activate_authority(
+            self.config.config_dir, self.config.governance_dir, self.config.encryption_key, new=True
         )
         self.app = create_hub(self.config)
         self.offline = False

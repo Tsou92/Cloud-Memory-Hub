@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from cloud_memory_hub.config import HubConfig
+from cloud_memory_hub.governance_boundary import guarded_call
 
 LOGIN_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -35,15 +36,24 @@ required maxlength="256"><button>登录</button></form></main></html>"""
 
 
 class CloudBoundary:
-    def __init__(self, core, config: HubConfig, internal_token: str, *, remote_api=None) -> None:
+    def __init__(
+        self, core, config: HubConfig, internal_token: str, *, remote_api=None, governance=None
+    ) -> None:
         self.core = core
         self.config = config
         self.internal_token = internal_token
         self.remote_api = remote_api
+        self.governance = governance
         self.sessions = UISessionStore(instance_id=internal_token)
         self.failed_logins: deque[float] = deque(maxlen=20)
 
     async def __call__(self, scope, receive, send) -> None:
+        if self.governance is not None:
+            await guarded_call(self.governance, self._handle, scope, receive, send)
+        else:
+            await self._handle(scope, receive, send)
+
+    async def _handle(self, scope, receive, send) -> None:
         if scope["type"] == "lifespan":
             await self.core(scope, receive, send)
             return
@@ -115,6 +125,20 @@ class CloudBoundary:
             return
         if path.startswith(("/internal/", "/ui/", "/api/v1/ui/session")):
             await JSONResponse({"detail": "not_found"}, status_code=404)(scope, receive, send)
+            return
+        if (
+            self.governance is not None
+            and request.method == "DELETE"
+            and path.startswith("/api/v2/memories/")
+        ):
+            # Upstream delete reactivates older versions and retains history.
+            # Never present that operation as the Hub's durable purge workflow.
+            await self._respond(
+                JSONResponse({"detail": "governance_workflow_required"}, status_code=409),
+                scope,
+                receive,
+                send,
+            )
             return
         # Only after authorization: remove all external identity and browser
         # credentials. Never forward an attacker-supplied installation grant.

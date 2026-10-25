@@ -8,7 +8,8 @@ from pydantic import SecretStr
 
 from cloud_memory_hub.boundary import CloudBoundary
 from cloud_memory_hub.config import HubConfig
-from cloud_memory_hub.remote_access import DeviceAccessStore
+from cloud_memory_hub.governance_authority import open_authority
+from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.remote_api import create_remote_api
 from cloud_memory_hub.remote_ingest import RemoteIngest
 from cloud_memory_hub.remote_read import RemoteRead
@@ -16,6 +17,8 @@ from cloud_memory_hub.secret_store import EncryptedSecretStore
 
 
 def create_hub(config: HubConfig) -> CloudBoundary:
+    governance = open_authority(config)
+    governance.require_ready()
     internal_token = secrets.token_urlsafe(48)
     settings = Settings(
         _env_file=None,
@@ -29,17 +32,30 @@ def create_hub(config: HubConfig) -> CloudBoundary:
     store = EncryptedSecretStore(
         config.config_dir / "model-credentials.sqlite3", config.encryption_key
     )
-    devices = DeviceAccessStore(config.config_dir / "remote-access.sqlite3")
+    devices = governance.access
     ingest = RemoteIngest(devices, lambda: core.state.memory_write_queue)
+
+    def source_write_authorizer(source_key):
+        try:
+            governance.require_ready()
+        except GovernanceError:
+            return False
+        return ingest.source_write_authorizer(source_key)
+
     core = create_app(
         settings,
         secret_store=store,
         manage_runtime=True,
-        source_write_authorizer=ingest.source_write_authorizer,
+        source_write_authorizer=source_write_authorizer,
     )
     core.state.cmh_ingest = ingest
+    core.state.cmh_governance = governance
     reads = RemoteRead(devices, lambda: _sdk_library_bridge(core))
     core.state.cmh_reads = reads
     return CloudBoundary(
-        core, config, internal_token, remote_api=create_remote_api(devices, ingest, reads)
+        core,
+        config,
+        internal_token,
+        remote_api=create_remote_api(devices, ingest, reads),
+        governance=governance,
     )

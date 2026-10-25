@@ -26,6 +26,7 @@ class HubConfig:
     public_origin: str
     admin_token: str = field(repr=False)
     encryption_key: bytes = field(repr=False)
+    governance_dir: Path = Path("/governance")
     host: str = "0.0.0.0"
     port: int = 8800
 
@@ -72,5 +73,6 @@ class HubConfig:
             public_origin=os.environ.get("CMH_PUBLIC_ORIGIN", "http://localhost:8800"),
             admin_token=read_private_file(config_dir / "admin-token").decode("ascii").strip(),
             encryption_key=read_private_file(config_dir / "encryption-key").strip(),
+            governance_dir=Path(os.environ.get("CMH_GOVERNANCE_DIR", "/governance")),
             port=int(os.environ.get("CMH_PORT", "8800")),
         )

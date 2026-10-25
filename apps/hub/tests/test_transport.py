@@ -18,6 +18,7 @@ import pytest
 import uvicorn
 from cloud_memory_hub.app import create_hub
 from cloud_memory_hub.config import HubConfig
+from cloud_memory_hub.governance_authority import activate_authority
 from cloud_memory_hub.local_outbox import LocalOutbox
 from cloud_memory_hub.transport import (
     RemoteConnection,
@@ -73,8 +74,14 @@ def live_hub(tmp_path):
     sock.bind(("127.0.0.1", 0))
     origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
     config = HubConfig(
-        tmp_path / "data", tmp_path / "config", origin, "a" * 40, Fernet.generate_key()
+        tmp_path / "data",
+        tmp_path / "config",
+        origin,
+        "a" * 40,
+        Fernet.generate_key(),
+        governance_dir=tmp_path / "governance",
     )
+    activate_authority(config.config_dir, config.governance_dir, config.encryption_key, new=True)
     app = create_hub(config)
     app.core.state.transport_test_offline = False
     uploaded = []

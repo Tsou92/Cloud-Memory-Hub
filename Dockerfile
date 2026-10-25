@@ -38,9 +38,9 @@ FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home cmh \
-    && mkdir -p /data /config /backups \
-    && chown 1000:1000 /data /config /backups \
-    && chmod 700 /data /config /backups
+    && mkdir -p /data /config /governance /backups \
+    && chown 1000:1000 /data /config /governance /backups \
+    && chmod 700 /data /config /governance /backups
 COPY --from=python-build /opt/cmh/venv /opt/cmh/venv
 COPY --from=web /workspace/apps/web/dist /opt/cmh/web
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/LICENSE /opt/cmh/licenses/MemHub-LICENSE
@@ -48,7 +48,7 @@ COPY --from=source /workspace/.local/upstream/hy-memory/memhub/NOTICE /opt/cmh/l
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/THIRD_PARTY_NOTICES.md /opt/cmh/licenses/THIRD_PARTY_NOTICES.md
 COPY upstream/manifest.json /opt/cmh/upstream-manifest.json
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    CMH_DATA_DIR=/data CMH_CONFIG_DIR=/config \
+    CMH_DATA_DIR=/data CMH_CONFIG_DIR=/config CMH_GOVERNANCE_DIR=/governance \
     ONE_MEMORY_WEB_DIR=/opt/cmh/web XDG_CACHE_HOME=/data/cache \
     HF_HOME=/data/cache/huggingface HF_HUB_DISABLE_TELEMETRY=1 ANONYMIZED_TELEMETRY=False
 ARG CMH_REVISION=development

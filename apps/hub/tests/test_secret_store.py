@@ -29,12 +29,12 @@ def test_credentials_survive_restart_without_plaintext_storage(tmp_path):
 
 def test_initializer_never_rotates_existing_credentials(tmp_path):
     directory = tmp_path / "config"
-    initialize(directory)
+    initialize(directory, governance_dir=tmp_path / "governance")
     before = {
         name: read_private_file(directory / name) for name in ["admin-token", "encryption-key"]
     }
     with pytest.raises(ValueError, match="already exists"):
-        initialize(directory)
+        initialize(directory, governance_dir=tmp_path / "governance")
     assert before == {name: read_private_file(directory / name) for name in before}
 
 
