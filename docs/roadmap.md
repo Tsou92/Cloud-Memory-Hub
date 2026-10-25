@@ -15,7 +15,7 @@
 
 ## G1 优先顺序
 
-Claude Code 已完成[隔离原生入口与产品采集验证](reviews/2026-10-24-claude-native.md)以及[每轮在线召回](reviews/2026-10-25-claude-recall.md)，提供显式配置下的采集／读取。生成模型仍为本地替身，跨设备提炼与双向接续尚未完成。SDK 删除和恢复实测已形成[治理及离线同步方案](adr/0011-governance-authority-and-offline-sync.md)，独立治理记录基础已实现，正在接线；G1 退出条件保持不变。
+Claude Code 已完成[隔离原生入口与产品采集验证](reviews/2026-10-24-claude-native.md)以及[每轮在线召回](reviews/2026-10-25-claude-recall.md)，提供显式配置下的采集／读取。生成模型仍为本地替身，跨设备提炼与双向接续尚未完成。SDK 删除和恢复实测已形成[治理及离线同步方案](adr/0011-governance-authority-and-offline-sync.md)，独立治理记录及运行时绑定已通过[本地／NAS 隔离镜像验证](reviews/2026-10-25-governance-activation.md)；下一步完成关联范围、选择性抑制与执行器，G1 退出条件保持不变。
 
 1. 在隔离环境检出已固定上游提交，使用上游要求的工具版本，运行涉及 Core、Host Bridge 和恢复流程的原有测试。
 2. 证明可复用模块的实际边界，决定受控分叉／依赖方式，补全来源与许可证记录；不先复制再调查。
