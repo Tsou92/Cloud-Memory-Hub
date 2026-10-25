@@ -227,13 +227,15 @@ class NativeSession:
 class ProductCapture:
     """Run the installed Python entry point as a separate continuous process."""
 
-    def __init__(self, root, version):
+    def __init__(self, root, version, *, connection=None, source_id=None, scope_id=None):
         self.state = root / "connector"
         self.instance_id, self.device_id = str(uuid4()), str(uuid4())
+        if connection is not None:
+            self.instance_id, self.device_id = connection.instance_id, connection.device_id
         source = SourceConfiguration(
             adapter_id="claude-code",
-            source_id=str(uuid4()),
-            scope_id=str(uuid4()),
+            source_id=source_id or str(uuid4()),
+            scope_id=scope_id or str(uuid4()),
             source_root=str(root / "config"),
             workspace=str(root / "project"),
             source_version=version,
@@ -250,6 +252,17 @@ class ProductCapture:
             "--source-file",
             str(config_file),
         ]
+        if connection is not None:
+            connection_file = root / "connection.json"
+            connection_file.write_text(
+                json.dumps(
+                    {
+                        **connection.model_dump(mode="json"),
+                        "credential": connection.credential.get_secret_value(),
+                    }
+                )
+            )
+            self.options.extend(["--connection-file", str(connection_file)])
         self.command("init")
         self.command("capture-init")
         self.stdout = (root / "capture.jsonl").open("w")
@@ -281,7 +294,8 @@ class ProductCapture:
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError("product_capture_watch_failed")
-            if self.outbox().status()["queued"] == count:
+            status = self.outbox().status()
+            if status["queued"] + status["accepted"] == count:
                 return
             time.sleep(0.1)
         raise RuntimeError("product_capture_records_missing")
