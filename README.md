@@ -39,6 +39,7 @@
 | NAS 与设备身份验证 | [NAS 运行记录](docs/reviews/2026-10-23-nas-preflight.md) · [设备身份记录](docs/reviews/2026-10-23-device-access.md) |
 | 连接与授权读取验证 | [自动补传](docs/reviews/2026-10-24-connector-transport.md) · [记忆与来源读取](docs/reviews/2026-10-24-scoped-retrieval.md) |
 | 实际客户端合同验证 | [Claude Code CLI 采集](docs/reviews/2026-10-24-claude-native.md) · [在线召回](docs/reviews/2026-10-25-claude-recall.md) |
+| 治理与恢复验证 | [运行时隔离](docs/reviews/2026-10-25-governance-activation.md) · [NAS 迁移与关联缺口](docs/reviews/2026-10-26-governance-nas-and-lineage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查

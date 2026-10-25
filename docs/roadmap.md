@@ -15,6 +15,8 @@
 
 ## G1 优先顺序
 
+2026-10-26 补充：治理运行时 `05eb169` 已停服备份后迁移到 NAS 常驻实验实例，并通过重启核验。真实 SDK 的关联探针确认默认读取会遗漏原文指针、旧版本和归档派生，后续按[范围规划设计](adr/0012-governance-scope-and-lineage.md) 实现严格来源清单与方向性传播。
+
 Claude Code 已完成[隔离原生入口与产品采集验证](reviews/2026-10-24-claude-native.md)以及[每轮在线召回](reviews/2026-10-25-claude-recall.md)，提供显式配置下的采集／读取。生成模型仍为本地替身，跨设备提炼与双向接续尚未完成。SDK 删除和恢复实测已形成[治理及离线同步方案](adr/0011-governance-authority-and-offline-sync.md)，独立治理记录及运行时绑定已通过[本地／NAS 隔离镜像验证](reviews/2026-10-25-governance-activation.md)；下一步完成关联范围、选择性抑制与执行器，G1 退出条件保持不变。
 
 1. 在隔离环境检出已固定上游提交，使用上游要求的工具版本，运行涉及 Core、Host Bridge 和恢复流程的原有测试。
