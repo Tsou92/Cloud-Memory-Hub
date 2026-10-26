@@ -15,6 +15,7 @@ from cloud_memory_hub.privacy import CredentialFilter
 from cloud_memory_hub.remote_api import create_remote_api
 from cloud_memory_hub.remote_ingest import RemoteIngest
 from cloud_memory_hub.remote_read import RemoteRead
+from cloud_memory_hub.sdk_admission import SdkAdmission
 from cloud_memory_hub.secret_store import EncryptedSecretStore
 
 
@@ -35,6 +36,7 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         config.config_dir / "model-credentials.sqlite3", config.encryption_key
     )
     devices = governance.access
+    sdk_admission = SdkAdmission()
     ingest = RemoteIngest(devices, lambda: core.state.memory_write_queue)
 
     def source_write_authorizer(source_key):
@@ -49,7 +51,9 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         secret_store=store,
         manage_runtime=True,
         source_write_authorizer=source_write_authorizer,
+        sdk_operation_guard=sdk_admission.operation,
     )
+    core.state.cmh_sdk_admission = sdk_admission
     core.state.cmh_ingest = ingest
     core.state.cmh_governance = governance
     reads = RemoteRead(devices, lambda: _sdk_library_bridge(core))
