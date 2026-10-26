@@ -62,6 +62,10 @@ docker compose ps
 
 SSH 能连接不等于可以操作 Docker。部署前在同一账户执行 `docker info` 和 `docker compose version`；如果 Docker socket 返回权限错误，应先由 NAS 管理员配置账户权限。不能通过放宽 socket 的全局访问权限来绕过。当前核对结果见 [NAS 运行记录](reviews/2026-10-23-nas-preflight.md)。
 
+当前 `serve` 在启动 Core 前独占 data/config/governance 根目录的 `.cmh-storage.lock`；`init` 和 `migrate-governance` 也参与同一协议。`storage_in_use` 表示另一个参与协议的进程仍持有至少一个目录，命令拒绝继续；应先正常停止原服务并观察进程退出，不能删除锁文件来解锁。进程退出后 OS 自动释放锁，空文件保留。根目录和锁文件须为当前运行用户所有、私有权限，拒绝软硬链接及其他不安全形态。详见 [进程互斥设计](adr/0013-runtime-storage-exclusion.md)。
+
+旧镜像及直接调用 SDK 的程序不识别上述锁。第一次升级仍须显式停服核对；迁移继续要求 `--writers-stopped`。Compose 的 setup 服务也挂载同一 data/config/governance 三个卷；自定义维护容器必须使用相同挂载，不能锁住镜像内另一个空目录后宣称原业务存储已独占。当前进程锁不等于在线队列已经排空，完整治理执行仍需单独完成暂停、在途结果核对和持久清理。
+
 ## 可复现验证
 
 ```sh
