@@ -203,6 +203,39 @@ def probe(phase):
         )
         print("Revoked read grant and installed recall hook remain denied after restart")
         return
+    preview_body = {**scope, "action": "forget", "record_ids": [state["memory_id"]]}
+    preview_path = "/hub/v1/governance/preview"
+    assert request(preview_path, token, "POST", preview_body)[0] == 403
+    code, preview = request(preview_path, admin, "POST", preview_body)
+    assert code == 200 and preview["total"] == 2
+    assert preview["execution_available"] is False and preview["consistency"] == "observational"
+    assert {item["record_id"] for item in preview["items"]} == {state["memory_id"], state["raw_id"]}
+    assert (
+        next(item for item in preview["items"] if item["kind"] == "raw")["proposed_effect"]
+        == "retain_for_explicit_read"
+    )
+    code, purge = request(preview_path, admin, "POST", {**preview_body, "action": "purge"})
+    assert code == 200 and all(
+        item["proposed_effect"] == "remove_hub_content" for item in purge["items"]
+    )
+    assert (
+        request(
+            preview_path,
+            admin,
+            "POST",
+            {
+                "scope_id": "global",
+                "action": "forget",
+                "record_ids": [state["foreign_id"]],
+            },
+        )[0]
+        == 409
+    )
+    if phase == "before":
+        state["preview_digest"] = preview["view_digest"]
+        STATE.write_text(json.dumps(state))
+    else:
+        assert preview["view_digest"] == state["preview_digest"]
     context, status = hook()
     assert status["state"] == "retrieved" and status["records"] == 1
     assert state["memory_id"] in context and "蓝色" in context
@@ -234,7 +267,7 @@ def probe(phase):
             == 200
         )
         assert cli("history-list", scope)[0] == 2
-    print(f"Real SDK search, provenance, installed read CLI and recall hook passed ({phase})")
+    print(f"Real SDK reads, governance preview, installed CLI and recall hook passed ({phase})")
 
 
 if __name__ == "__main__":
