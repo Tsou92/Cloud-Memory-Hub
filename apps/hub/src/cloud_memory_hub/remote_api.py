@@ -9,6 +9,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from cloud_memory_hub.events import EventEnvelope
+from cloud_memory_hub.governance_plan import PreviewRequest
+from cloud_memory_hub.governance_preview import GovernancePreview
 from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, PrivacyError, parse_json
 from cloud_memory_hub.read_contract import READ_OPERATIONS
 from cloud_memory_hub.remote_access import (
@@ -67,7 +69,10 @@ def device_credential(request: Request) -> str:
 
 
 def create_remote_api(
-    store: DeviceAccessStore, ingest: RemoteIngest, reads: RemoteRead
+    store: DeviceAccessStore,
+    ingest: RemoteIngest,
+    reads: RemoteRead,
+    previews: GovernancePreview,
 ) -> Starlette:
     async def projects(request: Request):
         require_admin(request)
@@ -166,6 +171,11 @@ def create_remote_api(
     async def access_error(request: Request, error: AccessError):
         return response({"detail": error.code}, error.status)
 
+    async def governance_preview(request: Request):
+        require_admin(request)
+        body = await read_body(request, PreviewRequest)
+        return response(await previews.preview(body))
+
     def read_endpoint(operation, model):
         async def read(request: Request):
             credential = device_credential(request)
@@ -183,6 +193,7 @@ def create_remote_api(
 
     return Starlette(
         routes=[
+            Route("/hub/v1/governance/preview", governance_preview, methods=["POST"]),
             Route("/hub/v1/projects", projects, methods=["GET", "POST"]),
             Route("/hub/v1/devices", devices, methods=["GET", "POST"]),
             Route("/hub/v1/devices/{device_id:uuid}/grants", grants, methods=["PUT"]),

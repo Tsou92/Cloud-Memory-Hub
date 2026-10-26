@@ -14,6 +14,9 @@ from importlib.metadata import version
 from pathlib import Path
 from uuid import uuid4
 
+from cloud_memory_hub.governance_inventory import observe_inventory
+from cloud_memory_hub.governance_journal import GovernanceError
+from cloud_memory_hub.governance_plan import plan_relations
 from hy_memory.models.memory import MemoryLayer, MemoryNode, MemoryStatus
 from one_memory.hy_memory_bridge import HyMemoryBridge, builtin_retrieval_snapshot
 
@@ -26,6 +29,7 @@ async def inspect(root):
         key: str(uuid4())
         for key in ("raw", "old", "head", "summary", "active", "archived", "foreign")
     }
+    ids["active"] = "synthetic:graph-active"
     scope, foreign = "cmh:synthetic:project", "cmh:synthetic:other"
     try:
         sdk = await bridge._get_client()
@@ -112,8 +116,88 @@ async def inspect(root):
         default_page = await bridge.list_sdk_memories(user_id=scope, limit=100)
         reverse_ids = {row["node_id"] for row in reverse}
         edge_ids = {row[0] for row in strict_edges}
+        inventory = await observe_inventory(bridge, scope)
+        assert set(inventory) == {value for key, value in ids.items() if key != "foreign"}
+        closure = plan_relations(inventory, (ids["head"], ids["summary"]))
+        assert set(closure["record_ids"]) == set(inventory)
+        assert inventory[ids["archived"]].status == "archived"
+        graph = sdk._graph_store
+        original_run = graph._run
+
+        async def unavailable(*args, **kwargs):
+            raise RuntimeError("synthetic private graph failure")
+
+        graph._run = unavailable
+        try:
+            try:
+                await observe_inventory(bridge, scope)
+            except GovernanceError as error:
+                assert str(error) == "governance_inventory_unavailable"
+            else:
+                raise AssertionError("strict_inventory_masked_graph_failure")
+        finally:
+            graph._run = original_run
+
+        async def move_graph_copy(owner):
+            await graph._run(
+                "MATCH (m:Memory) WHERE m.node_id=$id SET m.user_id=$owner",
+                {"id": ids["foreign"], "owner": owner},
+            )
+
+        # The vector copy is in our scope; the same ID in the graph is foreign.
+        result = await asyncio.to_thread(
+            sdk.import_memory_exact,
+            "Synthetic local copy of a foreign ID",
+            memory_id=ids["foreign"],
+            user_id=scope,
+            agent_id="synthetic-agent",
+        )
+        assert result["success"]
+        try:
+            await observe_inventory(bridge, scope)
+        except GovernanceError as error:
+            assert str(error) == "governance_backend_conflict"
+        else:
+            raise AssertionError("strict_inventory_ignored_foreign_graph_identity")
+        await asyncio.to_thread(
+            lambda: sdk._loop_thread.run(sdk._vector_store.delete(ids["foreign"]))
+        )
+
+        # Reverse direction: graph belongs here, vector copy belongs elsewhere.
+        result = await asyncio.to_thread(
+            sdk.import_memory_exact,
+            "Synthetic foreign vector copy",
+            memory_id=ids["foreign"],
+            user_id=foreign,
+            agent_id="synthetic-agent",
+        )
+        assert result["success"]
+        await asyncio.to_thread(lambda: sdk._loop_thread.run(move_graph_copy(scope)))
+        try:
+            await observe_inventory(bridge, scope)
+        except GovernanceError as error:
+            assert str(error) == "governance_backend_conflict"
+        else:
+            raise AssertionError("strict_inventory_ignored_foreign_vector_identity")
+        await asyncio.to_thread(lambda: sdk._loop_thread.run(move_graph_copy(foreign)))
+
+        # Same ID across the real stores must not silently prefer the VDB copy.
+        result = await asyncio.to_thread(
+            sdk.import_memory_exact,
+            "Synthetic conflicting backend body",
+            memory_id=ids["active"],
+            user_id=scope,
+            agent_id="synthetic-agent",
+        )
+        assert result["success"]
+        try:
+            await observe_inventory(bridge, scope)
+        except GovernanceError as error:
+            assert str(error) == "governance_backend_conflict"
+        else:
+            raise AssertionError("strict_inventory_ignored_backend_conflict")
         report = {
-            "status": "observed_gaps",
+            "status": "observed_gaps_and_validated_strict_inventory",
             "sdk_version": version("hy-memory"),
             "real_sdk_and_graph": True,
             "external_model_called": False,
@@ -128,6 +212,10 @@ async def inspect(root):
             "reverse_helper_crosses_user_scope": ids["foreign"] in reverse_ids,
             "scoped_storage_query_includes_archived": edge_ids == {ids["active"], ids["archived"]},
             "evidence_query_failure_returns_empty": masked == [],
+            "strict_inventory_includes_archived_and_singular_anchor": True,
+            "strict_inventory_rejects_graph_failure": True,
+            "strict_inventory_rejects_backend_conflict": True,
+            "strict_inventory_rejects_foreign_backend_identity": True,
             "product_governance_validated": False,
         }
         assert report["sdk_version"] == "2.0.5.dev3"

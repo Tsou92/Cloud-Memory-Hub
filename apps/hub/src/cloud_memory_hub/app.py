@@ -10,6 +10,8 @@ from cloud_memory_hub.boundary import CloudBoundary
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.governance_journal import GovernanceError
+from cloud_memory_hub.governance_preview import GovernancePreview
+from cloud_memory_hub.privacy import CredentialFilter
 from cloud_memory_hub.remote_api import create_remote_api
 from cloud_memory_hub.remote_ingest import RemoteIngest
 from cloud_memory_hub.remote_read import RemoteRead
@@ -52,10 +54,16 @@ def create_hub(config: HubConfig) -> CloudBoundary:
     core.state.cmh_governance = governance
     reads = RemoteRead(devices, lambda: _sdk_library_bridge(core))
     core.state.cmh_reads = reads
+    previews = GovernancePreview(
+        governance,
+        lambda: _sdk_library_bridge(core),
+        CredentialFilter((config.admin_token, config.encryption_key.decode())),
+    )
+    core.state.cmh_previews = previews
     return CloudBoundary(
         core,
         config,
         internal_token,
-        remote_api=create_remote_api(devices, ingest, reads),
+        remote_api=create_remote_api(devices, ingest, reads, previews),
         governance=governance,
     )
