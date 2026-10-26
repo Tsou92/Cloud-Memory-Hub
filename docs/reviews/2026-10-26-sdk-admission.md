@@ -14,9 +14,21 @@
 - 实际 Core lifespan 验证管理 bridge、处理 bridge 和 supervisor 读取 bridge 共用同一实例准入；使用真实 SDK 写入合成记忆，在独占前后读取成功。独占期间外来 HTTP 请求返回固定 503，响应没有记忆正文；独占主体可通过同 Task 检查记录。
 - 保留原上游 runner，执行 `test_hy_memory_bridge.py`、`test_memory_processing.py`、`test_sdk_memory_qa.py`：162 项通过，1 项上游已标记预期失败，分类完整。该预期失败涉及 D-16「被替代证据不会撤回其记忆」，不计作通过，也不能据此宣称治理已完成。
 - `make check-runtime`：255 项通过；`make check` 的格式、静态检查、19 项工程门禁、文档路径、源码凭证扫描及差异检查通过。新增上游补丁的两份 Python 源码也通过上游配置的静态检查。
-- 安装镜像及 NAS 新补丁验证另行记录。此前 NAS 常驻的 `963d276` 不包含本补丁。
+- 安装镜像及 NAS 新补丁验证见下文；此前的 `963d276` 不包含本补丁。
 
 所有测试使用合成内容，没有启用外部生成模型或改动日常客户端配置。
+
+## 安装镜像与 NAS
+
+源码 `541fa49695c1d4259ec882aabf66c8e36aea702c` 构建为 Linux amd64 镜像 `cloud-memory-hub:dev-541fa49`；配置摘要为 `sha256:98f49f87c5c0c15be51889e3eafb4e95ebea0369b1fd6d898e1f42a08ac44d00`。导出归档为 261,206,528 字节，SHA-256 为 `a4879f6998d8e6cdfe767b70f382fc05faeb9fc93878198d160531594a857860`。NAS 加载前后核对归档大小／摘要、镜像配置摘要、源码标签及平台。
+
+构建初次因 Docker Hub 认证连接 EOF 失败；固定为此前已使用的官方 Dockerfile frontend 摘要后进入下载阶段，又遇到模型下载 TLS EOF。验证现有代理可达后，仅用本次构建的预定义代理参数完成构建，最终镜像环境中没有代理设置。没有改 Dockerfile、依赖版本、TLS 校验或模型摘要校验，也没有改动系统／Docker／NAS 全局网络配置。参数机制见 [Docker frontend](https://docs.docker.com/build/buildkit/frontend/) 和 [构建代理参数](https://docs.docker.com/build/building/variables/#proxy-arguments)。
+
+本地与 NAS 分别通过完整容器探针，覆盖离线编码／分词、初始化、身份／授权、接纳与补传、实际 SDK 读取／预览、已安装 CLI／hook／采集、撤销、重启和存储租约。另在两端的禁网、只读根目录独立容器中，从 site-packages 创建真实 Core，验证三个实际工厂在共享独占期间拒绝新 prepare，恢复后能初始化并读取实际空 SDK；使用临时目录，未操作常驻实例的存储。
+
+常驻空实验实例停服后保存三个卷和部署配置的私有备份，完成 `963d276 → 541fa49 → 963d276 → 541fa49`。最终新版健康，身份、凭证、空库、治理状态和三个卷保持一致；3 GiB／2 CPU、只读根目录、回环端口和 SSH 配置保持原值。回退未覆盖或丢弃治理记录；这仍是空实验实例的镜像回退验证，不是完整备份恢复或删除防复活验收。
+
+私有原始日志、归档及备份清单留在忽略目录，没有进入 Git。
 
 ## 尚需接通
 
