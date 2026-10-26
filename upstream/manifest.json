@@ -29,6 +29,11 @@
       "path": "patches/0005-external-source-write-authorizer.patch",
       "scope": "remote_source_authorization_with_hub_regression_tests",
       "digest": "sha256:0e9797ec5b970802f1fabfe32b1458e2fb65cfb53cc969b64cd9cc9f1b668786"
+    },
+    {
+      "path": "patches/0006-shared-sdk-operation-guard.patch",
+      "scope": "optional_sdk_operation_admission_with_hub_regression_tests",
+      "digest": "sha256:d10d7103541c85bb157823e21aa225f3425386e5c3f5ff847781feb83f2e9376"
     }
   ]
 }

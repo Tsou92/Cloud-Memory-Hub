@@ -1,0 +1,87 @@
+--- a/memhub/apps/core/src/one_memory/hy_memory_bridge.py
++++ b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+@@ -7,7 +7,7 @@
+ import sqlite3
+ import threading
+ from collections.abc import AsyncIterator, Callable, Collection, Coroutine, Mapping, Sequence
+-from contextlib import asynccontextmanager, closing
++from contextlib import AbstractAsyncContextManager, asynccontextmanager, closing, nullcontext
+ from datetime import UTC, datetime
+ from enum import StrEnum
+ from functools import wraps
+@@ -484,12 +484,14 @@
+         data_dir: Path,
+         client: HyMemoryClientProtocol | None = None,
+         http_transport_factory: Callable[[], Any] | None = None,
++        operation_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
+     ) -> None:
+         self.profile = profile
+         self.api_key = api_key
+         self.data_dir = data_dir
+         self._client = client
+         self._http_transport_factory = http_transport_factory
++        self._operation_guard = operation_guard
+         self._client_lock = asyncio.Lock()
+         self._write_lock = asyncio.Lock()
+         self._last_bindings: HyWriteBindings | None = None
+@@ -502,7 +504,8 @@
+         if task is not None and self._access_owner is task:
+             yield
+             return
+-        async with self._access_lock:
++        guard = self._operation_guard() if self._operation_guard is not None else nullcontext()
++        async with guard, self._access_lock:
+             self._access_owner = task
+             try:
+                 yield
+@@ -515,6 +518,7 @@
+             await self._get_client()
+             await _joined_thread(_warm_hy_write_dependencies)
+ 
++    @_exclusive
+     async def prepare(self) -> None:
+         """Initialize HY before a durable model-invocation marker is written."""
+         await self._get_client()
+--- a/memhub/apps/core/src/one_memory/api.py
++++ b/memhub/apps/core/src/one_memory/api.py
+@@ -14,7 +14,7 @@
+     Iterable,
+     MutableMapping,
+ )
+-from contextlib import asynccontextmanager, nullcontext, suppress
++from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext, suppress
+ from copy import copy
+ from datetime import UTC, datetime, timedelta
+ from enum import StrEnum
+@@ -825,6 +825,7 @@
+     source_catalog: dict[str, SourceRegistration] | None = None,
+     secret_store: SecretStore | None = None,
+     source_write_authorizer: Callable[[str], bool | None] | None = None,
++    sdk_operation_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
+ ) -> FastAPI:
+     runtime_settings = settings or load_settings()
+     if runtime_settings.retrieval_index_enabled and not manage_runtime:
+@@ -1129,6 +1130,7 @@
+                     profile=profile,
+                     api_key=api_key,
+                     data_dir=data_dir,
++                    operation_guard=sdk_operation_guard,
+                     http_transport_factory=lambda: AuditedModelTransport(
+                         app.state.model_request_audit_store,
+                         profile_id=profile.profile_id,
+@@ -1610,6 +1612,7 @@
+     )
+     app.state.settings = runtime_settings
+     app.state.source_write_authorizer = source_write_authorizer
++    app.state.sdk_operation_guard = sdk_operation_guard
+ 
+     @app.middleware("http")
+     async def reject_legacy_memory_authority(
+@@ -5406,6 +5409,7 @@
+             profile=builtin_retrieval_snapshot(),
+             api_key=None,
+             data_dir=cast(Settings, app.state.settings).data_dir,
++            operation_guard=getattr(app.state, "sdk_operation_guard", None),
+         )
+         app.state.sdk_library_bridge = bridge
+     return bridge
