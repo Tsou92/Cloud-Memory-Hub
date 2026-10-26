@@ -3,6 +3,7 @@
 import argparse
 import os
 import secrets
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -11,11 +12,18 @@ from cryptography.fernet import Fernet
 from cloud_memory_hub.config import HubConfig, read_private_file
 from cloud_memory_hub.governance_authority import activate_authority, require_separate_directory
 from cloud_memory_hub.remote_access import DeviceAccessStore
+from cloud_memory_hub.storage_lease import StorageLease, StorageLeaseError
 
 
 def initialize(directory: Path, *, governance_dir: Path) -> None:
     require_separate_directory(governance_dir, directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    governance_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with StorageLease(directory, governance_dir):
+        _initialize_locked(directory, governance_dir)
+
+
+def _initialize_locked(directory, governance_dir):
     DeviceAccessStore._check_private(directory, directory=True)
     values = {
         "admin-token": secrets.token_urlsafe(48).encode(),
@@ -42,7 +50,7 @@ def initialize(directory: Path, *, governance_dir: Path) -> None:
         os.close(descriptor)
 
 
-def main() -> None:
+def _main() -> None:
     os.umask(0o077)
     parser = argparse.ArgumentParser(prog="cloud-memory-hub")
     parser.add_argument(
@@ -66,23 +74,36 @@ def main() -> None:
     if args.command == "migrate-governance":
         if not args.writers_stopped:
             parser.error("migrate-governance requires stopped writers and --writers-stopped")
-        activate_authority(
-            config_dir, governance_dir, read_private_file(config_dir / "encryption-key").strip()
-        )
+        key = read_private_file(config_dir / "encryption-key").strip()
+        data_dir = Path(os.environ.get("CMH_DATA_DIR", "/data"))
+        data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        governance_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with StorageLease(data_dir, config_dir, governance_dir):
+            activate_authority(config_dir, governance_dir, key)
         print("Governance binding verified. Device identities and credentials preserved.")
         return
     if args.config_dir or args.governance_dir or args.writers_stopped:
         parser.error("serve uses CMH_CONFIG_DIR / CMH_GOVERNANCE_DIR environment settings")
-    from cloud_memory_hub.app import create_hub
-
     config = HubConfig.from_environment()
-    uvicorn.run(
-        create_hub(config),
-        host=config.host,
-        port=config.port,
-        access_log=False,
-        proxy_headers=False,
-    )
+    config.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        from cloud_memory_hub.app import create_hub
+
+        uvicorn.run(
+            create_hub(config),
+            host=config.host,
+            port=config.port,
+            access_log=False,
+            proxy_headers=False,
+        )
+
+
+def main() -> None:
+    try:
+        _main()
+    except StorageLeaseError as error:
+        print(f"cloud-memory-hub: {error}", file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

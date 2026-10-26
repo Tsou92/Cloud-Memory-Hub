@@ -18,6 +18,7 @@ services:
     command: ["init"]
     profiles: ["setup"]
     volumes:
+      - hub_data:/data
       - hub_config:/config
       - hub_governance:/governance
     network_mode: none

@@ -66,6 +66,12 @@ def smoke() -> None:
         # An embedded SDK has one live writer. Seed the disposable fixture with
         # the service stopped, then reopen it through the real server process.
         run(["stop", "hub"])
+        stage = "stopped maintenance lease"
+        stopped = json.loads(run(["ps", "--all", "--format", "json", "hub"]))
+        assert stopped["State"] == "exited"
+        migration = run(["run", "--rm", "setup", "migrate-governance", "--writers-stopped"])
+        assert "Governance binding verified" in migration
+        print("Stopped Compose maintenance acquired the shared storage leases", flush=True)
         stage = "seed read fixture"
         run(
             [

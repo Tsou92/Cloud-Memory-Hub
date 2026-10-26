@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
+import subprocess
 import sys
 from http.cookiejar import CookieJar
 from pathlib import Path
@@ -17,6 +19,16 @@ STATE = Path("/data/smoke-state.json")
 
 
 def probe(phase: str) -> None:
+    for command in (["serve"], ["migrate-governance", "--writers-stopped"], ["init"]):
+        result = subprocess.run(
+            ["/opt/cmh/venv/bin/cloud-memory-hub", *command],
+            env={**os.environ, "CMH_PORT": "8801"},
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert result.returncode == 2
+        assert result.stderr.strip() == "cloud-memory-hub: storage_in_use"
     token = Path("/config/admin-token").read_text().strip()
     cookies = CookieJar()
     client = build_opener(HTTPCookieProcessor(cookies))
@@ -112,7 +124,7 @@ def probe(phase: str) -> None:
             hashlib.sha256(cipher.decrypt(row[0])).hexdigest() == state["credential_hash"]
             for row in rows
         ), "Encrypted credential did not survive restart"
-    print(f"Container {phase}-restart checks passed")
+    print(f"Container {phase}-restart checks and live storage exclusion passed")
 
 
 if __name__ == "__main__":
