@@ -43,6 +43,7 @@
 | 治理范围预览 | [管理员观察接口](docs/governance-preview.md) · [验证记录](docs/reviews/2026-10-26-governance-preview.md) |
 | 维护与服务互斥 | [存储租约设计](docs/adr/0013-runtime-storage-exclusion.md) · [安装与 NAS 验证](docs/reviews/2026-10-26-storage-exclusion.md) |
 | SDK 共享准入 | [设计与边界](docs/adr/0014-shared-sdk-admission.md) · [安装与 NAS 验证](docs/reviews/2026-10-26-sdk-admission.md) |
+| 未知写入恢复 | [精确结果核对](docs/adr/0015-sdk-unknown-write-reconciliation.md) · [验证与限制](docs/reviews/2026-10-27-sdk-reconciliation.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查

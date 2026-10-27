@@ -34,6 +34,11 @@
       "path": "patches/0006-shared-sdk-operation-guard.patch",
       "scope": "optional_sdk_operation_admission_with_hub_regression_tests",
       "digest": "sha256:d10d7103541c85bb157823e21aa225f3425386e5c3f5ff847781feb83f2e9376"
+    },
+    {
+      "path": "patches/0007-sdk-write-outcome-reconciliation.patch",
+      "scope": "optional_sdk_outcome_reconciliation_with_atomic_receipts",
+      "digest": "sha256:67199a23f3fd883319067f036b5bb5f6a5744ee8a3798755c81c3ecadce3c636"
     }
   ]
 }
