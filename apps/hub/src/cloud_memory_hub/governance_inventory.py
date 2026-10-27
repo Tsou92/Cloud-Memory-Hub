@@ -16,6 +16,7 @@ from one_memory.hy_memory_bridge import _joined_thread
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.privacy import PrivacyError, parse_json
+from cloud_memory_hub.sdk_productivity import has_productivity_data
 
 MAX_RECORDS = 10_000
 MAX_EDGES = 100_000
@@ -105,6 +106,8 @@ async def _check_ownership(vector, graph, records, vector_ids, namespace):
 
 
 async def _observe(sdk, namespace):
+    if await _joined_thread(has_productivity_data, sdk._config.coding.db_path, namespace):
+        raise GovernanceError("governance_productivity_inventory_incomplete")
     vector = sdk._vector_store
     if not isinstance(vector, ChromaVectorStore):
         raise GovernanceError("governance_backend_unsupported")

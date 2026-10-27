@@ -1,0 +1,154 @@
+--- a/memhub/apps/core/src/one_memory/api.py
++++ b/memhub/apps/core/src/one_memory/api.py
+@@ -826,6 +826,7 @@
+     secret_store: SecretStore | None = None,
+     source_write_authorizer: Callable[[str], bool | None] | None = None,
+     sdk_operation_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
++    sdk_reconcile_unknown: Callable[[], Awaitable[None]] | None = None,
+ ) -> FastAPI:
+     runtime_settings = settings or load_settings()
+     if runtime_settings.retrieval_index_enabled and not manage_runtime:
+@@ -1166,9 +1167,10 @@
+
+             async def reconcile_unknown_writes() -> None:
+                 if app.state.memory_authority is MemoryAuthority.SDK:
+-                    # Unknown SDK writes must be reconciled by SDK request ID.
+-                    # Until that direct path is available, retain them as
+-                    # unknown rather than re-running a possibly successful add.
++                    # The SDK composition may prove an exact persisted outcome.
++                    # No callback means retain unknown; never retry a possible add.
++                    if sdk_reconcile_unknown is not None:
++                        await sdk_reconcile_unknown()
+                     return
+                 await app.state.memory_processing_supervisor.reconcile_unknown_outputs(
+                     exclude_error_codes=NON_RETRYABLE_POST_WRITE_CODES,
+--- a/memhub/apps/core/src/one_memory/hy_memory_bridge.py
++++ b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+@@ -1369,7 +1369,9 @@
+             return await _coding_result(client, request, raw)
+         raw_memory_id = raw.get("memory_id")
+         source_raw_ids = (
+-            (raw_memory_id,) if isinstance(raw_memory_id, str) and raw_memory_id else ()
++            (raw_memory_id,)
++            if expected_contents is None and isinstance(raw_memory_id, str) and raw_memory_id
++            else ()
+         )
+         raw_ids = raw.get("memory_ids")
+         if not isinstance(raw_ids, list):
+--- a/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
++++ b/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
+@@ -358,10 +358,10 @@
+
+     `request_id` is the durable queue's idempotency key. It identifies the row
+     for queue inspection and is the value `DurableWriteQueue.get()` accepts.
+-    It is **not** the HY request id: `MemoryProcessingSupervisor` derives the
+-    HY handle from the task it creates, so an inquiry implementation must
+-    obtain that task-layer handle separately rather than passing this value to
+-    HY. This is discovery only: it does not decide whether HY has the write,
++    In SDK authority it is also the SDK request id. In legacy authority,
++    `MemoryProcessingSupervisor` derives a separate task-layer handle which
++    must be obtained before querying HY. This is discovery only: it does not
++    decide whether HY has the write,
+     and it deliberately exposes no transition method that could turn
+     `unknown` back into retryable work.
+     """
+@@ -1755,7 +1755,16 @@
+                 )
+         return changed
+
+-    def resolve_unknown(self, job_id: str, *, found: bool, detail: str = "") -> str | None:
++    def resolve_unknown(
++        self,
++        job_id: str,
++        *,
++        found: bool,
++        detail: str = "",
++        sdk_receipt: DurableSdkReceipt | None = None,
++        expected_request: WriteRequest | None = None,
++        expected_updated_at: str | None = None,
++    ) -> str | None:
+         """Retire an `unknown` job after an inquiry, never by guessing.
+
+         `unknown` means HY may already hold the write; the only safe way out is
+@@ -1768,6 +1777,9 @@
+
+         Returns the new state, or `None` when the row is missing or not
+         `unknown` (an already-resolved row is left untouched).
++
++        Optional SDK receipts require a matching frozen request and observation
++        timestamp. State and IDs commit together, leaving legacy callers intact.
+         """
+         from one_memory.memory_server.contracts import WriteJobState as JobState
+         from one_memory.memory_server.job_state import (
+@@ -1775,6 +1787,33 @@
+             JobEvent,
+             next_state,
+         )
++
++        expected_payload = None
++        receipt_values: tuple[str, ...] = ()
++        if sdk_receipt is not None:
++            if (
++                not self.sdk_authority
++                or not found
++                or sdk_receipt.job_id != job_id
++                or expected_request is None
++                or not expected_updated_at
++                or not expected_request.input_records
++                or any(
++                    not isinstance(value, str) or not value
++                    for value in (*sdk_receipt.raw_ids, *sdk_receipt.memory_ids)
++                )
++            ):
++                raise ValueError("sdk_reconcile_receipt_invalid")
++            expected_payload = json.dumps(
++                expected_request.model_dump(mode="json", exclude={"event_at", "time_quality"}),
++                sort_keys=True,
++            )
++            receipt_values = (
++                json.dumps(sdk_receipt.raw_ids),
++                json.dumps(sdk_receipt.memory_ids),
++            )
++        elif expected_request is not None or expected_updated_at is not None:
++            raise ValueError("sdk_reconcile_receipt_required")
+
+         event = JobEvent.RESOLVED if found else JobEvent.GIVE_UP
+         target = next_state(JobState.UNKNOWN, event)
+@@ -1784,9 +1823,17 @@
+             connection,
+         ):
+             row = connection.execute(
+-                "SELECT state FROM memory_write_jobs WHERE job_id=?", (job_id,)
++                "SELECT state,updated_at,payload_json,last_error FROM memory_write_jobs "
++                "WHERE job_id=?",
++                (job_id,),
+             ).fetchone()
+             if row is None or str(row["state"]) != UNKNOWN:
++                return None
++            if sdk_receipt is not None and (
++                row["updated_at"] != expected_updated_at
++                or row["payload_json"] != expected_payload
++                or row["last_error"] in NON_RETRYABLE_POST_WRITE_CODES
++            ):
+                 return None
+             # Re-affirm the transition against the row we actually hold, so a
+             # race that changed it cannot be forced into an illegal state.
+@@ -1794,13 +1841,17 @@
+                 next_state(JobState(str(row["state"])), event)
+             except IllegalTransition:
+                 return None
++            receipt_sql = (
++                ", sdk_raw_ids_json=?, sdk_memory_ids_json=?" if sdk_receipt is not None else ""
++            )
+             connection.execute(
+                 "UPDATE memory_write_jobs SET state=?, lease_owner=NULL, "
+-                "lease_expires_at=NULL, last_error=?, updated_at=? WHERE job_id=?",
++                f"lease_expires_at=NULL, last_error=?, updated_at=?{receipt_sql} WHERE job_id=?",
+                 (
+                     str(target),
+                     detail or (None if found else "model_content_outcome_not_found"),
+                     now,
++                    *receipt_values,
+                     job_id,
+                 ),
+             )
