@@ -18,7 +18,19 @@ Hub 核对请求、用户／Agent／会话、操作、终态和所有声明引�
 - 原上游隔离 runner：`test_memory_server_durable_queue.py`、`test_hy_memory_bridge.py`、`test_memory_processing.py` 共 346 项通过、1 项已有预期失败。该项是 D-16「被替代 Evidence 未撤回旧记忆」，不计作通过。
 - SDK `test_write_outcome_client.py` 四项回归通过。首次在 Hub 环境执行缺少异步测试插件；按上游锁定的 pytest-asyncio 1.4.0 建立临时测试覆盖环境后重跑通过，没有改动运行依赖或跳过异步测试。
 - `make check` 的格式、静态检查、19 项工程门禁、文档路径、凭证扫描及差异检查通过；修改的上游源码也通过其配置下的静态检查。
-- `make probe-sdk-reconciliation` 对应的独立进程探针已执行通过：seed 进程退出后，recover 进程加载相同存储，通过生产回调恢复四类回执，未重发写入、未初始化 coding writer。安装／NAS 制品验证结果在完成后补充；不能从源码探针推断已部署新版。
+- `make probe-sdk-reconciliation` 对应的独立进程探针已执行通过：seed 进程退出后，recover 进程加载相同存储，通过生产回调恢复四类回执，未重发写入、未初始化 coding writer。安装／NAS 制品证据见下文。
+
+## 安装镜像与 NAS
+
+提交 `3002468bfe94def796d75026ea5b2daf4c0099e2` 构建为 Linux amd64 镜像 `cloud-memory-hub:dev-3002468`。配置摘要为 `sha256:e6417c3ab02bb27ddafc3fe927c1b47cd4fde3c63bf51c82b0fd8b9e9a4bb9eb`；导出归档 261,228,032 字节，SHA-256 为 `577066dfaed8436781ade87d884c7657a1aac511294a2458ef480c10404cba5b`。NAS 接收后核对归档大小／摘要，加载后核对镜像配置摘要、源码标签和平台。
+
+本地及 NAS 都通过完整容器探针，覆盖模型文件摘要、离线编码与分词、初始化／认证、设备授权、过滤投递、幂等重放、实际 SDK 读取、观察预览、已安装 CLI／hook／采集、撤销、重启持久化及存储互斥。另在两端的禁网、只读根目录、3 GiB／2 CPU 隔离容器内，以 site-packages 执行四类 SDK 写入结果的独立进程恢复探针，两端均通过。
+
+新增探针首次使用 768 MiB tmpfs，小于原队列的 1 GiB 磁盘空闲保留量，接纳按设计拒绝。将测试 tmpfs 扩至 2 GiB 后通过；未降低保留阈值或修改产品代码。构建沿用前次验证的官方 frontend 摘要及单次代理参数，最终镜像环境没有代理设置，没有变更全局网络设置。
+
+常驻空实验实例停服后备份 data／config／governance 三个卷及部署配置，验证归档后执行 `541fa49 → 3002468 → 541fa49 → 3002468`。最终容器 healthy，仍仅绑定回环 8800 端口；身份、凭证、空记忆库、空设备／项目／来源／回执、治理 schema 2 及卷挂载均保持一致，存储租约与预览路由核验通过。回退没有恢复旧治理数据。这只是空实例镜像兼容回退，不代替完整历史备份恢复、删除防复活或浏览器验收。
+
+私有日志与归档在忽略目录留存。测试未修改 NAS 的 SSH 配置，没有激活外部生成模型、导入真实历史或改动日常 Agent 设置。
 
 ## 限制与兼容
 
