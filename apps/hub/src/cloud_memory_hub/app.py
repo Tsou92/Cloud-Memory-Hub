@@ -18,6 +18,7 @@ from cloud_memory_hub.remote_read import RemoteRead
 from cloud_memory_hub.sdk_admission import SdkAdmission
 from cloud_memory_hub.sdk_reconcile import SdkReconciler
 from cloud_memory_hub.secret_store import EncryptedSecretStore
+from cloud_memory_hub.unified_read import UnifiedReadBridge
 
 
 def create_hub(config: HubConfig) -> CloudBoundary:
@@ -65,7 +66,7 @@ def create_hub(config: HubConfig) -> CloudBoundary:
     core.state.cmh_sdk_admission = sdk_admission
     core.state.cmh_ingest = ingest
     core.state.cmh_governance = governance
-    reads = RemoteRead(devices, lambda: _sdk_library_bridge(core))
+    reads = RemoteRead(devices, lambda: UnifiedReadBridge(_sdk_library_bridge(core)))
     core.state.cmh_reads = reads
     previews = GovernancePreview(
         governance,

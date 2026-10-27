@@ -22,7 +22,11 @@
 
 每条记录包含 record_id、kind、content、content_offset、next_content_offset、agent_id、session_id、source、layer、memory_at，以及 source_raw_ids／references_truncated。记忆只返回当前 active 且 is_latest 的权威内容，搜索中的旧聚合文本不会直接输出。source_raw_ids 可用 history/get 逐条追溯，但原始正文仍单独检查 history:read。引用 ID 本身不授予任何权限。
 
-上游记忆 get 的 source 表示存储后端而非来源应用，因此记忆响应的 source 留空，使用原始引用追溯。原始记录提供实际 source 和 session_id；正文中的 `<cmh_source_reference>` 只是上传的来源数据，不是已认证的管理命令或权限证明。
+普通上游记忆 get 的 source 表示存储后端而非来源应用，因此该类响应的 source 留空，使用原始引用追溯。工作／编程记忆和原始记录提供实际 source 和 session_id；正文中的 `<cmh_source_reference>` 只是上传的来源数据，不是已认证的管理命令或权限证明。
+
+工作／编程的经验与 active 事实也纳入同一接口，见 [ADR-0016](adr/0016-productivity-read-adapter.md)。其 ID 为 `cmhp:<w|c>:<e|f>:<原生 ID>`，客户端应当作不透明标识原样回传；layer 分别为 working_experience、working_fact、coding_experience、coding_fact。正文是包含任务／解决方式／适用环境，或事实／详情等字段的 JSON 文本。列表按普通、working 经验／事实、coding 经验／事实分段分页；不是全局时间排序。搜索在普通、working、coding 三路结果之间按名次交替选择，每个工作／编程分支内事实与经验交替，不比较跨通道分数。
+
+这类记忆的 `source_raw_ids` 暂为空：上游事实／经验链接与短期 trace 不等于可追溯的完整原始历史。长期原文、完整来源关系和管理网页的统一展示仍待接通。当前只读适配不会创建 productivity 库、集合或初始化 writer；已有库损坏、所需集合缺失会返回 503，不能当作“没有记忆”。旧镜像不能解析新增 ID，回退后会再次遗漏这类读取结果。
 
 每个文本块最多 4096 字符；完整文本先过滤，再分块。需要后续内容时以同一 ID 和 next_content_offset 再次 get。references 最多 32 个，超出时明确 references_truncated；搜索最多核对 64 个成员，达到上限时 candidate_limit_reached=true。响应上限 120 KiB。当前分页是实时视图，列表页可能因记录已失效而为空；只要 next_offset 非空仍可继续。分页不构成变更同步游标，也不保证跨请求快照一致。
 

@@ -8,7 +8,7 @@ from hy_memory.coding.store import _variant_db_path
 
 
 @contextmanager
-def existing_database(path):
+def existing_database(path, *, cross_thread=False):
     path = Path(path)
     if not path.is_absolute() or path.is_symlink():
         raise ValueError("sdk_productivity_path_invalid")
@@ -18,7 +18,11 @@ def existing_database(path):
         yield None
         return
     # mode=ro does not create a database or run upstream initialize/migrations.
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as db:
+    with closing(
+        sqlite3.connect(
+            path.as_uri() + "?mode=ro", uri=True, timeout=0.2, check_same_thread=not cross_thread
+        )
+    ) as db:
         db.execute("PRAGMA query_only=ON")
         yield db
 
