@@ -1,4 +1,4 @@
-.PHONY: check format prepare-upstream check-runtime check-upstream check-web check-container check-claude check-claude-recall probe-sdk-governance probe-sdk-governance-links probe-sdk-reconciliation
+.PHONY: check format prepare-upstream check-runtime check-upstream check-web check-container check-claude check-claude-recall probe-sdk-governance probe-sdk-governance-links probe-sdk-reconciliation probe-productivity-read
 
 check:
 	uv run --locked ruff format --check scripts tests apps/hub/src apps/hub/tests
@@ -32,6 +32,9 @@ probe-sdk-governance-links: prepare-upstream
 
 probe-sdk-reconciliation: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_sdk_reconciliation.py
+
+probe-productivity-read: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_productivity_read.py
 
 check-upstream: prepare-upstream
 	uv run --locked python .local/upstream/hy-memory/memhub/scripts/fetch_embedding_model.py

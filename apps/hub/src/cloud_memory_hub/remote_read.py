@@ -7,6 +7,7 @@ from one_memory.hy_memory_bridge import HyMemoryBridge, HySdkMemoryRecord
 from starlette.concurrency import run_in_threadpool
 
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
+from cloud_memory_hub.productivity_read import ProductivityMemory
 from cloud_memory_hub.read_contract import (
     READ_RESPONSE_BYTES,
     TEXT_BLOCK,
@@ -85,6 +86,7 @@ class RemoteRead:
                         break
                 if limited or len(records) >= request.limit:
                     break
+            limited = limited or getattr(bridge, "candidate_limit_reached", False)
         elif isinstance(request, ListRequest):
             if history:
                 records, total = await bridge.list_sdk_raw(
@@ -156,8 +158,10 @@ class RemoteRead:
                 "agent_id": record.agent_id,
                 "session_id": record.session_id,
                 # SDK memory get() labels its storage backend as `source` (vdb/graph).
-                # Only raw records expose the original source; follow source_raw_ids.
-                "source": None if memory else record.source,
+                # Native productivity records and raw records expose the actual source.
+                "source": (
+                    None if memory and not isinstance(record, ProductivityMemory) else record.source
+                ),
             }
         ).value
         content = clean.pop("content")
