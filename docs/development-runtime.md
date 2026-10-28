@@ -29,7 +29,7 @@ docker compose exec hub cat /config/admin-token
 
 ## 数据与停止
 
-- `hub_data` 保存 Core 数据、接纳的处理任务及索引；`hub_config` 保存管理员凭证、加密密钥、加密的模型凭证数据库，以及设备身份／项目授权、来源和事件回执库。设备权限协议见 [ADR-0004](adr/0004-remote-device-access.md)，上传及回滚语义见 [ADR-0006](adr/0006-remote-ingest.md)。
+- `hub_data` 保存 Core 数据、接纳的处理任务及索引；`hub_config` 保存管理员凭证、加密密钥、加密的模型凭证数据库，以及设备身份／项目授权、来源、事件回执及完整已过滤原文库。配置卷现在也包含长期历史正文，必须纳入与数据卷一致的私有备份和治理范围。设备权限协议见 [ADR-0004](adr/0004-remote-device-access.md)，上传及回滚语义见 [ADR-0006](adr/0006-remote-ingest.md)。
 - `hub_governance` 保存不含正文的治理意图，独立挂载至 `/governance`；普通业务快照恢复不能覆盖或删除它。自定义 `CMH_GOVERNANCE_DIR` 时，目录不能位于 data/config 内，也不能包含它们。机制与限制见 [ADR-0011](adr/0011-governance-authority-and-offline-sync.md)。
 - 普通停止使用 `docker compose down`；不加 `--volumes`。保留卷后再次启动会复用配置和数据。
 - 配置密钥丢失会导致加密凭证无法读取；当前还没有密钥轮换、灾难恢复或完整备份功能，不应依赖此实验版本承载唯一数据。
@@ -51,6 +51,20 @@ docker compose ps
 `--writers-stopped` 只是已停服的显式声明；命令不会代替操作者停止其他挂载相同卷的容器。应使用同一个 Compose 项目名及既有 config/data 卷。迁移保留实例 ID、设备凭证和授权，不执行真实历史导入或启用模型。重复执行只核验既有绑定；不能修复缺失或不可信的治理记录。缺失身份库、密钥错误、记录损坏和水位倒退都应保持停服并恢复可信副本。
 
 版本 2 身份库不能交给旧镜像运行。治理操作已经存在时，不允许通过回滚身份库、丢弃治理卷或恢复旧镜像来重新开放。当前仍未开放完整忘记／彻底删除：检测到待执行的治理意图会暂停整个实例；上游不满足 Hub 删除语义的直接删除入口返回 409。这里只验证迁移和故障保护，不把暂停服务当作产品治理完成。
+
+## 已接纳原文迁移
+
+接纳扩展 `cmh_ingest_schema=2` 与设备权威库版本 2 是两个独立版本。新的归档镜像拒绝普通启动旧接纳格式；先完成上面的治理迁移（若需要），保持停服，完整备份 data/config/governance 三卷、镜像标签及部署配置，再执行：
+
+```sh
+docker compose run --rm setup migrate-originals --writers-stopped
+docker compose up -d --no-build hub
+docker compose ps
+```
+
+该命令要求三个存储租约均可取得，逐条从旧队列冻结输入恢复 Event，与旧摘要、身份和重新生成的 WriteRequest 比对，所有记录通过后一次提交。旧队列已回收、表示有歧义或内容不符时返回 `original_migration_source_unproven` 并回滚整个迁移，不能填空正文后继续。重复运行只验证现有归档。详细兼容边界见 [ADR-0017](adr/0017-accepted-original-archive.md)。
+
+没有下迁移；旧镜像会拒绝新格式。升级后出现问题应保持停服并诊断，不能直接切旧镜像，更不能修改版本号绕过检查。恢复升级前完整备份也必须保留并验证当前独立治理权威，不能用旧备份覆盖新的忘记／删除记录。完整恢复产品流程仍待实现。
 
 ## NAS 目标与当前边界
 

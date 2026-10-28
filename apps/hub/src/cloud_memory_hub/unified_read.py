@@ -3,21 +3,40 @@
 from one_memory.hy_memory_bridge import HySdkMemoryPage, SemanticMemoryHit
 
 from cloud_memory_hub.productivity_read import PREFIX, ProductivityRead, interleave
+from cloud_memory_hub.source_history import PREFIX as ORIGINAL_PREFIX
 
 
 class UnifiedReadBridge:
-    def __init__(self, bridge):
+    def __init__(self, bridge, originals=None):
         self.bridge = bridge
+        self.originals = originals
         self.productivity = ProductivityRead(bridge)
         self.candidate_limit_reached = False
 
-    async def list_sdk_raw(self, **kwargs):
-        return await self.bridge.list_sdk_raw(**kwargs)
+    async def list_sdk_raw(self, *, user_id, limit, offset):
+        if self.originals is None:
+            return await self.bridge.list_sdk_raw(user_id=user_id, limit=limit, offset=offset)
+        records, original_total = await self.originals.page(user_id, limit, offset)
+        remaining = max(0, offset + limit - max(offset, original_total))
+        # The ordinary bridge's list contract requires a positive limit. Use one
+        # metadata page to learn its total when this page is wholly in originals.
+        native, native_total = await self.bridge.list_sdk_raw(
+            user_id=user_id, limit=max(1, remaining), offset=max(0, offset - original_total)
+        )
+        if any(record.raw_id.startswith(ORIGINAL_PREFIX) for record in native):
+            raise ValueError("read_reserved_identity_conflict")
+        return list(records) + list(native[:remaining]), original_total + native_total
 
     async def get_sdk_raw(self, identity):
+        if self.originals is not None and identity.startswith(ORIGINAL_PREFIX):
+            if await self.bridge.get_sdk_raw(identity) is not None:
+                raise ValueError("read_reserved_identity_conflict")
+            return await self.originals.get(identity)
         return await self.bridge.get_sdk_raw(identity)
 
     async def get_sdk_memory(self, identity):
+        if identity.startswith(ORIGINAL_PREFIX):
+            return None
         if identity.startswith(PREFIX):
             if await self.bridge.get_sdk_memory(identity) is not None:
                 raise ValueError("read_reserved_identity_conflict")
@@ -27,7 +46,7 @@ class UnifiedReadBridge:
     @staticmethod
     def _ordinary(records):
         if any(
-            identity.startswith(PREFIX)
+            identity.startswith((PREFIX, ORIGINAL_PREFIX))
             for record in records
             for identity in (record.memory_id, *getattr(record, "member_ids", ()))
         ):

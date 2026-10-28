@@ -2,6 +2,8 @@
 
 日期：2026-10-23。状态：接纳端已实现，本地／NAS 容器及空实例升级回滚验证通过。关联 FR-02、FR-03、FR-04、FR-06、FR-07、FR-08、ENG-01；本批不宣称完整同步、召回或删除恢复验收。
 
+> 历史设计说明：以下 schema v1 的“回执仅存摘要／正文只存队列”方案已由 [ADR-0017](0017-accepted-original-archive.md) 取代。接纳 schema v2 在同一回执事务保存完整过滤原文；设备权威库也已由 ADR-0011 升为版本 2。旧处理队列和 SDK 暂存回收不能满足长期原文要求，不能将本 ADR 的预期投影当作长期保留证据。
+
 ## 复用与补充
 
 固定上游 `b7d9f0e` 的 `memory_server/durable_queue.py` 已提供持久接纳、幂等冲突、claim／lease、模型等待、unknown 核对和 SDK 输出回执。Hub 直接调用同一 `DurableWriteQueue.submit/get`，通过 `EvidenceInput`／`materialize_write_input` 和 `WriteRequest` 冻结输入，不复制队列 SQL，不新增模型调度。

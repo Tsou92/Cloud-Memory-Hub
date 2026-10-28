@@ -11,7 +11,8 @@ from cryptography.fernet import Fernet
 
 from cloud_memory_hub.config import HubConfig, read_private_file
 from cloud_memory_hub.governance_authority import activate_authority, require_separate_directory
-from cloud_memory_hub.remote_access import DeviceAccessStore
+from cloud_memory_hub.original_archive import migrate_originals
+from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
 from cloud_memory_hub.storage_lease import StorageLease, StorageLeaseError
 
 
@@ -54,7 +55,10 @@ def _main() -> None:
     os.umask(0o077)
     parser = argparse.ArgumentParser(prog="cloud-memory-hub")
     parser.add_argument(
-        "command", choices=["serve", "init", "migrate-governance"], nargs="?", default="serve"
+        "command",
+        choices=["serve", "init", "migrate-governance", "migrate-originals"],
+        nargs="?",
+        default="serve",
     )
     parser.add_argument("--config-dir", type=Path)
     parser.add_argument("--governance-dir", type=Path)
@@ -70,6 +74,23 @@ def _main() -> None:
     if args.command == "init":
         initialize(config_dir, governance_dir=governance_dir)
         print("Private configuration and governance authority initialized.")
+        return
+    if args.command == "migrate-originals":
+        if not args.writers_stopped:
+            parser.error("migrate-originals requires stopped writers and --writers-stopped")
+        data_dir = Path(os.environ.get("CMH_DATA_DIR", "/data"))
+        config = HubConfig(
+            data_dir,
+            config_dir,
+            "http://localhost:8800",
+            read_private_file(config_dir / "admin-token").decode("ascii").strip(),
+            read_private_file(config_dir / "encryption-key").strip(),
+            governance_dir=governance_dir,
+        )
+        data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with StorageLease(data_dir, config_dir, governance_dir):
+            count = migrate_originals(config)
+        print(f"Original archive verified; recovered {count} accepted events.")
         return
     if args.command == "migrate-governance":
         if not args.writers_stopped:
@@ -101,7 +122,7 @@ def _main() -> None:
 def main() -> None:
     try:
         _main()
-    except StorageLeaseError as error:
+    except (StorageLeaseError, AccessError) as error:
         print(f"cloud-memory-hub: {error}", file=sys.stderr)
         raise SystemExit(2) from None
 

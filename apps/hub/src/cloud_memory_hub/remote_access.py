@@ -1,7 +1,8 @@
 """NAS device authority only; local host/source grants remain upstream.
 
-See ADR-0004. This database never contains memory, source paths or cleartext
-credentials. Callers must recheck authorization before publishing long work.
+See ADR-0004 and ADR-0017. The intake extension now archives filtered source
+events alongside receipts; device credentials remain hashed. Callers must
+recheck authorization before publishing long work.
 """
 
 from __future__ import annotations

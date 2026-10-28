@@ -22,6 +22,11 @@ from cloud_memory_hub.events import (
     canonical_uuid,
     require_current_filter,
 )
+from cloud_memory_hub.original_archive import (
+    ARCHIVE_VERSION,
+    create_archive_indexes,
+    validate_original,
+)
 from cloud_memory_hub.privacy import CredentialFilter
 from cloud_memory_hub.remote_access import (
     AccessError,
@@ -171,17 +176,20 @@ class RemoteIngest:
                     conversation_id TEXT NOT NULL, record_id TEXT NOT NULL,
                     revision INTEGER NOT NULL,
                     payload_digest TEXT NOT NULL, receipt_id TEXT NOT NULL,
-                    request_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL, payload_json TEXT NOT NULL,
                     PRIMARY KEY(device_id,event_id),
                     UNIQUE(source_id,conversation_id,record_id,revision)
                 )""")
-                db.execute("INSERT INTO cmh_ingest_schema VALUES (1,1)")
+                create_archive_indexes(db)
+                db.execute("INSERT INTO cmh_ingest_schema VALUES (1,?)", (ARCHIVE_VERSION,))
             self._check_schema(db)
 
     @staticmethod
     def _check_schema(db):
         version = db.execute("SELECT version FROM cmh_ingest_schema WHERE id=1").fetchone()
-        if version is None or version[0] != 1:
+        if version is not None and version[0] == 1:
+            raise AccessError("original_retention_migration_required", 503)
+        if version is None or version[0] != ARCHIVE_VERSION:
             raise AccessError("ingest_store_version_unsupported", 503)
         db.execute(
             "SELECT source_id, device_id, scope_id, adapter_id, display_name, revision, status "
@@ -189,7 +197,8 @@ class RemoteIngest:
         )
         db.execute(
             "SELECT device_id, event_id, source_id, scope_id, conversation_id, record_id, "
-            "revision, payload_digest, receipt_id, request_id FROM cmh_event_receipts LIMIT 0"
+            "revision, payload_digest, receipt_id, request_id, payload_json "
+            "FROM cmh_event_receipts LIMIT 0"
         )
 
     @contextmanager
@@ -318,6 +327,7 @@ class RemoteIngest:
             digest = event.payload_digest()
             queue = self._queue()
             if row is not None:
+                validate_original(row, self.access.instance_id)
                 if row["payload_digest"] != digest:
                     raise AccessError("event_identity_conflict", 409)
                 job = queue.get(row["request_id"])
@@ -345,11 +355,12 @@ class RemoteIngest:
                 "payload_digest": digest,
                 "receipt_id": job.job_id,
                 "request_id": job.request_id,
+                "payload_json": event.canonical_payload(),
             }
             db.execute(
                 "INSERT INTO cmh_event_receipts VALUES "
                 "(:device_id,:event_id,:source_id,:scope_id,:conversation_id,:record_id,"
-                ":revision,:payload_digest,:receipt_id,:request_id)",
+                ":revision,:payload_digest,:receipt_id,:request_id,:payload_json)",
                 receipt,
             )
             return self._response(receipt, job)
@@ -365,6 +376,7 @@ class RemoteIngest:
                 raise AccessError("event_not_found", 404)
             if not self._source_allowed(db, device, row["source_id"], row["scope_id"]):
                 raise AccessError("source_not_allowed", 403)
+            validate_original(row, self.access.instance_id)
             job = self._queue().get(row["request_id"])
             if job is None or job.job_id != row["receipt_id"]:
                 raise AccessError("receipt_unavailable", 503)
