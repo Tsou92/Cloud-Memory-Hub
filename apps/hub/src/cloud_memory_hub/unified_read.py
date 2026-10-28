@@ -7,11 +7,15 @@ from cloud_memory_hub.source_history import PREFIX as ORIGINAL_PREFIX
 
 
 class UnifiedReadBridge:
-    def __init__(self, bridge, originals=None):
+    def __init__(self, bridge, originals=None, lineage=None):
         self.bridge = bridge
         self.originals = originals
+        self.lineage = lineage
         self.productivity = ProductivityRead(bridge)
         self.candidate_limit_reached = False
+
+    async def enrich_memory(self, record):
+        return await self.lineage.enrich(record) if self.lineage is not None else record
 
     async def list_sdk_raw(self, *, user_id, limit, offset):
         if self.originals is None:

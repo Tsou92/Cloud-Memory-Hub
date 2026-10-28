@@ -62,7 +62,7 @@ def frozen_request(extracted):
     return request
 
 
-async def seed_output(sdk, bridge, request, scene):
+async def seed_output(sdk, bridge, request, scene, *, typed=False):
     raw_id, memory_id, fact_id = (str(uuid4()) for _ in range(3))
     identity = dict(
         user_id=request.user_id, agent_id=request.agent_id, session_id=request.session_id
@@ -133,10 +133,40 @@ async def seed_output(sdk, bridge, request, scene):
         return dict(success=True, request_id=request.request_id, **result)
 
     operation = "add_extracted" if scene == "extracted" else "add"
-    setattr(sdk, "_async_" + operation + "_impl", extraction_stub)
-    response = await _joined_thread(
-        getattr(sdk, operation), "Synthetic input", **identity, request_id=request.request_id
-    )
+    original = getattr(sdk, "_async_" + operation + "_impl")
+    writer, chain = sdk._get_coding_writer, sdk._observe_chain
+    try:
+        if typed and scene in {"working", "coding"}:
+            from types import SimpleNamespace
+
+            async def controlled_writer(*, variant):
+                assert variant == scene
+                return SimpleNamespace(write=extraction_stub)
+
+            sdk._get_coding_writer = controlled_writer
+            sdk._observe_chain = lambda *args, **kwargs: []
+            response = await _joined_thread(
+                sdk.add,
+                [
+                    {"role": "user", "content": "Synthetic task"},
+                    {"role": "tool", "content": "Synthetic result", "tool_name": "read"},
+                ],
+                **identity,
+                request_id=request.request_id,
+                scene=scene,
+            )
+            assert response["productivity_variant"] == scene
+        else:
+            setattr(sdk, "_async_" + operation + "_impl", extraction_stub)
+            response = await _joined_thread(
+                getattr(sdk, operation),
+                "Synthetic input",
+                **identity,
+                request_id=request.request_id,
+            )
+    finally:
+        setattr(sdk, "_async_" + operation + "_impl", original)
+        sdk._get_coding_writer, sdk._observe_chain = writer, chain
     assert response["success"] and calls == [request.request_id]
     return expected
 

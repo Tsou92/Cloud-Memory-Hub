@@ -134,6 +134,8 @@ async def phase(root, mode):
 def legacy_schema(root):
     # Synthetic-only fixture: no supported production downgrade is provided.
     with sqlite3.connect(root / "config" / "remote-access.sqlite3") as db:
+        for table in ("cmh_event_output_links", "cmh_event_outcomes", "cmh_lineage_schema"):
+            db.execute("DROP TABLE IF EXISTS " + table)
         db.execute("DROP INDEX cmh_receipt_identity")
         db.execute("DROP INDEX cmh_original_scope")
         db.execute("ALTER TABLE cmh_event_receipts DROP COLUMN payload_json")

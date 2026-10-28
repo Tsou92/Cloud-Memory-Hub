@@ -39,6 +39,11 @@
       "path": "patches/0007-sdk-write-outcome-reconciliation.patch",
       "scope": "optional_sdk_outcome_reconciliation_with_atomic_receipts",
       "digest": "sha256:67199a23f3fd883319067f036b5bb5f6a5744ee8a3798755c81c3ecadce3c636"
+    },
+    {
+      "path": "patches/0008-typed-output-provenance.patch",
+      "scope": "typed_sdk_variant_and_optional_durable_output_observer",
+      "digest": "sha256:21290cf6113a30eb2220509d89457dace8d949cf84bf67d4cfeb07826bbd7378"
     }
   ]
 }

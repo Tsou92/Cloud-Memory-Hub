@@ -34,6 +34,10 @@ def receipt_rows(config):
 
 def legacy_schema(config):
     with sqlite3.connect(config.config_dir / "remote-access.sqlite3") as db:
+        # Historical v1 predates the additive lineage extension and its FKs.
+        db.execute("DROP TABLE cmh_event_output_links")
+        db.execute("DROP TABLE cmh_event_outcomes")
+        db.execute("DROP TABLE cmh_lineage_schema")
         db.execute("DROP INDEX cmh_receipt_identity")
         db.execute("DROP INDEX cmh_original_scope")
         db.execute("ALTER TABLE cmh_event_receipts DROP COLUMN payload_json")
