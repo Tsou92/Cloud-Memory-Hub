@@ -8,7 +8,7 @@
 
 运行时开始使用独立治理卷及身份库版本 2；已有实验实例须停服备份后显式迁移，不能直接用旧镜像回退。记录缺失、回滚或存在尚未执行的治理意图时保持隔离。选择性忘记、彻底删除和完整恢复仍待接通，迁移方式见[运行指南](docs/development-runtime.md)。
 
-已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列；接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
+已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
 本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。Claude 每轮在线召回已在隔离的实际 CLI 中验证；日常客户端安装、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md)、[授权读取接口](docs/remote-read.md) 和 [Claude 召回](docs/agent-recall.md)。
 
@@ -45,6 +45,7 @@
 | SDK 共享准入 | [设计与边界](docs/adr/0014-shared-sdk-admission.md) · [安装与 NAS 验证](docs/reviews/2026-10-26-sdk-admission.md) |
 | 未知写入恢复 | [精确结果核对](docs/adr/0015-sdk-unknown-write-reconciliation.md) · [验证与限制](docs/reviews/2026-10-27-sdk-reconciliation.md) |
 | 工作／编程记忆读取 | [只读适配](docs/adr/0016-productivity-read-adapter.md) · [验证与限制](docs/reviews/2026-10-27-productivity-read.md) |
+| 接纳原文长期保留 | [归档与迁移设计](docs/adr/0017-accepted-original-archive.md) · [验证记录](docs/reviews/2026-10-28-original-archive.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查

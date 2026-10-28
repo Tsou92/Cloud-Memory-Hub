@@ -26,7 +26,9 @@
 
 工作／编程的经验与 active 事实也纳入同一接口，见 [ADR-0016](adr/0016-productivity-read-adapter.md)。其 ID 为 `cmhp:<w|c>:<e|f>:<原生 ID>`，客户端应当作不透明标识原样回传；layer 分别为 working_experience、working_fact、coding_experience、coding_fact。正文是包含任务／解决方式／适用环境，或事实／详情等字段的 JSON 文本。列表按普通、working 经验／事实、coding 经验／事实分段分页；不是全局时间排序。搜索在普通、working、coding 三路结果之间按名次交替选择，每个工作／编程分支内事实与经验交替，不比较跨通道分数。
 
-这类记忆的 `source_raw_ids` 暂为空：上游事实／经验链接与短期 trace 不等于可追溯的完整原始历史。长期原文、完整来源关系和管理网页的统一展示仍待接通。当前只读适配不会创建 productivity 库、集合或初始化 writer；已有库损坏、所需集合缺失会返回 503，不能当作“没有记忆”。旧镜像不能解析新增 ID，回退后会再次遗漏这类读取结果。
+这类记忆的 `source_raw_ids` 暂为空：上游事实／经验链接与短期 trace 不等于可追溯的完整原始历史。完整来源关系和管理网页的统一展示仍待接通。当前只读适配不会创建 productivity 库、集合或初始化 writer；已有库损坏、所需集合缺失会返回 503，不能当作“没有记忆”。旧镜像不能解析新增 ID，回退后会再次遗漏这类读取结果。
+
+接纳原文也通过 history/list 和 history/get 提供，ID 为 `cmhe:<receipt UUID>`，见 [ADR-0017](adr/0017-accepted-original-archive.md)。其 content 为完整的已过滤 Event JSON，source 为注册的 adapter_id，session_id 为原始 conversation_id；解析 JSON 可得到完整正文和元数据，读取过滤器可能重新格式化空白，不保证输出的序列化字节与存储完全一致。列表先按接纳顺序倒序列原文，再列 SDK 原生 raw，两者可能内容重叠，不是全局去重／时间排序视图。原文 ID 不能用 memories/get 读取；`memory:read` 也不授予正文访问权。尚未完成 typed SDK output 到该归档的来源链接，不能据此宣称所有提炼结果均可追溯。
 
 每个文本块最多 4096 字符；完整文本先过滤，再分块。需要后续内容时以同一 ID 和 next_content_offset 再次 get。references 最多 32 个，超出时明确 references_truncated；搜索最多核对 64 个成员，达到上限时 candidate_limit_reached=true。响应上限 120 KiB。当前分页是实时视图，列表页可能因记录已失效而为空；只要 next_offset 非空仍可继续。分页不构成变更同步游标，也不保证跨请求快照一致。
 

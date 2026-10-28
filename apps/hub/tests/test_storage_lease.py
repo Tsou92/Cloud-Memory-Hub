@@ -134,6 +134,7 @@ def test_actual_serve_blocks_second_port_and_migration_until_process_exits(tmp_p
             for args, overrides in (
                 (["serve"], {"CMH_PORT": str(free_port())}),
                 (["migrate-governance", "--writers-stopped"], {}),
+                (["migrate-originals", "--writers-stopped"], {}),
             ):
                 result = subprocess.run(
                     [*command, *args],
@@ -155,6 +156,15 @@ def test_actual_serve_blocks_second_port_and_migration_until_process_exits(tmp_p
             )
             assert result.returncode == 0, result.stderr
             assert "binding verified" in result.stdout
+            result = subprocess.run(
+                [*command, "migrate-originals", "--writers-stopped"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert result.returncode == 0, result.stderr
+            assert "recovered 0 accepted events" in result.stdout
             assert all((config / name).read_bytes() == value for name, value in credentials.items())
         finally:
             if process.poll() is None:
