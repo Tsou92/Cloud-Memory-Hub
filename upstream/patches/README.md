@@ -40,3 +40,11 @@
 - 扩大到整个迁移文件时仍有六个既有失败，涉及退役表、移除的迁移号和旧列结构，尚未修复；不能将这 25 项通过视为完整上游回归通过。
 
 2026-10-22 上游新基线已更新错误码并移除旧窗口模块，其完整 `core-pr` 回归通过；此旧补丁停止应用。
+
+## 0008-typed-output-provenance.patch
+
+- 固定 SDK client 在选择生产力 writer 后，将实际 working／coding variant 附加到返回结果及原有 write_outcome。字段为追加兼容，不改变分类、提炼或存储路径。
+- Core 增加默认关闭的输出观察回调，在 SDK 返回后、completed 提交前调用；观察失败沿用 unknown，不另建重试或状态机。
+- 实际执行测试发现两个 drain 入口把已退役的 evidence_store 传给 SDK 成功后的 release_sdk_staging，导致 RetiredAuthorityAccess；改用已有 memory_write_evidence_store，保留原 staging 清理。
+- Hub 必须同时从固定上游源码构建 SDK 和 Core，不能只应用源码补丁却继续安装未带补丁的 PyPI SDK。
+- 保留原队列／bridge／SDK 路由回归；Hub 实际 drain 测试包含提交失败、恢复、类型冲突和重启。详细结果见[关联验证](../../docs/reviews/2026-10-28-output-lineage.md)。

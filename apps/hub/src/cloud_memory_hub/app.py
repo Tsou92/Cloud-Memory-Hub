@@ -11,6 +11,7 @@ from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_preview import GovernancePreview
+from cloud_memory_hub.output_lineage import OutputLineage
 from cloud_memory_hub.privacy import CredentialFilter
 from cloud_memory_hub.remote_api import create_remote_api
 from cloud_memory_hub.remote_ingest import RemoteIngest
@@ -41,12 +42,17 @@ def create_hub(config: HubConfig) -> CloudBoundary:
     devices = governance.access
     sdk_admission = SdkAdmission()
     ingest = RemoteIngest(devices, lambda: core.state.memory_write_queue)
+    lineage = OutputLineage(ingest, lambda: _sdk_library_bridge(core), governance)
     reconciler = SdkReconciler(
-        lambda: core.state.memory_write_queue, lambda: _sdk_library_bridge(core), governance
+        lambda: core.state.memory_write_queue,
+        lambda: _sdk_library_bridge(core),
+        governance,
+        observe_outputs=lineage.observe,
     )
 
     async def reconcile_unknown():
         await reconciler.run()
+        await lineage.reconcile_completed()
 
     def source_write_authorizer(source_key):
         try:
@@ -62,13 +68,17 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         source_write_authorizer=source_write_authorizer,
         sdk_operation_guard=sdk_admission.operation,
         sdk_reconcile_unknown=reconcile_unknown,
+        sdk_output_observer=lineage.observe,
     )
     core.state.cmh_reconciler = reconciler
+    core.state.cmh_lineage = lineage
     core.state.cmh_sdk_admission = sdk_admission
     core.state.cmh_ingest = ingest
     core.state.cmh_governance = governance
     originals = SourceHistory(ingest)
-    reads = RemoteRead(devices, lambda: UnifiedReadBridge(_sdk_library_bridge(core), originals))
+    reads = RemoteRead(
+        devices, lambda: UnifiedReadBridge(_sdk_library_bridge(core), originals, lineage)
+    )
     core.state.cmh_reads = reads
     previews = GovernancePreview(
         governance,

@@ -29,14 +29,30 @@ def existing_database(path, *, cross_thread=False):
 
 def productivity_identities(base_path, experience_ids, fact_ids):
     """Require exactly one row per ID across both variants; return identity fields only."""
-    rows = {}
-    for suffix in ("", "_cv"):
+    result = {}
+    for (_, _, identity), values in productivity_references(
+        base_path, experience_ids, fact_ids
+    ).items():
+        if identity in result:
+            raise ValueError("sdk_productivity_identity_ambiguous")
+        result[identity] = values
+    return result
+
+
+def productivity_references(base_path, experience_ids, fact_ids, *, variant=None):
+    """Resolve result types from the recorded variant, or prove a unique legacy match."""
+    if variant not in (None, "working", "coding"):
+        raise ValueError("sdk_productivity_variant_invalid")
+    rows, seen = {}, set()
+    for name, short, suffix in (("working", "w", ""), ("coding", "c", "_cv")):
+        if variant is not None and name != variant:
+            continue
         with existing_database(_variant_db_path(str(base_path), suffix)) as db:
             if db is None:
                 continue
-            for table, column, identities in (
-                ("coding_memory_meta", "experience_id", experience_ids),
-                ("working_fact", "fact_id", fact_ids),
+            for kind, table, column, identities in (
+                ("e", "coding_memory_meta", "experience_id", experience_ids),
+                ("f", "working_fact", "fact_id", fact_ids),
             ):
                 if not identities:
                     continue
@@ -47,10 +63,13 @@ def productivity_identities(base_path, experience_ids, fact_ids):
                     identities,
                 ).fetchall()
                 for identity, user, agent, session in found:
-                    if identity in rows:
+                    if (kind, identity) in seen:
                         raise ValueError("sdk_productivity_identity_ambiguous")
-                    rows[identity] = (user, agent, session)
-    if set(rows) != set(experience_ids) | set(fact_ids):
+                    seen.add((kind, identity))
+                    rows[short, kind, identity] = (user, agent, session)
+    if seen != {("e", identity) for identity in experience_ids} | {
+        ("f", identity) for identity in fact_ids
+    }:
         raise ValueError("sdk_productivity_reference_missing")
     return rows
 

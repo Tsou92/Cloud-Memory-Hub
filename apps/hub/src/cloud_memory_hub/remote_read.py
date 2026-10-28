@@ -116,6 +116,9 @@ class RemoteRead:
             if not self._visible(record, namespace, history=history):
                 raise AccessError("record_not_found", 404)
             records = [record]
+        enrich = getattr(bridge, "enrich_memory", None)
+        if not history and enrich is not None:
+            records = [await enrich(record) for record in records]
         offset = request.content_offset if isinstance(request, GetRequest) else 0
         reply = ReadReply(
             scope_id=request.scope_id,

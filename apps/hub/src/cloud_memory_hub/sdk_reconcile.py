@@ -9,7 +9,8 @@ from one_memory.memory_processing import MemoryTaskRunner, _imported_as_said
 from one_memory.memory_server.durable_queue import COMPLETED, DurableSdkReceipt
 from one_memory.memory_tasks import NON_RETRYABLE_POST_WRITE_CODES
 
-from cloud_memory_hub.sdk_productivity import productivity_identities
+from cloud_memory_hub.productivity_read import record_id
+from cloud_memory_hub.sdk_productivity import productivity_references
 
 BATCH_SIZE = 32
 MAX_REFERENCES = 512
@@ -48,32 +49,49 @@ def _result(outcome, request, operation):
 
 
 async def proven_receipt(bridge, job_id, request, operation):
+    receipt, _ = await proven_outputs(bridge, job_id, request, operation)
+    return receipt
+
+
+async def proven_outputs(bridge, job_id, request, operation):
     result = _result(await bridge.get_sdk_write_outcome(request.request_id), request, operation)
     if result.get("scene") == "productivity" and operation == "add":
         experiences, facts = _ids(result.get("experience_ids")), _ids(result.get("fact_ids"))
         if (
-            set(experiences) & set(facts)
-            or len(experiences) + len(facts) > MAX_REFERENCES
+            len(experiences) + len(facts) > MAX_REFERENCES
             or result.get("memory_id") != (experiences[0] if experiences else None)
             or result.get("memory_ids") not in (None, [])
         ):
             raise ValueError("sdk_outcome_references_invalid")
         sdk = await bridge._get_client()
         rows = await _joined_thread(
-            productivity_identities, sdk._config.coding.db_path, experiences, facts
+            productivity_references,
+            sdk._config.coding.db_path,
+            experiences,
+            facts,
+            variant=result.get("productivity_variant"),
         )
-        for identity, (user, agent, session) in rows.items():
+        links = []
+        for (variant, kind, identity), (user, agent, session) in rows.items():
             if (user, agent) != (request.user_id, request.agent_id):
                 raise ValueError("sdk_outcome_reference_scope_mismatch")
-            if identity in facts and session != request.session_id:
+            if kind == "f" and session != request.session_id:
                 raise ValueError("sdk_outcome_reference_session_mismatch")
-        return DurableSdkReceipt(job_id, (), experiences + facts)
+            links.append(("memory", record_id(variant, kind, identity)))
+        return DurableSdkReceipt(job_id, (), tuple(dict.fromkeys((*experiences, *facts)))), tuple(
+            sorted(links)
+        )
     if result.get("scene") != "chat":
         raise ValueError("sdk_outcome_scene_unknown")
     if result.get("experience_ids") not in (None, []) or result.get("fact_ids") not in (None, []):
         raise ValueError("sdk_outcome_references_invalid")
     single = result.get("memory_id")
     memories = _ids(result.get("memory_ids", []))
+    if any(
+        isinstance(identity, str) and identity.startswith(("cmhp:", "cmhe:"))
+        for identity in (single, *memories)
+    ):
+        raise ValueError("sdk_outcome_reserved_identity")
     raw_ids = ()
     if operation == "add":
         raw_ids = _ids([single])
@@ -100,14 +118,22 @@ async def proven_receipt(bridge, job_id, request, operation):
             or memory.layer.lower().startswith("l1_")
         ):
             raise ValueError("sdk_outcome_memory_unproven")
-    return DurableSdkReceipt(job_id, raw_ids, memories)
+    return DurableSdkReceipt(job_id, raw_ids, memories), tuple(
+        sorted(
+            [
+                *(("raw", identity) for identity in raw_ids),
+                *(("memory", identity) for identity in memories),
+            ]
+        )
+    )
 
 
 class SdkReconciler:
-    def __init__(self, queue, bridge, governance):
+    def __init__(self, queue, bridge, governance, *, observe_outputs=None):
         self.queue = queue
         self.bridge = bridge
         self.governance = governance
+        self.observe_outputs = observe_outputs
         self._cursor = None
         self._running = False
 
@@ -165,6 +191,8 @@ class SdkReconciler:
                             else "add"
                         )
                         receipt = await proven_receipt(bridge, job.job_id, request, operation)
+                        if self.observe_outputs is not None:
+                            await self.observe_outputs(job.job_id, frozen)
 
                         if (
                             await _joined_thread(self._commit, queue, job, frozen, receipt)

@@ -1,0 +1,45 @@
+--- a/hy_memory/client.py
++++ b/hy_memory/client.py
+@@ -2739,2 +2739,4 @@
+                 )
++                # Persist the actual writer namespace in the durable outcome.
++                resp["productivity_variant"] = scene_variant
+                 # 版本演进链层（scene="coding" 独有）。放在 writer.write 之后、返回
+--- a/memhub/apps/core/src/one_memory/api.py
++++ b/memhub/apps/core/src/one_memory/api.py
+@@ -183,2 +183,3 @@
+ from one_memory.memory_server.config_state import ConfigStore
++from one_memory.memory_server.contracts import WriteRequest
+ from one_memory.memory_tasks import (
+@@ -829,2 +830,3 @@
+     sdk_reconcile_unknown: Callable[[], Awaitable[None]] | None = None,
++    sdk_output_observer: Callable[[str, WriteRequest], Awaitable[None]] | None = None,
+ ) -> FastAPI:
+@@ -1219,5 +1221,6 @@
+                     supervisor=app.state.memory_processing_supervisor,
+-                    evidence=app.state.evidence_store,
++                    evidence=app.state.memory_write_evidence_store,
+                     source_writes_permitted=lambda source_id: _source_writes_on(app, source_id),
+                     admit_hy_invocation=admit_hy_invocation,
++                    observe_sdk_outputs=sdk_output_observer,
+                 ),
+@@ -1227,3 +1230,3 @@
+                     supervisor=app.state.memory_processing_supervisor,
+-                    evidence=app.state.evidence_store,
++                    evidence=app.state.memory_write_evidence_store,
+                     owner=owner,
+@@ -1231,2 +1234,3 @@
+                     admit_hy_invocation=admit_hy_invocation,
++                    observe_sdk_outputs=sdk_output_observer,
+                 ),
+--- a/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
++++ b/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
+@@ -2310,2 +2310,3 @@
+     | None = None,
++    observe_sdk_outputs: Callable[[str, WriteRequest], Awaitable[None]] | None = None,
+ ) -> None:
+@@ -2398,2 +2399,4 @@
+                 memory_ids = tuple(memory.memory_id for memory in sdk_result.memories)
++                if observe_sdk_outputs is not None:
++                    await observe_sdk_outputs(job_id, request)
+             else:

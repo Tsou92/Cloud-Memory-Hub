@@ -18,12 +18,14 @@ dev = ["pytest==9.1.1"]
 
 [tool.uv.sources]
 one-memory = { path = "../../.local/upstream/hy-memory/memhub/apps/core", editable = true }
+hy-memory = { path = "../../.local/upstream/hy-memory", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 # Preserve the reviewed upstream dependency set, including conditional dependencies.
 [tool.uv]
+build-constraint-dependencies = ["setuptools==84.0.0", "wheel==0.45.1"]
 constraint-dependencies = [
   "aiohappyeyeballs==2.7.1",
   "aiohttp==3.14.3",
