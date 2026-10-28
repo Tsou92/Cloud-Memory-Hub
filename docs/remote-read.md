@@ -26,7 +26,7 @@
 
 工作／编程的经验与 active 事实也纳入同一接口，见 [ADR-0016](adr/0016-productivity-read-adapter.md)。其 ID 为 `cmhp:<w|c>:<e|f>:<原生 ID>`，客户端应当作不透明标识原样回传；layer 分别为 working_experience、working_fact、coding_experience、coding_fact。正文是包含任务／解决方式／适用环境，或事实／详情等字段的 JSON 文本。列表按普通、working 经验／事实、coding 经验／事实分段分页；不是全局时间排序。搜索在普通、working、coding 三路结果之间按名次交替选择，每个工作／编程分支内事实与经验交替，不比较跨通道分数。
 
-这类记忆的 `source_raw_ids` 现在包含已核验写入结果对应的 `cmhe:` 原文引用，见 [ADR-0018](adr/0018-typed-output-provenance.md)。普通记忆也会补入直接产出及其已记录 SDK raw 对应的归档引用；同一输出多次更新会保留多个输入来源。旧已完成任务后台分批补核对，缺失／有歧义的结果不猜测关联。空引用不证明没有原始依据；完整演化、摘要及经验／事实互链和管理网页统一展示仍待接通。当前只读适配不会创建 productivity 库、集合或初始化 writer；已有库损坏、所需集合缺失会返回 503，不能当作“没有记忆”。旧镜像不能解析新增 ID，回退后会再次遗漏这类读取结果。
+这类记忆的 `source_raw_ids` 现在包含已核验写入结果对应的 `cmhe:` 原文引用，见 [ADR-0018](adr/0018-typed-output-provenance.md)。普通记忆也会补入直接产出及其已记录 SDK raw 对应的归档引用；同一输出多次更新会保留多个输入来源。旧已完成任务后台分批补核对，缺失／有歧义的结果不猜测关联。空引用不证明没有原始依据；完整演化、摘要及经验／事实互链和管理网页统一展示仍待接通。当前只读适配不会创建 productivity 库、集合或初始化 writer；已有库损坏、所需集合缺失会返回 503，不能当作“没有记忆”。未包含 ADR-0016 的早期镜像不能解析 productivity ID，回退到这些版本后会再次遗漏这类读取结果。
 
 接纳原文也通过 history/list 和 history/get 提供，ID 为 `cmhe:<receipt UUID>`，见 [ADR-0017](adr/0017-accepted-original-archive.md)。其 content 为完整的已过滤 Event JSON，source 为注册的 adapter_id，session_id 为原始 conversation_id；解析 JSON 可得到完整正文和元数据，读取过滤器可能重新格式化空白，不保证输出的序列化字节与存储完全一致。列表先按接纳顺序倒序列原文，再列 SDK 原生 raw，两者可能内容重叠，不是全局去重／时间排序视图。原文 ID 不能用 memories/get 读取；`memory:read` 也不授予正文访问权。已核验的直接 SDK 产出可引用该归档，但尚未完成所有演化／共享派生的关系闭包，不能据此宣称所有提炼结果均可完整追溯。
 
