@@ -47,6 +47,7 @@
 | 工作／编程记忆读取 | [只读适配](docs/adr/0016-productivity-read-adapter.md) · [验证与限制](docs/reviews/2026-10-27-productivity-read.md) |
 | 接纳原文长期保留 | [归档与迁移设计](docs/adr/0017-accepted-original-archive.md) · [验证记录](docs/reviews/2026-10-28-original-archive.md) |
 | 写入结果与原文关联 | [类型化关系设计](docs/adr/0018-typed-output-provenance.md) · [验证记录](docs/reviews/2026-10-28-output-lineage.md) |
+| 工作记忆治理观察 | [范围合并设计](docs/adr/0019-productivity-governance-inventory.md) · [验证记录](docs/reviews/2026-10-29-productivity-governance.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查

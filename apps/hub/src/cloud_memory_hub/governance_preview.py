@@ -25,10 +25,12 @@ class GovernancePreview:
         authority: GovernanceAuthority,
         bridge: Callable[[], HyMemoryBridge],
         privacy: CredentialFilter,
+        lineage=None,
     ):
         self.authority = authority
         self.bridge = bridge
         self.privacy = privacy
+        self.lineage = lineage
         self._slots = asyncio.Semaphore(1)
 
     def _require_scope(self, scope):
@@ -49,7 +51,7 @@ class GovernancePreview:
         try:
             await run_in_threadpool(self._require_scope, request.scope_id)
             namespace = f"cmh:{self.authority.access.instance_id}:{request.scope_id}"
-            nodes = await observe_inventory(self.bridge(), namespace)
+            nodes = await observe_inventory(self.bridge(), namespace, self.lineage)
             result = await _joined_thread(lambda: self._format(request, nodes))
             await run_in_threadpool(self.authority.require_ready)
             return result

@@ -16,7 +16,7 @@ from one_memory.hy_memory_bridge import _joined_thread
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.privacy import PrivacyError, parse_json
-from cloud_memory_hub.sdk_productivity import has_productivity_data
+from cloud_memory_hub.productivity_inventory import observe_productivity
 
 MAX_RECORDS = 10_000
 MAX_EDGES = 100_000
@@ -49,6 +49,8 @@ def _node(payload, namespace):
     if payload.get("user_id") != namespace:
         raise GovernanceError("governance_scope_mismatch")
     identity = _identity(payload.get("node_id"))
+    if identity.startswith(("cmhp:", "cmhe:", "cmht:", "cmhv:")):
+        raise GovernanceError("governance_record_identity_mismatch")
     content = payload.get("content")
     if not isinstance(content, str) or len(content.encode()) > MAX_CONTENT_BYTES:
         raise GovernanceError("governance_record_invalid")
@@ -106,8 +108,6 @@ async def _check_ownership(vector, graph, records, vector_ids, namespace):
 
 
 async def _observe(sdk, namespace):
-    if await _joined_thread(has_productivity_data, sdk._config.coding.db_path, namespace):
-        raise GovernanceError("governance_productivity_inventory_incomplete")
     vector = sdk._vector_store
     if not isinstance(vector, ChromaVectorStore):
         raise GovernanceError("governance_backend_unsupported")
@@ -227,18 +227,33 @@ async def _observe(sdk, namespace):
                 raise GovernanceError("governance_store_shape_unknown")
             node = records[row[0]]
             records[row[0]] = replace(node, parents=node.parents | {_identity(row[1])})
-    if sum(len(node.parents) + len(node.versions) for node in records.values()) > MAX_EDGES:
-        raise GovernanceError("governance_scan_limit")
+    records.update(
+        await observe_productivity(sdk, namespace, MAX_RECORDS, MAX_EDGES, MAX_CONTENT_BYTES)
+    )
+    check_budget(records)
     return records
 
 
-async def observe_inventory(bridge, namespace):
+def check_budget(records):
+    if (
+        len(records) > MAX_RECORDS
+        or sum(len(node.parents) + len(node.versions) for node in records.values()) > MAX_EDGES
+        or sum(len(node.content.encode()) for node in records.values()) > MAX_CONTENT_BYTES
+    ):
+        raise GovernanceError("governance_scan_limit")
+
+
+async def observe_inventory(bridge, namespace, lineage=None):
     try:
         if version("hy-memory") != "2.0.5.dev3":
             raise GovernanceError("governance_sdk_version_unsupported")
         async with bridge.exclusive_access():
             sdk = await bridge._get_client()
-            return await _joined_thread(lambda: sdk._loop_thread.run(_observe(sdk, namespace)))
+            nodes = await _joined_thread(lambda: sdk._loop_thread.run(_observe(sdk, namespace)))
+            if lineage is not None:
+                nodes = await _joined_thread(lineage.inventory, namespace, nodes)
+            check_budget(nodes)
+            return nodes
     except GovernanceError:
         raise
     except Exception:
