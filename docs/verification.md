@@ -50,6 +50,8 @@
 
 2026-10-29 编程链观察增加 `test_chain_inventory.py` 并扩展 `probe_input_context.py`，覆盖真实轮次、线程、跨项目隔离、方向性范围及缺失证明拒绝，关联 FR-08、FR-09、FR-10、FR-11；见[验证记录](reviews/2026-10-29-chain-inventory.md)。
 
+2026-10-29 合并输入增加 `test_reconcile_input_capture.py` 和 `make probe-reconcile-inputs`，覆盖实际候选快照、历史摘要／细节继承、异常／超限、并发隔离及 SDK 结果重开，关联 FR-08、FR-09、FR-10、FR-11；见[验证记录](reviews/2026-10-29-reconcile-inputs.md)。
+
 2026-10-29 历史输入追溯新增 `test_sdk_context_capture.py`、`test_input_context.py` 和 `probe_input_context.py`，关联 FR-02、FR-08、FR-09、FR-10、FR-11。实际窗口、链提交、原子保存、跨域拒绝和跨进程来源读取的证据与剩余范围见[验证记录](reviews/2026-10-29-input-context.md)。
 
 1. **上游基线**：固定提交和 SDK；保存原有测试名称、命令、版本、退出状态及失败归因。先测原版，再测补丁，区分既有失败和回归。

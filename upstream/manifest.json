@@ -49,6 +49,11 @@
       "path": "patches/0009-exact-productivity-context.patch",
       "scope": "exact_history_inputs_and_committed_chain_rounds",
       "digest": "sha256:490c32b435dbf6815d675ee9c0f10f9033cc89efe40af5ef3ea63285a32e89e9"
+    },
+    {
+      "path": "patches/0010-reconcile-input-snapshots.patch",
+      "scope": "immutable_productivity_reconcile_inputs_in_durable_outcomes",
+      "digest": "sha256:1700e692df064f0d39644b6ae997d766ddf4283443ff668c83821f0d29aa0572"
     }
   ]
 }
