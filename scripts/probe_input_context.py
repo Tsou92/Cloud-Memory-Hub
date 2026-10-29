@@ -130,6 +130,9 @@ async def verify_chain(app, web, sdk, state, root, mode):
     )
     assert reply.status_code == 200
     assert reply.json()["items"][0]["source_raw_ids"] == ["cmhe:" + state["chain_job"]]
+    if mode == "chain-damage":
+        with app.core.state.cmh_ingest._database(writing=True) as db:
+            db.execute("DELETE FROM cmh_event_contexts WHERE receipt_id=?", (state["chain_job"],))
     preview = await web.post(
         "/hub/v1/governance/preview",
         headers={"Authorization": "Bearer " + HubConfig.from_environment().admin_token},
@@ -139,8 +142,16 @@ async def verify_chain(app, web, sdk, state, root, mode):
             "record_ids": [state["chain_memory"]],
         },
     )
-    assert preview.status_code == 503
-    assert preview.json()["detail"] == "governance_chain_inventory_incomplete"
+    if mode == "chain-damage":
+        assert preview.status_code == 503
+        assert preview.json()["detail"] == "governance_chain_lineage_incomplete"
+    else:
+        assert preview.status_code == 200, preview.text
+        assert not preview.json()["execution_available"]
+        identities = {item["record_id"] for item in preview.json()["items"]}
+        assert {f"cmhc:r:{native}" for native in state["chain_rounds"]} <= identities
+        assert any(identity.startswith("cmhc:t:") for identity in identities)
+        assert "cmhe:" + state["chain_job"] in identities
 
 
 async def phase(root, mode):
@@ -158,7 +169,7 @@ async def phase(root, mode):
         bridge = _sdk_library_bridge(app.core)
         sdk = await bridge._get_client()
         async with AsyncClient(transport=ASGITransport(app), base_url=config.public_origin) as web:
-            if mode in {"chain", "chain-read"}:
+            if mode in {"chain", "chain-read", "chain-damage"}:
                 await verify_chain(app, web, sdk, state, root, mode)
                 return
             event = state["event"]
@@ -250,7 +261,13 @@ async def phase(root, mode):
 
 def main():
     os.umask(0o077)
-    if len(sys.argv) == 3 and sys.argv[1] in {"seed", "read", "chain", "chain-read"}:
+    if len(sys.argv) == 3 and sys.argv[1] in {
+        "seed",
+        "read",
+        "chain",
+        "chain-read",
+        "chain-damage",
+    }:
         asyncio.run(phase(Path(sys.argv[2]), sys.argv[1]))
         return
     with TemporaryDirectory(prefix="cmh-input-context-") as temporary:
@@ -262,7 +279,9 @@ def main():
             capture_output=True,
             timeout=30,
         )
-        for index, mode in enumerate(("seed", "read", "read", "chain", "chain-read")):
+        for index, mode in enumerate(
+            ("seed", "read", "read", "chain", "chain-read", "chain-damage")
+        ):
             with (root / f"phase-{index}.log").open("w") as log:
                 result = subprocess.run(
                     [sys.executable, str(Path(__file__).resolve()), mode, str(root)],
@@ -273,8 +292,7 @@ def main():
             if result.returncode:
                 raise RuntimeError("installed_context_probe_failed_" + mode)
     print(
-        "Exact history, chain IDs, recovery and incomplete-chain protection "
-        "passed across processes."
+        "Exact history, chain scope, recovery and missing-proof protection passed across processes."
     )
 
 

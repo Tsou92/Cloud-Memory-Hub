@@ -4,7 +4,6 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import replace
-from pathlib import Path
 
 from chromadb.errors import NotFoundError
 from hy_memory.coding.store import CodingMemoryStore, _variant_db_path
@@ -12,6 +11,7 @@ from hy_memory.data.vector_store_chroma import ChromaVectorStore, _run_in_vdb_po
 from hy_memory.models.memory import MemoryStatus
 from one_memory.hy_memory_bridge import _joined_thread
 
+from cloud_memory_hub.chain_inventory import observe_chain
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.privacy import parse_json
@@ -123,16 +123,8 @@ def _sqlite_inventory(base_path, namespace, maximum, edge_limit, byte_limit):
                         "retained",
                     )
                 )
-    # The pinned chain stores no exact request -> round identity. Do not hide it.
-    path = Path(base_path).parent / "hy_code_chain" / "hy_code.db"
-    with existing_database(path) as db:
-        if db is not None:
-            prefix = namespace + "|"
-            if db.execute(
-                "SELECT 1 FROM thread WHERE substr(owner,1,?)=? LIMIT 1",
-                (len(prefix), prefix),
-            ).fetchone():
-                raise GovernanceError("governance_chain_inventory_incomplete")
+    for node in observe_chain(base_path, namespace, maximum, edge_limit, byte_limit).values():
+        add(node)
     return records
 
 
