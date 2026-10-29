@@ -345,10 +345,13 @@ def test_real_sdk_all_backends_reopen_and_http_status_recovery(tmp_path, monkeyp
                     expected[job_id] = DurableSdkReceipt(job_id, *ids)
                     invocations.append(calls)
                     if scene in {"working", "coding"}:
-                        with pytest.raises(
-                            GovernanceError, match="productivity_inventory_incomplete"
-                        ):
-                            await observe_inventory(bridge, request.user_id)
+                        from cloud_memory_hub.productivity_read import record_id
+
+                        inventory = await observe_inventory(bridge, request.user_id)
+                        experience = record_id(scene[0], "e", ids[1][0])
+                        fact = record_id(scene[0], "f", ids[1][1])
+                        assert inventory[experience].parents == frozenset({fact})
+                        assert inventory[fact].kind == "memory"
                     else:
                         assert await observe_inventory(bridge, request.user_id)
                 assert all(queue.sdk_receipt(job_id) is None for job_id in expected)

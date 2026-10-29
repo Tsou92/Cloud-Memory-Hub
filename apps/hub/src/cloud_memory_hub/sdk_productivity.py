@@ -72,21 +72,3 @@ def productivity_references(base_path, experience_ids, fact_ids, *, variant=None
     }:
         raise ValueError("sdk_productivity_reference_missing")
     return rows
-
-
-def has_productivity_data(base_path, namespace):
-    """Guard an inventory which cannot yet represent productivity/trace lineage."""
-    for suffix, tables in (
-        ("", ("coding_memory_meta", "working_fact")),
-        ("_cv", ("coding_memory_meta", "working_fact")),
-        ("_trace", ("coding_trace",)),
-    ):
-        with existing_database(_variant_db_path(str(base_path), suffix)) as db:
-            if db is None:
-                continue
-            for table in tables:
-                if db.execute(
-                    f"SELECT 1 FROM {table} WHERE user_id=? LIMIT 1", (namespace,)
-                ).fetchone():
-                    return True
-    return False

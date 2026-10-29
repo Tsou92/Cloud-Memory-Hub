@@ -84,6 +84,7 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         governance,
         lambda: _sdk_library_bridge(core),
         CredentialFilter((config.admin_token, config.encryption_key.decode())),
+        lineage,
     )
     core.state.cmh_previews = previews
     return CloudBoundary(

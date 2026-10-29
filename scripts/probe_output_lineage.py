@@ -94,6 +94,22 @@ async def phase(root, mode):
             assert listed.status_code == 200
             assert {item["record_id"] for item in listed.json()["items"]} == set(state["origins"])
             for identity, original in state["origins"].items():
+                preview = await web.post(
+                    "/hub/v1/governance/preview",
+                    headers={"Authorization": "Bearer " + config.admin_token},
+                    json={
+                        "scope_id": event["scope_id"],
+                        "record_ids": [identity],
+                        "action": "purge",
+                        "limit": 50,
+                    },
+                )
+                assert preview.status_code == 200
+                observed = preview.json()
+                assert observed["execution_available"] is False
+                assert original in {item["record_id"] for item in observed["items"]}
+                if identity.startswith("cmhp:"):
+                    assert any(item["record_id"].startswith("cmhv:") for item in observed["items"])
                 response = await web.post(
                     "/hub/v1/memories/get",
                     headers=headers,
@@ -149,7 +165,9 @@ def main():
                 )
             if result.returncode:
                 raise RuntimeError("installed_lineage_probe_failed_" + mode)
-    print("Typed provenance, unknown recovery, cleanup and full originals passed across processes.")
+    print(
+        "Typed provenance, scope preview, recovery and complete originals passed across processes."
+    )
 
 
 if __name__ == "__main__":

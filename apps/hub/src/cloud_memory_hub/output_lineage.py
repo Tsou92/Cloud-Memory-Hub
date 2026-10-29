@@ -3,13 +3,17 @@
 import hashlib
 import json
 import logging
+from dataclasses import replace
 from importlib.metadata import version
 
 from one_memory.hy_memory_bridge import _joined_thread
 from one_memory.memory_processing import MemoryTaskRunner
 from one_memory.memory_server.durable_queue import COMPLETED
 
+from cloud_memory_hub.governance_journal import GovernanceError
+from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.original_archive import validate_original
+from cloud_memory_hub.productivity_inventory import trace_id
 from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.remote_ingest import write_request
 from cloud_memory_hub.sdk_reconcile import MAX_REFERENCES, proven_outputs
@@ -201,3 +205,65 @@ class OutputLineage:
         originals = await _joined_thread(self._references, record)
         references = tuple(dict.fromkeys((*originals, *record.source_raw_ids)))
         return record.model_copy(update={"source_raw_ids": references})
+
+    def inventory(self, namespace, nodes):
+        """Merge complete scoped relation sets, not the display reference limit."""
+        from cloud_memory_hub.governance_inventory import MAX_CONTENT_BYTES, MAX_EDGES, MAX_RECORDS
+
+        self.governance.require_ready()
+        prefix = f"cmh:{self.ingest.access.instance_id}:"
+        if not namespace.startswith(prefix):
+            raise GovernanceError("governance_scope_mismatch")
+        records = dict(nodes)
+        used_bytes = sum(len(node.content.encode()) for node in records.values())
+        used_edges = sum(len(node.parents) + len(node.versions) for node in records.values())
+        with self.ingest._database() as db:
+            self._check(db)
+            count, size = db.execute(
+                "SELECT count(*),COALESCE(sum(length(CAST(payload_json AS BLOB))),0) "
+                "FROM cmh_event_receipts WHERE scope_id=?",
+                (namespace[len(prefix) :],),
+            ).fetchone()
+            if count > MAX_RECORDS or size > MAX_CONTENT_BYTES:
+                raise GovernanceError("governance_scan_limit")
+            rows = db.execute(
+                "SELECT receipt.*,outcome.links_digest FROM cmh_event_receipts receipt "
+                "LEFT JOIN cmh_event_outcomes outcome USING(receipt_id) "
+                "WHERE receipt.scope_id=? ORDER BY receipt.rowid LIMIT ?",
+                (namespace[len(prefix) :], MAX_RECORDS + 1),
+            ).fetchall()
+            for row in rows:
+                validate_original(row, self.ingest.access.instance_id)
+                original = PREFIX + row["receipt_id"]
+                if original in records:
+                    raise GovernanceError("governance_record_identity_mismatch")
+                used_bytes += len(row["payload_json"].encode())
+                if len(records) >= MAX_RECORDS or used_bytes > MAX_CONTENT_BYTES:
+                    raise GovernanceError("governance_scan_limit")
+                records[original] = RelationNode(
+                    original,
+                    "raw",
+                    row["payload_json"],
+                    "accepted_original",
+                    "retained",
+                )
+                trace = trace_id(row["request_id"])
+                if trace in records:
+                    records[trace] = replace(records[trace], parents=frozenset({original}))
+                    used_edges += 1
+                links = self._stored_links(db, row["receipt_id"])
+                used_edges += len(links)
+                if used_edges > MAX_EDGES:
+                    raise GovernanceError("governance_scan_limit")
+                if row["links_digest"] is None:
+                    if links:
+                        raise GovernanceError("governance_lineage_invalid")
+                    continue
+                if _digest(links) != row["links_digest"]:
+                    raise GovernanceError("governance_lineage_invalid")
+                for kind, identity in links:
+                    if identity not in records or records[identity].kind != kind:
+                        raise GovernanceError("governance_reference_unresolved")
+                    node = records[identity]
+                    records[identity] = replace(node, parents=node.parents | {original})
+        return records
