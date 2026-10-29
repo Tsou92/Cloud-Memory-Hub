@@ -1,0 +1,327 @@
+diff --git a/hy_memory/coding/fact_reconciler.py b/hy_memory/coding/fact_reconciler.py
+index 91da943..84c2a05 100644
+--- a/hy_memory/coding/fact_reconciler.py
++++ b/hy_memory/coding/fact_reconciler.py
+@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
+ from ..agent.llm_provider import LLMProvider
+ from ..core.embed_service import EmbedService
+ from ..utils.lang_detect import is_chinese
++from .input_capture import begin_capture, end_capture
+ from .store import CodingMemoryStore
+ from .types import (
+ 
+@@ -105,7 +106,7 @@ def _own_details(details: str) -> str:
+     return head.rstrip()
+ 
+ 
+-def _build_inherited_details(history: List[WorkingFact]) -> Tuple[str, int, int]:
++def _build_inherited_details(history: List[WorkingFact], *, selected=None) -> Tuple[str, int, int]:
+     """把历代祖先自己的 details 拼成一个带代际标记的过继块。
+ 
+     Args:
+@@ -138,6 +139,8 @@ def _build_inherited_details(history: List[WorkingFact]) -> Tuple[str, int, int]
+             continue
+         used += len(chunk)
+         blocks.append((pos, chunk))
++        if selected is not None:
++            selected.append(fact)
+     if not blocks:
+         return "", 0, skipped
+     # 呈现按时间正序，读起来是一条推进线；预算分配才是由近到远。
+@@ -454,6 +457,7 @@ class WorkingFactReconciler:
+         workspace_id: Optional[str] = None,
+         branch: Optional[str] = None,
+         source: str = "default",
++        input_capture=None,
+     ) -> Tuple[List[WorkingFact], List[FactReconcileOp]]:
+         """
+         执行 reconcile + 持久化。
+@@ -475,6 +479,12 @@ class WorkingFactReconciler:
+             source=source,
+         )
+ 
++        token = begin_capture(
++            input_capture, "fact_decision", "fact",
++            [candidate for group in candidates[:len(drafts)] for candidate in group],
++            lambda: self._format_candidates(drafts, candidates),
++        )
++        decision_status = "used" if any(candidates) else "skipped"
+         try:
+             supersedes = await self._llm_decide(drafts, candidates)
+         except Exception as e:
+@@ -482,6 +492,8 @@ class WorkingFactReconciler:
+                 f"[fact-reconcile] LLM decide failed, insert without supersede: {e}"
+             )
+             supersedes = {}
++            decision_status = "fallback"
++        end_capture(input_capture, token, decision_status)
+ 
+         facts, ops = await self._execute(
+             drafts,
+@@ -493,6 +505,7 @@ class WorkingFactReconciler:
+             workspace_id=workspace_id,
+             branch=branch,
+             source=source,
++            input_capture=input_capture,
+         )
+         logger.info(
+             f"[fact-reconcile] drafts={len(drafts)} inserted={len(facts)} "
+@@ -633,7 +646,8 @@ class WorkingFactReconciler:
+         return ordered[-MAX_FACT_CHAIN_ENTRIES:], truncated
+ 
+     async def _summarize_chain(
+-        self, history: List[WorkingFact], current: str, *, truncated: bool = False
++        self, history: List[WorkingFact], current: str, *, truncated: bool = False,
++        input_capture=None, output_id=None,
+     ) -> str:
+         """让 LLM 把同一任务的跨 session 进展写成简短摘要。
+ 
+@@ -656,6 +670,10 @@ class WorkingFactReconciler:
+             current_statement=current,
+         )
+ 
++        token = begin_capture(
++            input_capture, "fact_summary", "fact", history, "\n".join(rows),
++            output_id=output_id,
++        )
+         try:
+             resp = await self.llm_provider.complete(
+                 prompt=prompt,
+@@ -664,9 +682,12 @@ class WorkingFactReconciler:
+             )
+         except Exception as e:
+             logger.warning(f"[fact-reconcile] chain summary failed: {e}")
++            end_capture(input_capture, token, "fallback")
+             return ""
+ 
+-        return self._clean_summary(getattr(resp, "content", "") or "")
++        summary = self._clean_summary(getattr(resp, "content", "") or "")
++        end_capture(input_capture, token, "used" if summary else "fallback")
++        return summary
+ 
+     @staticmethod
+     def _clean_summary(text: str) -> str:
+@@ -781,6 +802,7 @@ class WorkingFactReconciler:
+         workspace_id: Optional[str],
+         branch: Optional[str] = None,
+         source: str = "default",
++        input_capture=None,
+     ) -> Tuple[List[WorkingFact], List[FactReconcileOp]]:
+         inserted: List[WorkingFact] = []
+         ops: List[FactReconcileOp] = []
+@@ -860,12 +882,19 @@ class WorkingFactReconciler:
+                     retired, user_id=user_id
+                 )
+                 new_fact.fact_chain_summary = await self._summarize_chain(
+-                    history, new_fact.statement, truncated=truncated
++                    history, new_fact.statement, truncated=truncated,
++                    input_capture=input_capture, output_id=new_fact.fact_id,
+                 )
+                 # 摘要之外再把历代自己的 details 原样过继一份。摘要保叙事，过继保数值，
+                 # 两者不重复：details 本来就不进摘要（_collect_history 只读 statement）。
+                 if self.inherit_details:
+-                    block, taken, skipped = _build_inherited_details(history)
++                    selected = []
++                    block, taken, skipped = _build_inherited_details(history, selected=selected)
++                    token = begin_capture(
++                        input_capture, "fact_details", "fact", selected, block,
++                        output_id=new_fact.fact_id,
++                    )
++                    end_capture(input_capture, token, "used" if block else "skipped")
+                     if block:
+                         new_fact.details = (
+                             f"{new_fact.details}\n\n{block}".strip()
+diff --git a/hy_memory/coding/reconciler.py b/hy_memory/coding/reconciler.py
+index ed36dd6..54d06e0 100644
+--- a/hy_memory/coding/reconciler.py
++++ b/hy_memory/coding/reconciler.py
+@@ -23,6 +23,7 @@ from ..agent.llm_provider import LLMProvider
+ from ..core.embed_service import EmbedService
+ from ..utils.lang_detect import is_chinese
+ from .judge import _store_coding_log
++from .input_capture import begin_capture, end_capture
+ from .store import CodingMemoryStore
+ from .types import CodingMemory, CodingMemoryDraft, ReconcileOp
+ 
+@@ -186,6 +187,7 @@ class CodingMemoryReconciler:
+         user_id: str = "",
+         agent_id: str = "default_agent",
+         session_id: str = "",
++        input_capture=None,
+     ) -> List[ReconcileOp]:
+         """
+         执行 reconcile + 持久化。返回执行的 ReconcileOp[]（含成功执行的 ADD/UPDATE/DELETE/SKIP）。
+@@ -212,20 +214,30 @@ class CodingMemoryReconciler:
+         _decide_prompt = ""
+         _decide_raw = ""
+         _decide_resp = None
++        token = begin_capture(
++            input_capture, "experience_decision", "experience",
++            [candidate for group in candidates_per_draft[:len(drafts)] for candidate in group],
++            lambda: self._format_candidates(drafts, candidates_per_draft),
++        )
++        decision_status = "used"
+         try:
+             ops, _decide_prompt, _decide_raw, _decide_resp = await self._llm_decide(
+                 drafts, candidates_per_draft
+             )
+         except Exception as e:
+             logger.warning(f"[coding-reconcile] LLM decide failed, fallback to ADD-all: {e}")
++            decision_status = "fallback"
+             ops = [ReconcileOp(action="ADD", draft_idx=i) for i in range(len(drafts))]
+             _decide_raw = f"[LLM error] {type(e).__name__}: {str(e)[:300]}"
+ 
+         if not ops:
++            decision_status = "fallback"
+             # LLM 输出无 ops，但有 drafts → fallback ADD-all
+             logger.info("[coding-reconcile] LLM returned no ops, fallback to ADD-all")
+             ops = [ReconcileOp(action="ADD", draft_idx=i) for i in range(len(drafts))]
+ 
++        end_capture(input_capture, token, decision_status)
++
+         _decide_elapsed = round((time.perf_counter() - _t0) * 1000, 2)
+         # CODING_RECONCILE：LLM 决策完成即打点（执行入库之前，crash 不丢）
+         await _store_coding_log(
+diff --git a/hy_memory/coding/writer.py b/hy_memory/coding/writer.py
+index b0a07c3..8ac4d1e 100644
+--- a/hy_memory/coding/writer.py
++++ b/hy_memory/coding/writer.py
+@@ -25,6 +25,7 @@ from ..core.embed_service import EmbedService
+ from ..pipelines.base import ChatMessage
+ from .extractor import CodingMemoryExtractor
+ from .fact_reconciler import WorkingFactReconciler
++from .input_capture import ReconcileInputCapture
+ from .judge import classify_messages_is_coding
+ from .preproc import has_any_tool_message, prepare_extractor_messages
+ from .reconciler import CodingMemoryReconciler
+@@ -170,6 +171,8 @@ class CodingWriter:
+         for draft in drafts:
+             draft.source = source
+ 
++        input_capture = ReconcileInputCapture()
++
+         # 3. 经验层 reconcile + 持久化
+         ops: List[ReconcileOp] = (
+             await self.reconciler.reconcile(
+@@ -178,6 +181,7 @@ class CodingWriter:
+                 user_id=user_id,
+                 agent_id=agent_id,
+                 session_id=session_id or "",
++                input_capture=input_capture,
+             )
+             if drafts else []
+         )
+@@ -194,6 +198,7 @@ class CodingWriter:
+                 workspace_id=workspace_id,
+                 branch=branch,
+                 source=source,
++                input_capture=input_capture,
+             )
+ 
+         experience_ids = [op.target_experience_id for op in ops
+@@ -233,6 +238,10 @@ class CodingWriter:
+             },
+             "fact_ids": fact_ids,
+             "history_request_ids": history_request_ids,
++            "reconcile_inputs": input_capture.result(
++                (["experience_decision"] if drafts else [])
++                + (["fact_decision"] if fact_drafts else [])
++            ),
+         }
+ 
+     # ------------------------------------------------------------
+@@ -298,6 +307,7 @@ class CodingWriter:
+             "fact_ops_summary": {"insert": 0, "supersede": 0, "total": 0},
+             "fact_ids": [],
+             "history_request_ids": list(history_request_ids or []),
++            "reconcile_inputs": ReconcileInputCapture().result(),
+         }
+ 
+ 
+diff --git a/hy_memory/coding/input_capture.py b/hy_memory/coding/input_capture.py
+new file mode 100644
+index 0000000..58bba29
+--- /dev/null
++++ b/hy_memory/coding/input_capture.py
+@@ -0,0 +1,81 @@
++"""Bounded, call-local evidence of inputs used by productivity reconcilers."""
++
++import json
++
++
++class ReconcileInputCapture:
++    MAX_BYTES = 2 * 1024 * 1024
++    MAX_RECORDS = 512
++    MAX_STAGES = 512
++
++    def __init__(self):
++        self.stages = []
++        self.unavailable = False
++        self._records = 0
++        self._bytes = 0
++
++    def begin(self, stage, kind, records, rendered, *, output_id=None):
++        if self.unavailable:
++            return None
++        try:
++            if len(self.stages) >= self.MAX_STAGES:
++                raise ValueError("stage budget")
++            key = {"experience": "experience_id", "fact": "fact_id"}[kind]
++            snapshots = []
++            for record in records:
++                self._records += 1
++                if self._records > self.MAX_RECORDS:
++                    raise ValueError("record budget")
++                payload = record.to_dict()
++                identity = payload[key]
++                if not isinstance(identity, str) or not identity:
++                    raise ValueError("identity")
++                snapshots.append({"kind": kind, "id": identity, "record": payload})
++            item = {
++                "stage": stage, "status": "pending", "inputs": snapshots,
++                "rendered": rendered() if callable(rendered) else rendered, "output_id": output_id,
++            }
++            # No default=str: unknown objects must not become apparently valid evidence.
++            serialized = json.dumps(item, ensure_ascii=False, allow_nan=False)
++            self._bytes += len(serialized.encode())
++            if self._bytes > self.MAX_BYTES:
++                raise ValueError("byte budget")
++            frozen = json.loads(serialized)
++            self.stages.append(frozen)
++            return len(self.stages) - 1
++        except Exception:
++            self.unavailable = True
++            self.stages.clear()
++            return None
++
++    def end(self, token, status):
++        if token is not None and not self.unavailable:
++            if status not in {"used", "fallback", "skipped"}:
++                self.unavailable = True
++                self.stages.clear()
++            else:
++                self.stages[token]["status"] = status
++
++    def result(self, required=()):
++        observed = {item["stage"] for item in self.stages}
++        unavailable = (
++            self.unavailable or not set(required) <= observed
++            or any(item["status"] == "pending" for item in self.stages)
++        )
++        result = {
++            "schema_version": 1,
++            "status": "unavailable" if unavailable else "complete",
++            "stages": [] if unavailable else json.loads(json.dumps(self.stages)),
++        }
++        if len(json.dumps(result, ensure_ascii=False).encode()) > self.MAX_BYTES:
++            return {"schema_version": 1, "status": "unavailable", "stages": []}
++        return result
++
++
++def begin_capture(capture, *args, **kwargs):
++    return capture.begin(*args, **kwargs) if capture is not None else None
++
++
++def end_capture(capture, token, status):
++    if capture is not None:
++        capture.end(token, status)
