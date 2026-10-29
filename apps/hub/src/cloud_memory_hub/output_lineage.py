@@ -12,11 +12,19 @@ from one_memory.memory_server.durable_queue import COMPLETED
 
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
+from cloud_memory_hub.input_context import (
+    capture_context,
+    check_context,
+    commit_context,
+    context_parents,
+    initialize_context,
+    stored_context,
+)
 from cloud_memory_hub.original_archive import validate_original
 from cloud_memory_hub.productivity_inventory import trace_id
 from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.remote_ingest import write_request
-from cloud_memory_hub.sdk_reconcile import MAX_REFERENCES, proven_outputs
+from cloud_memory_hub.sdk_reconcile import MAX_REFERENCES, proven_write
 from cloud_memory_hub.source_history import PREFIX
 
 _LOG = logging.getLogger(__name__)
@@ -58,6 +66,7 @@ class OutputLineage:
                 db.execute(
                     "CREATE INDEX cmh_output_origins ON cmh_event_output_links(kind,output_id)"
                 )
+            initialize_context(db)
             self._check(db)
 
     @staticmethod
@@ -67,6 +76,7 @@ class OutputLineage:
             raise AccessError("lineage_store_version_unsupported", 503)
         db.execute("SELECT receipt_id,links_digest FROM cmh_event_outcomes LIMIT 0")
         db.execute("SELECT receipt_id,kind,output_id FROM cmh_event_output_links LIMIT 0")
+        check_context(db)
 
     def _request(self, job_id, frozen):
         self.governance.require_ready()
@@ -99,7 +109,7 @@ class OutputLineage:
             raise ValueError("lineage_links_invalid")
         return links
 
-    def _commit(self, job_id, event, links):
+    def _commit(self, job_id, event, links, context):
         self.governance.require_ready()
         with self.ingest._database(writing=True) as db:
             self._check(db)
@@ -114,12 +124,14 @@ class OutputLineage:
             if previous is not None:
                 if previous[0] != _digest(links) or self._stored_links(db, job_id) != links:
                     raise ValueError("lineage_result_changed")
+                commit_context(db, job_id, context, event)
                 return
             db.execute("INSERT INTO cmh_event_outcomes VALUES (?,?)", (job_id, _digest(links)))
             db.executemany(
                 "INSERT INTO cmh_event_output_links VALUES (?,?,?)",
                 [(job_id, kind, identity) for kind, identity in links],
             )
+            commit_context(db, job_id, context, event)
 
     async def observe(self, job_id, frozen):
         # Core can also hold non-Hub jobs. Only our own instance's events have archives.
@@ -133,8 +145,12 @@ class OutputLineage:
         async with bridge.exclusive_access():
             event, rebuilt = await _joined_thread(self._request, job_id, frozen)
             request = MemoryTaskRunner.request_for(rebuilt.idempotency_key, rebuilt.input_records)
-            _, links = await proven_outputs(bridge, job_id, request, "add")
-            await _joined_thread(self._commit, job_id, event, links)
+            _, links, result = await proven_write(bridge, job_id, request, "add")
+            sdk = await bridge._get_client()
+            context = await _joined_thread(
+                capture_context, result, sdk._config.coding.db_path, request
+            )
+            await _joined_thread(self._commit, job_id, event, links, context)
 
     def _pending(self):
         self.governance.require_ready()
@@ -142,8 +158,8 @@ class OutputLineage:
             self._check(db)
             return db.execute(
                 "SELECT rowid,receipt_id,request_id FROM cmh_event_receipts receipt "
-                "WHERE rowid>? AND NOT EXISTS (SELECT 1 FROM cmh_event_outcomes outcome "
-                "WHERE outcome.receipt_id=receipt.receipt_id) ORDER BY rowid LIMIT 32",
+                "WHERE rowid>? AND NOT EXISTS (SELECT 1 FROM cmh_event_contexts context "
+                "WHERE context.receipt_id=receipt.receipt_id) ORDER BY rowid LIMIT 32",
                 (self._cursor,),
             ).fetchall()
 
@@ -191,10 +207,15 @@ class OutputLineage:
                     (kind, identity, scope),
                 ).fetchall()
                 for row in rows:
-                    validate_original(row, self.ingest.access.instance_id)
+                    event = validate_original(row, self.ingest.access.instance_id)
                     if _digest(self._stored_links(db, row["receipt_id"])) != row["links_digest"]:
                         raise ValueError("lineage_links_invalid")
                     originals.add(PREFIX + row["receipt_id"])
+                    originals.update(
+                        context_parents(db, stored_context(db, row["receipt_id"]), event)
+                    )
+                    if len(originals) > 32:
+                        break
                 if len(originals) > 32:
                     break
         return tuple(sorted(originals)[:33])
@@ -220,8 +241,10 @@ class OutputLineage:
         with self.ingest._database() as db:
             self._check(db)
             count, size = db.execute(
-                "SELECT count(*),COALESCE(sum(length(CAST(payload_json AS BLOB))),0) "
-                "FROM cmh_event_receipts WHERE scope_id=?",
+                "SELECT count(*),COALESCE(sum(length(CAST(payload_json AS BLOB)) + "
+                "COALESCE(length(CAST(context_json AS BLOB)),0)),0) "
+                "FROM cmh_event_receipts LEFT JOIN cmh_event_contexts USING(receipt_id) "
+                "WHERE scope_id=?",
                 (namespace[len(prefix) :],),
             ).fetchone()
             if count > MAX_RECORDS or size > MAX_CONTENT_BYTES:
@@ -233,7 +256,7 @@ class OutputLineage:
                 (namespace[len(prefix) :], MAX_RECORDS + 1),
             ).fetchall()
             for row in rows:
-                validate_original(row, self.ingest.access.instance_id)
+                event = validate_original(row, self.ingest.access.instance_id)
                 original = PREFIX + row["receipt_id"]
                 if original in records:
                     raise GovernanceError("governance_record_identity_mismatch")
@@ -252,11 +275,16 @@ class OutputLineage:
                     records[trace] = replace(records[trace], parents=frozenset({original}))
                     used_edges += 1
                 links = self._stored_links(db, row["receipt_id"])
-                used_edges += len(links)
+                context = stored_context(db, row["receipt_id"])
+                parents = context_parents(db, context, event)
+                used_bytes += len(context.encode()) if context is not None else 0
+                if used_bytes > MAX_CONTENT_BYTES:
+                    raise GovernanceError("governance_scan_limit")
+                used_edges += len(parents) + len(links) * (1 + len(parents))
                 if used_edges > MAX_EDGES:
                     raise GovernanceError("governance_scan_limit")
                 if row["links_digest"] is None:
-                    if links:
+                    if links or context is not None:
                         raise GovernanceError("governance_lineage_invalid")
                     continue
                 if _digest(links) != row["links_digest"]:
@@ -265,5 +293,5 @@ class OutputLineage:
                     if identity not in records or records[identity].kind != kind:
                         raise GovernanceError("governance_reference_unresolved")
                     node = records[identity]
-                    records[identity] = replace(node, parents=node.parents | {original})
+                    records[identity] = replace(node, parents=node.parents | {original} | parents)
         return records

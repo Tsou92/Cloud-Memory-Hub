@@ -54,6 +54,12 @@ async def proven_receipt(bridge, job_id, request, operation):
 
 
 async def proven_outputs(bridge, job_id, request, operation):
+    receipt, links, _ = await proven_write(bridge, job_id, request, operation)
+    return receipt, links
+
+
+async def proven_write(bridge, job_id, request, operation):
+    """Use one durable outcome for both physical output and input-context checks."""
     result = _result(await bridge.get_sdk_write_outcome(request.request_id), request, operation)
     if result.get("scene") == "productivity" and operation == "add":
         experiences, facts = _ids(result.get("experience_ids")), _ids(result.get("fact_ids"))
@@ -78,8 +84,10 @@ async def proven_outputs(bridge, job_id, request, operation):
             if kind == "f" and session != request.session_id:
                 raise ValueError("sdk_outcome_reference_session_mismatch")
             links.append(("memory", record_id(variant, kind, identity)))
-        return DurableSdkReceipt(job_id, (), tuple(dict.fromkeys((*experiences, *facts)))), tuple(
-            sorted(links)
+        return (
+            DurableSdkReceipt(job_id, (), tuple(dict.fromkeys((*experiences, *facts)))),
+            tuple(sorted(links)),
+            result,
         )
     if result.get("scene") != "chat":
         raise ValueError("sdk_outcome_scene_unknown")
@@ -118,13 +126,17 @@ async def proven_outputs(bridge, job_id, request, operation):
             or memory.layer.lower().startswith("l1_")
         ):
             raise ValueError("sdk_outcome_memory_unproven")
-    return DurableSdkReceipt(job_id, raw_ids, memories), tuple(
-        sorted(
-            [
-                *(("raw", identity) for identity in raw_ids),
-                *(("memory", identity) for identity in memories),
-            ]
-        )
+    return (
+        DurableSdkReceipt(job_id, raw_ids, memories),
+        tuple(
+            sorted(
+                [
+                    *(("raw", identity) for identity in raw_ids),
+                    *(("memory", identity) for identity in memories),
+                ]
+            )
+        ),
+        result,
     )
 
 

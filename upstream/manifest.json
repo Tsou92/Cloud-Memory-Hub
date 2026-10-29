@@ -44,6 +44,11 @@
       "path": "patches/0008-typed-output-provenance.patch",
       "scope": "typed_sdk_variant_and_optional_durable_output_observer",
       "digest": "sha256:21290cf6113a30eb2220509d89457dace8d949cf84bf67d4cfeb07826bbd7378"
+    },
+    {
+      "path": "patches/0009-exact-productivity-context.patch",
+      "scope": "exact_history_inputs_and_committed_chain_rounds",
+      "digest": "sha256:490c32b435dbf6815d675ee9c0f10f9033cc89efe40af5ef3ea63285a32e89e9"
     }
   ]
 }

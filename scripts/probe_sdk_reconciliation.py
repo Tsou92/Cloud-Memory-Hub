@@ -144,7 +144,6 @@ async def seed_output(sdk, bridge, request, scene, *, typed=False):
                 return SimpleNamespace(write=extraction_stub)
 
             sdk._get_coding_writer = controlled_writer
-            sdk._observe_chain = lambda *args, **kwargs: []
             response = await _joined_thread(
                 sdk.add,
                 [
