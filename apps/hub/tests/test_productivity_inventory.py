@@ -8,6 +8,7 @@ from cloud_memory_hub.governance_inventory import observe_inventory
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.productivity_inventory import trace_id
 from cloud_memory_hub.productivity_read import record_id
+from hy_memory.coding.chain_store import HyCodeMem
 from hy_memory.coding.store import CodingMemoryStore, _variant_db_path
 from hy_memory.coding.types import CodingMemory, WorkingFact
 from hy_memory.data.vector_store_chroma import ChromaVectorStore
@@ -270,11 +271,12 @@ def test_same_native_ids_stay_separate_and_foreign_chain_is_not_read(tmp_path):
                 with sqlite3.connect(_variant_db_path(sdk._config.coding.db_path, suffix)) as db:
                     db.execute("UPDATE coding_memory_meta SET source_fact_ids='[]'")
             chain = Path(sdk._config.coding.db_path).parent / "hy_code_chain"
-            chain.mkdir()
+            native_chain = HyCodeMem(str(chain), owner=namespace + "-foreign|work")
+            native_chain.db.close()
             with sqlite3.connect(chain / "hy_code.db") as db:
-                db.execute("CREATE TABLE thread(owner TEXT, body TEXT)")
                 db.execute(
-                    "INSERT INTO thread VALUES (?,?)",
+                    "INSERT INTO thread(owner,body,branch,file) "
+                    "VALUES (?,?,'synthetic','synthetic.py')",
                     (namespace + "-foreign|work", "FOREIGN_SENTINEL"),
                 )
             inventory = await observe_inventory(bridge, namespace)

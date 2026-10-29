@@ -13,6 +13,7 @@ from hy_memory.data.vector_store_chroma import ChromaVectorStore, _run_in_vdb_po
 from hy_memory.models.memory import MemoryLayer, MemoryStatus
 from one_memory.hy_memory_bridge import _joined_thread
 
+from cloud_memory_hub.chain_inventory import require_chain_origins
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.privacy import PrivacyError, parse_json
@@ -49,7 +50,7 @@ def _node(payload, namespace):
     if payload.get("user_id") != namespace:
         raise GovernanceError("governance_scope_mismatch")
     identity = _identity(payload.get("node_id"))
-    if identity.startswith(("cmhp:", "cmhe:", "cmht:", "cmhv:")):
+    if identity.startswith(("cmhp:", "cmhe:", "cmht:", "cmhv:", "cmhc:")):
         raise GovernanceError("governance_record_identity_mismatch")
     content = payload.get("content")
     if not isinstance(content, str) or len(content.encode()) > MAX_CONTENT_BYTES:
@@ -252,6 +253,7 @@ async def observe_inventory(bridge, namespace, lineage=None):
             nodes = await _joined_thread(lambda: sdk._loop_thread.run(_observe(sdk, namespace)))
             if lineage is not None:
                 nodes = await _joined_thread(lineage.inventory, namespace, nodes)
+            require_chain_origins(nodes)
             check_budget(nodes)
             return nodes
     except GovernanceError:

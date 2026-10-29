@@ -10,6 +10,7 @@ from one_memory.hy_memory_bridge import _joined_thread
 from one_memory.memory_processing import MemoryTaskRunner
 from one_memory.memory_server.durable_queue import COMPLETED
 
+from cloud_memory_hub.chain_inventory import ROUND_LAYER, chain_id
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.input_context import (
@@ -289,6 +290,18 @@ class OutputLineage:
                     continue
                 if _digest(links) != row["links_digest"]:
                     raise GovernanceError("governance_lineage_invalid")
+                if context is not None:
+                    if context.chain_status == "unavailable":
+                        raise GovernanceError("governance_chain_capture_incomplete")
+                    used_edges += len(context.chain_round_ids)
+                    if used_edges > MAX_EDGES:
+                        raise GovernanceError("governance_scan_limit")
+                    for native in context.chain_round_ids:
+                        identity = chain_id("r", native)
+                        node = records.get(identity)
+                        if node is None or node.kind != "raw" or node.layer != ROUND_LAYER:
+                            raise GovernanceError("governance_reference_unresolved")
+                        records[identity] = replace(node, parents=node.parents | {original})
                 for kind, identity in links:
                     if identity not in records or records[identity].kind != kind:
                         raise GovernanceError("governance_reference_unresolved")
