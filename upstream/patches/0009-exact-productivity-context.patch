@@ -1,0 +1,167 @@
+--- a/hy_memory/coding/store.py
++++ b/hy_memory/coding/store.py
+@@ -629,2 +629,3 @@
+         source: str = "default",
++        source_request_ids: Optional[List[str]] = None,
+     ) -> List[Any]:
+@@ -634,6 +635,7 @@
+             self._get_recent_trace_payloads_sync,
+-            user_id, agent_id, source, max(1, max_user_turns) * 4,
++            user_id, agent_id, source, max(1, max_user_turns) * 4, True,
+         )
+         messages: List[ChatMessage] = []
+-        for payload in rows:
++        origins: List[str] = []
++        for request_id, payload in rows:
+             for item in payload:
+@@ -641,2 +643,3 @@
+                     messages.append(ChatMessage.from_dict(item))
++                    origins.append(request_id)
+         if not messages:
+@@ -644,3 +647,3 @@
+         from .preproc import keep_last_k_user_turns, prepare_extractor_messages
+-        return keep_last_k_user_turns(
++        selected = keep_last_k_user_turns(
+             prepare_extractor_messages(
+@@ -651,2 +654,6 @@
+         )
++        # Both text transforms preserve order; the turn window is an exact suffix.
++        if source_request_ids is not None and selected:
++            source_request_ids.extend(dict.fromkeys(origins[-len(selected):]))
++        return selected
+
+@@ -1324,3 +1331,4 @@
+         self, user_id: str, agent_id: str, source: str, limit: int,
+-    ) -> List[List[Dict[str, Any]]]:
++        with_request_ids: bool = False,
++    ) -> List[Any]:
+         with self._trace_lock:
+@@ -1328,3 +1336,3 @@
+             rows = self._trace_conn.execute(
+-                "SELECT messages_json FROM coding_trace "
++                "SELECT request_id,messages_json FROM coding_trace "
+                 "WHERE user_id=? AND agent_id=? AND source=? "
+@@ -1333,3 +1341,3 @@
+             ).fetchall()
+-        out: List[List[Dict[str, Any]]] = []
++        out: List[Any] = []
+         for row in reversed(rows):
+@@ -1340,3 +1348,3 @@
+             if isinstance(payload, list):
+-                out.append(payload)
++                out.append((row["request_id"], payload) if with_request_ids else payload)
+         return out
+--- a/hy_memory/coding/writer.py
++++ b/hy_memory/coding/writer.py
+@@ -111,2 +111,3 @@
+         )
++        history_request_ids: List[str] = []
+         try:
+@@ -117,2 +118,3 @@
+                 source=source,
++                source_request_ids=history_request_ids,
+             )
+@@ -121,2 +123,3 @@
+             history_messages = []
++            history_request_ids.clear()
+         current_messages = prepare_extractor_messages(
+@@ -163,3 +166,3 @@
+             )
+-            return self._empty_response(request_id, t0)
++            return self._empty_response(request_id, t0, history_request_ids)
+
+@@ -231,2 +234,3 @@
+             "fact_ids": fact_ids,
++            "history_request_ids": history_request_ids,
+         }
+@@ -281,3 +285,5 @@
+     @staticmethod
+-    def _empty_response(request_id: str, t0: float) -> Dict[str, Any]:
++    def _empty_response(
++        request_id: str, t0: float, history_request_ids: Optional[List[str]] = None,
++    ) -> Dict[str, Any]:
+         return {
+@@ -293,2 +299,3 @@
+             "fact_ids": [],
++            "history_request_ids": list(history_request_ids or []),
+         }
+--- a/hy_memory/coding/chain_store.py
++++ b/hy_memory/coding/chain_store.py
+@@ -226,3 +226,3 @@
+
+-    def observe(self, mem_text, meta=None):
++    def observe(self, mem_text, meta=None, observed_round_ids=None):
+         """agent 每改完一轮调一次。零 LLM、零 embedding。
+@@ -246,2 +246,3 @@
+         n = 0
++        round_ids = []
+         for file, symbol, lo, hi, hunk in self._split_hunks(patch):
+@@ -256,3 +257,3 @@
+                                       pkey=meta.get("pkey") or "")
+-            self._add_round(tid, said, hunk, at=self._round_time(meta))
++            round_ids.append(self._add_round(tid, said, hunk, at=self._round_time(meta)))
+             # body: 这一轮改完后那段代码的完整样子(含未被改动的行)。每轮覆写 →
+@@ -270,2 +271,4 @@
+             self.db.commit()
++        if observed_round_ids is not None:
++            observed_round_ids.extend(dict.fromkeys(round_ids))
+         return n
+@@ -571,3 +574,3 @@
+                             (merged_patch, json.dumps(adds, ensure_ascii=False), rid))
+-            return
++            return rid
+         seq = self.db.execute("SELECT COUNT(*) FROM round WHERE thread_id=?",
+@@ -576,3 +579,3 @@
+         adds = list(dict.fromkeys(a.strip() for a in new_adds))
+-        self.db.execute(
++        inserted = self.db.execute(
+             "INSERT INTO round(thread_id,seq,said,patch,adds,created_at) VALUES(?,?,?,?,?,?)",
+@@ -581,2 +584,3 @@
+                         (seq, time.time(), tid))
++        return inserted.lastrowid
+
+--- a/hy_memory/client.py
++++ b/hy_memory/client.py
+@@ -1166,3 +1166,3 @@
+     def _observe_chain(self, chat_messages, *, user_id=None, workspace_id=None,
+-                       branch=None) -> int:
++                       branch=None, provenance=None) -> int:
+         """写入侧：把这一段对话里的代码改动存进版本演进链。
+@@ -1178,2 +1178,4 @@
+         # SimpleNamespace 上调（同 _scene_variant 那处），self 上没有这个属性。
++        if provenance is not None:
++            provenance.update(status="unavailable", round_ids=[])
+         store = self._get_chain_store(
+@@ -1185,2 +1187,4 @@
+             if not text.strip():
++                if provenance is not None:
++                    provenance.update(status="complete", round_ids=[])
+                 return 0
+@@ -1189,4 +1193,14 @@
+             # thread 的键里不再需要第二个仓维度。
+-            return int(store.observe(text, meta={"branch": branch or ""}) or 0)
++            observed = []
++            options = {"observed_round_ids": observed} if provenance is not None else {}
++            count = int(store.observe(text, meta={"branch": branch or ""}, **options) or 0)
++            if provenance is not None:
++                provenance.update(status="complete", round_ids=observed)
++            return count
+         except Exception as e:
++            if provenance is not None and getattr(store, "db", None) is not None:
++                try:
++                    store.db.rollback()
++                except Exception:
++                    pass  # The unavailable marker must survive a broken connection.
+             logger.warning("[coding] chain observe failed: %s", e)
+@@ -2745,2 +2759,3 @@
+                 if scene_variant == "coding":
++                    chain_context = {}
+                     resp["chain_rounds"] = self._observe_chain(
+@@ -2748,3 +2763,7 @@
+                         workspace_id=workspace_id, branch=branch,
++                        provenance=chain_context,
+                     )
++                    resp["chain_context"] = chain_context
++                else:
++                    resp["chain_context"] = {"status": "complete", "round_ids": []}
+                 # 同步刷新 elapsed
