@@ -26,27 +26,36 @@ MESSAGES = [
 ]
 
 
-async def seed(sdk, variant, request):
+async def seed(
+    sdk,
+    variant,
+    request,
+    *,
+    create=True,
+    previous_solution="before update",
+    solution="after update",
+):
     store = CodingMemoryStore(
         sdk._config, sdk._embed_service, db_path=sdk._config.coding.db_path, variant=variant
     )
 
     async def initialize():
         await store.initialize()
-        await store.insert(
-            CodingMemory(
-                experience_id="old",
-                task="Synthetic build fix",
-                solution="before update",
-                user_id="scope",
-                agent_id="agent",
-                session_id="session",
+        if create:
+            await store.insert(
+                CodingMemory(
+                    experience_id="old",
+                    task="Synthetic build fix",
+                    solution=previous_solution,
+                    user_id="scope",
+                    agent_id="agent",
+                    session_id="session",
+                )
             )
-        )
 
     async def complete(**kwargs):
         assert kwargs["audit_stage"] == "coding_reconcile"
-        assert "before update" in kwargs["prompt"]
+        assert previous_solution in kwargs["prompt"]
         return SimpleNamespace(
             content=json.dumps(
                 {"ops": [{"action": "UPDATE", "draft_idx": 0, "target_experience_id": "old"}]}
@@ -57,7 +66,7 @@ async def seed(sdk, variant, request):
         return [
             CodingMemoryDraft(
                 task="Synthetic build fix",
-                solution="after update",
+                solution=solution,
                 user_id="scope",
                 agent_id="agent",
                 session_id="session",
@@ -85,11 +94,11 @@ async def seed(sdk, variant, request):
         assert captured["status"] == "complete" and len(captured["stages"]) == 1
         stage = captured["stages"][0]
         assert stage["status"] == "used" and stage["inputs"][0]["id"] == "old"
-        assert stage["inputs"][0]["record"]["solution"] == "before update"
+        assert stage["inputs"][0]["record"]["solution"] == previous_solution
         current = await _joined_thread(
             lambda: sdk._loop_thread.run(store.get_by_id("old", "scope"))
         )
-        assert current.solution == "after update"
+        assert current.solution == solution
         return captured
     finally:
         sdk._get_coding_writer = previous
