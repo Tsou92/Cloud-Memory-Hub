@@ -48,7 +48,7 @@
 
 ## 关键实验
 
-2026-10-30 普通聊天历史增加 `test_chat_history_capture.py` 和 `make probe-chat-history`，覆盖真实选择窗口、跨节点片段／姓名来源、不可变快照、故障／预算、SDK 持久结果重开及幂等重放，关联 FR-08、FR-09、FR-10、FR-11；见[验证记录](reviews/2026-10-30-chat-history.md)。Hub 来源关系和其他聊天输入尚未接通。
+2026-10-30 普通聊天历史增加 `test_chat_history_capture.py` 和 `make probe-chat-history`，覆盖真实选择窗口、跨节点片段／姓名来源、不可变快照、故障／预算、SDK 持久结果重开及幂等重放，关联 FR-08、FR-09、FR-10、FR-11；见[SDK 验证](reviews/2026-10-30-chat-history.md)。随后增加 `test_chat_graph.py` 和 `make probe-chat-graph`，核验原文对应、权限边界、事务补档与预览方向；见[Hub 接线记录](reviews/2026-10-30-chat-lineage.md)。其他聊天输入和删除执行仍待完成。
 
 2026-10-29 编程链观察增加 `test_chain_inventory.py` 并扩展 `probe_input_context.py`，覆盖真实轮次、线程、跨项目隔离、方向性范围及缺失证明拒绝，关联 FR-08、FR-09、FR-10、FR-11；见[验证记录](reviews/2026-10-29-chain-inventory.md)。
 
