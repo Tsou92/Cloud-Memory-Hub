@@ -28,7 +28,7 @@ index 84c2a05..08eb4f8 100644
          ops: List[FactReconcileOp] = []
 @@ -908,7 +911,9 @@ class WorkingFactReconciler:
                          )
- 
+
              try:
 -                await self.store.insert_fact(new_fact)
 +                await self.store.insert_fact(
@@ -43,7 +43,7 @@ index 54d06e0..f2d1ce2 100644
 +++ b/hy_memory/coding/reconciler.py
 @@ -252,7 +252,10 @@ class CodingMemoryReconciler:
          )
- 
+
          # 3. 校验 + 执行
 -        executed = await self._execute(ops, drafts, candidates_per_draft)
 +        executed = await self._execute(
@@ -68,7 +68,7 @@ index 54d06e0..f2d1ce2 100644
 +        origin = {"origin_request_id": request_id} if request_id else {}
          # 已被 UPDATE 占用的 draft_idx → 防止同 draft 被重复 ADD/UPDATE
          consumed: set = set()
- 
+
 @@ -461,7 +466,7 @@ class CodingMemoryReconciler:
                  d = drafts[op.draft_idx]
                  memory = self._draft_to_new_memory(d)
@@ -105,9 +105,9 @@ index 0bc825d..862bd84 100644
  from ..utils.async_executor import run_in_executor_guarded
  from .types import CodingMemory, WorkingFact
 +from .record_origin import stamp_origin
- 
+
  logger = logging.getLogger(__name__)
- 
+
 @@ -162,12 +163,16 @@ FROM coding_memory_meta_legacy;
  # 后加的列：老库用 ADD COLUMN 补，不必重建表
  _ADDED_COLUMNS = {
@@ -132,8 +132,8 @@ index 0bc825d..862bd84 100644
 +        origin_request_id=row["origin_request_id"] if "origin_request_id" in row.keys() else None,
 +        origin_digest=row["origin_digest"] if "origin_digest" in row.keys() else None,
      )
- 
- 
+
+
 @@ -320,6 +327,8 @@ def _row_to_fact(row: sqlite3.Row) -> WorkingFact:
          fact_chain_summary=(row["fact_chain_summary"] or ""
                              if "fact_chain_summary" in row.keys() else ""),
@@ -141,12 +141,12 @@ index 0bc825d..862bd84 100644
 +        origin_request_id=row["origin_request_id"] if "origin_request_id" in row.keys() else None,
 +        origin_digest=row["origin_digest"] if "origin_digest" in row.keys() else None,
      )
- 
- 
+
+
 @@ -523,17 +532,17 @@ class CodingMemoryStore:
      # 写入
      # ------------------------------------------------------------
- 
+
 -    async def insert(self, memory: CodingMemory) -> None:
 +    async def insert(self, memory: CodingMemory, *, origin_request_id=None) -> None:
          """新增一条 coding memory（SQLite + VDB 全套）"""
@@ -158,7 +158,7 @@ index 0bc825d..862bd84 100644
              f"[coding-store] inserted experience_id={memory.experience_id} "
              f"task={memory.task!r} keys={1 + len(memory.search_keys)}"
          )
- 
+
 -    async def update(self, memory: CodingMemory) -> None:
 +    async def update(self, memory: CodingMemory, *, origin_request_id=None) -> None:
          """覆盖式更新一条 coding memory。"""
@@ -176,7 +176,7 @@ index 0bc825d..862bd84 100644
 @@ -791,11 +800,11 @@ class CodingMemoryStore:
      # 事实层
      # ------------------------------------------------------------
- 
+
 -    async def insert_fact(self, fact: WorkingFact) -> None:
 +    async def insert_fact(self, fact: WorkingFact, *, origin_request_id=None) -> None:
          """新增一条事实（SQLite + 事实 collection 各一行）。"""
@@ -190,7 +190,7 @@ index 0bc825d..862bd84 100644
 @@ -1017,17 +1026,24 @@ class CodingMemoryStore:
              memory.created_at = now
          memory.updated_at = now
- 
+
 -    def _upsert_sql_sync(self, memory: CodingMemory) -> None:
 +    def _upsert_sql_sync(self, memory: CodingMemory, origin_request_id=None) -> None:
          with self._lock:
@@ -237,7 +237,7 @@ index 0bc825d..862bd84 100644
 @@ -1176,17 +1195,24 @@ class CodingMemoryStore:
              ).fetchone()
          return int(row["scoped"] or 0), int(row["total"] or 0)
- 
+
 -    def _upsert_fact_sql_sync(self, fact: WorkingFact) -> None:
 +    def _upsert_fact_sql_sync(self, fact: WorkingFact, origin_request_id=None) -> None:
          with self._lock:
@@ -280,7 +280,7 @@ index 0bc825d..862bd84 100644
 +                    fact.origin_request_id, fact.origin_digest,
                  ),
              )
- 
+
 diff --git a/hy_memory/coding/types.py b/hy_memory/coding/types.py
 index 295be7a..cba33c0 100644
 --- a/hy_memory/coding/types.py
@@ -291,7 +291,7 @@ index 295be7a..cba33c0 100644
      updated_at: Optional[datetime] = None
 +    origin_request_id: Optional[str] = None
 +    origin_digest: Optional[str] = None
- 
+
      def __post_init__(self) -> None:
          from ..utils.source_filter import normalize_source
 @@ -137,6 +139,8 @@ class CodingMemory:
@@ -301,15 +301,15 @@ index 295be7a..cba33c0 100644
 +            "origin_request_id": self.origin_request_id,
 +            "origin_digest": self.origin_digest,
          }
- 
- 
+
+
 @@ -250,6 +254,8 @@ class WorkingFact:
- 
+
      # 时间
      created_at: Optional[datetime] = None  # 产生时间，新的优先
 +    origin_request_id: Optional[str] = None
 +    origin_digest: Optional[str] = None
- 
+
      def __post_init__(self) -> None:
          from ..utils.source_filter import normalize_source
 @@ -273,6 +279,8 @@ class WorkingFact:
@@ -319,8 +319,8 @@ index 295be7a..cba33c0 100644
 +            "origin_request_id": self.origin_request_id,
 +            "origin_digest": self.origin_digest,
          }
- 
- 
+
+
 diff --git a/hy_memory/coding/writer.py b/hy_memory/coding/writer.py
 index 8ac4d1e..6ed8510 100644
 --- a/hy_memory/coding/writer.py
@@ -331,7 +331,7 @@ index 8ac4d1e..6ed8510 100644
                  input_capture=input_capture,
 +                request_id=request_id,
              )
- 
+
          experience_ids = [op.target_experience_id for op in ops
 diff --git a/hy_memory/coding/record_origin.py b/hy_memory/coding/record_origin.py
 new file mode 100644

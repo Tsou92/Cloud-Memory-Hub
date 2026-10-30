@@ -58,7 +58,7 @@
     {
       "path": "patches/0011-productivity-record-origins.patch",
       "scope": "atomic_productivity_producer_identity_and_semantic_digest",
-      "digest": "sha256:e427baaeb0ce18efeebaf0b5efe20a02a633d90c5106137325b41fe265daeb65"
+      "digest": "sha256:4ee5d6191b9e410137bc84880c6411b32f8b03b18c58fcec55225842d7519356"
     }
   ]
 }
