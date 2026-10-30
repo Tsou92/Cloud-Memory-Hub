@@ -1,0 +1,431 @@
+diff --git a/hy_memory/coding/fact_reconciler.py b/hy_memory/coding/fact_reconciler.py
+index 84c2a05..08eb4f8 100644
+--- a/hy_memory/coding/fact_reconciler.py
++++ b/hy_memory/coding/fact_reconciler.py
+@@ -458,6 +458,7 @@ class WorkingFactReconciler:
+         branch: Optional[str] = None,
+         source: str = "default",
+         input_capture=None,
++        request_id=None,
+     ) -> Tuple[List[WorkingFact], List[FactReconcileOp]]:
+         """
+         执行 reconcile + 持久化。
+@@ -506,6 +507,7 @@ class WorkingFactReconciler:
+             branch=branch,
+             source=source,
+             input_capture=input_capture,
++            **({"request_id": request_id} if request_id else {}),
+         )
+         logger.info(
+             f"[fact-reconcile] drafts={len(drafts)} inserted={len(facts)} "
+@@ -803,6 +805,7 @@ class WorkingFactReconciler:
+         branch: Optional[str] = None,
+         source: str = "default",
+         input_capture=None,
++        request_id=None,
+     ) -> Tuple[List[WorkingFact], List[FactReconcileOp]]:
+         inserted: List[WorkingFact] = []
+         ops: List[FactReconcileOp] = []
+@@ -908,7 +911,9 @@ class WorkingFactReconciler:
+                         )
+ 
+             try:
+-                await self.store.insert_fact(new_fact)
++                await self.store.insert_fact(
++                    new_fact, **({"origin_request_id": request_id} if request_id else {})
++                )
+             except Exception as e:
+                 logger.warning(f"[fact-reconcile] INSERT failed: {e}")
+                 continue
+diff --git a/hy_memory/coding/reconciler.py b/hy_memory/coding/reconciler.py
+index 54d06e0..f2d1ce2 100644
+--- a/hy_memory/coding/reconciler.py
++++ b/hy_memory/coding/reconciler.py
+@@ -252,7 +252,10 @@ class CodingMemoryReconciler:
+         )
+ 
+         # 3. 校验 + 执行
+-        executed = await self._execute(ops, drafts, candidates_per_draft)
++        executed = await self._execute(
++            ops, drafts, candidates_per_draft,
++            **({"request_id": request_id} if request_id else {}),
++        )
+         logger.info(
+             f"[coding-reconcile] drafts={len(drafts)} ops={len(executed)} "
+             + ", ".join(f"{a}={sum(1 for o in executed if o.action == a)}"
+@@ -436,6 +439,7 @@ class CodingMemoryReconciler:
+         ops: List[ReconcileOp],
+         drafts: List[CodingMemoryDraft],
+         candidates_per_draft: List[List[CodingMemory]],
++        *, request_id=None,
+     ) -> List[ReconcileOp]:
+         """
+         校验 + 执行 ops。返回成功执行的 ops（filter 掉无效 op）。
+@@ -447,6 +451,7 @@ class CodingMemoryReconciler:
+         - SKIP    不执行任何 store 操作
+         """
+         executed: List[ReconcileOp] = []
++        origin = {"origin_request_id": request_id} if request_id else {}
+         # 已被 UPDATE 占用的 draft_idx → 防止同 draft 被重复 ADD/UPDATE
+         consumed: set = set()
+ 
+@@ -461,7 +466,7 @@ class CodingMemoryReconciler:
+                 d = drafts[op.draft_idx]
+                 memory = self._draft_to_new_memory(d)
+                 try:
+-                    await self.store.insert(memory)
++                    await self.store.insert(memory, **origin)
+                     op.target_experience_id = memory.experience_id  # 回写 id 供 caller 读
+                     executed.append(op)
+                     consumed.add(op.draft_idx)
+@@ -492,7 +497,7 @@ class CodingMemoryReconciler:
+                 if prev is not None:
+                     memory.source_fact_ids = list(prev.source_fact_ids)
+                 try:
+-                    await self.store.update(memory)
++                    await self.store.update(memory, **origin)
+                     executed.append(op)
+                     consumed.add(op.draft_idx)
+                 except Exception as e:
+@@ -532,7 +537,7 @@ class CodingMemoryReconciler:
+             d = drafts[i]
+             memory = self._draft_to_new_memory(d)
+             try:
+-                await self.store.insert(memory)
++                await self.store.insert(memory, **origin)
+                 executed.append(ReconcileOp(
+                     action="ADD", draft_idx=i,
+                     target_experience_id=memory.experience_id,
+diff --git a/hy_memory/coding/store.py b/hy_memory/coding/store.py
+index 0bc825d..862bd84 100644
+--- a/hy_memory/coding/store.py
++++ b/hy_memory/coding/store.py
+@@ -45,6 +45,7 @@ from ..data.vector_store_base import VectorStoreBase
+ from ..models.memory import MemoryLayer, MemoryNode, MemoryStatus
+ from ..utils.async_executor import run_in_executor_guarded
+ from .types import CodingMemory, WorkingFact
++from .record_origin import stamp_origin
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -162,12 +163,16 @@ FROM coding_memory_meta_legacy;
+ # 后加的列：老库用 ADD COLUMN 补，不必重建表
+ _ADDED_COLUMNS = {
+     "coding_memory_meta": {
++        "origin_request_id": "TEXT",
++        "origin_digest": "TEXT",
+         "source_fact_ids": "TEXT NOT NULL DEFAULT '[]'",
+         "extraction_source": "TEXT NOT NULL DEFAULT 'auto_extract'",
+     },
+     # 早期版本存过一列 fact_chain（机械累积的历代说法），已废弃：同样的信息顺着
+     # fact_link 反查就有。老库里那一列留着不管，有默认值不影响插入。
+     "working_fact": {
++        "origin_request_id": "TEXT",
++        "origin_digest": "TEXT",
+         "fact_chain_summary": "TEXT NOT NULL DEFAULT ''",
+         # 事实层比经验层晚补这一列，老库里已有的行会是 NULL。作用域过滤按
+         # "NULL = 没记录分支"处理，不当成"记录了别的分支"，见 _scope_where。
+@@ -295,6 +300,8 @@ def _row_to_memory(row: sqlite3.Row) -> CodingMemory:
+         extraction_source=row["extraction_source"],
+         created_at=_parse_dt(row["created_at"]),
+         updated_at=_parse_dt(row["updated_at"]),
++        origin_request_id=row["origin_request_id"] if "origin_request_id" in row.keys() else None,
++        origin_digest=row["origin_digest"] if "origin_digest" in row.keys() else None,
+     )
+ 
+ 
+@@ -320,6 +327,8 @@ def _row_to_fact(row: sqlite3.Row) -> WorkingFact:
+         fact_chain_summary=(row["fact_chain_summary"] or ""
+                             if "fact_chain_summary" in row.keys() else ""),
+         created_at=_parse_dt(row["created_at"]),
++        origin_request_id=row["origin_request_id"] if "origin_request_id" in row.keys() else None,
++        origin_digest=row["origin_digest"] if "origin_digest" in row.keys() else None,
+     )
+ 
+ 
+@@ -523,17 +532,17 @@ class CodingMemoryStore:
+     # 写入
+     # ------------------------------------------------------------
+ 
+-    async def insert(self, memory: CodingMemory) -> None:
++    async def insert(self, memory: CodingMemory, *, origin_request_id=None) -> None:
+         """新增一条 coding memory（SQLite + VDB 全套）"""
+         self._fill_timestamps(memory)
+-        await _run_in_pool(self._upsert_sql_sync, memory)
++        await _run_in_pool(self._upsert_sql_sync, memory, origin_request_id)
+         await self._upsert_vec_keys(memory)
+         logger.info(
+             f"[coding-store] inserted experience_id={memory.experience_id} "
+             f"task={memory.task!r} keys={1 + len(memory.search_keys)}"
+         )
+ 
+-    async def update(self, memory: CodingMemory) -> None:
++    async def update(self, memory: CodingMemory, *, origin_request_id=None) -> None:
+         """覆盖式更新一条 coding memory。"""
+         # 拿旧 keys 长度，先删旧 VDB rows
+         prev = await self.get_by_id(memory.experience_id, user_id=memory.user_id)
+@@ -552,7 +561,7 @@ class CodingMemoryStore:
+         memory.updated_at = datetime.utcnow()
+         if memory.created_at is None:
+             memory.created_at = prev.created_at
+-        await _run_in_pool(self._upsert_sql_sync, memory)
++        await _run_in_pool(self._upsert_sql_sync, memory, origin_request_id)
+         # 删旧 VDB
+         await self._delete_vec_keys_by_count(memory.experience_id, prev_key_count)
+         # 写新 VDB
+@@ -791,11 +800,11 @@ class CodingMemoryStore:
+     # 事实层
+     # ------------------------------------------------------------
+ 
+-    async def insert_fact(self, fact: WorkingFact) -> None:
++    async def insert_fact(self, fact: WorkingFact, *, origin_request_id=None) -> None:
+         """新增一条事实（SQLite + 事实 collection 各一行）。"""
+         if fact.created_at is None:
+             fact.created_at = datetime.utcnow()
+-        await _run_in_pool(self._upsert_fact_sql_sync, fact)
++        await _run_in_pool(self._upsert_fact_sql_sync, fact, origin_request_id)
+         await self._upsert_fact_vec(fact)
+         logger.info(
+             f"[coding-store] inserted fact_id={fact.fact_id} "
+@@ -1017,17 +1026,24 @@ class CodingMemoryStore:
+             memory.created_at = now
+         memory.updated_at = now
+ 
+-    def _upsert_sql_sync(self, memory: CodingMemory) -> None:
++    def _upsert_sql_sync(self, memory: CodingMemory, origin_request_id=None) -> None:
+         with self._lock:
+             assert self._conn is not None
++            # The existing upsert preserves created_at on ID conflict.
++            previous = self._conn.execute(
++                "SELECT created_at FROM coding_memory_meta WHERE experience_id=?", (memory.experience_id,)
++            ).fetchone()
++            if previous is not None:
++                memory.created_at = _parse_dt(previous["created_at"])
++            stamp_origin(memory, "experience", origin_request_id)
+             self._conn.execute(
+                 """
+                 INSERT INTO coding_memory_meta (
+                     experience_id, user_id, agent_id, task, search_keys, solution,
+                     boundary_envs, workspace_id, branch, session_id,
+                     files, source_fact_ids, confidence, source, extraction_source,
+-                    created_at, updated_at
+-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++                    created_at, updated_at, origin_request_id, origin_digest
++                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(experience_id) DO UPDATE SET
+                     user_id         = excluded.user_id,
+                     agent_id        = excluded.agent_id,
+@@ -1043,7 +1059,9 @@ class CodingMemoryStore:
+                     confidence      = excluded.confidence,
+                     source          = excluded.source,
+                     extraction_source = excluded.extraction_source,
+-                    updated_at      = excluded.updated_at
++                    updated_at      = excluded.updated_at,
++                    origin_request_id = excluded.origin_request_id,
++                    origin_digest = excluded.origin_digest
+                 """,
+                 (
+                     memory.experience_id, memory.user_id, memory.agent_id,
+@@ -1055,6 +1073,7 @@ class CodingMemoryStore:
+                     memory.confidence, memory.source, memory.extraction_source,
+                     (memory.created_at or datetime.utcnow()).isoformat(),
+                     (memory.updated_at or datetime.utcnow()).isoformat(),
++                    memory.origin_request_id, memory.origin_digest,
+                 ),
+             )
+     def _delete_sql_sync(self, experience_id: str, user_id: str) -> None:
+@@ -1176,17 +1195,24 @@ class CodingMemoryStore:
+             ).fetchone()
+         return int(row["scoped"] or 0), int(row["total"] or 0)
+ 
+-    def _upsert_fact_sql_sync(self, fact: WorkingFact) -> None:
++    def _upsert_fact_sql_sync(self, fact: WorkingFact, origin_request_id=None) -> None:
+         with self._lock:
+             assert self._conn is not None
++            # The existing upsert preserves created_at on ID conflict.
++            previous = self._conn.execute(
++                "SELECT created_at FROM working_fact WHERE fact_id=?", (fact.fact_id,)
++            ).fetchone()
++            if previous is not None:
++                fact.created_at = _parse_dt(previous["created_at"])
++            stamp_origin(fact, "fact", origin_request_id)
+             self._conn.execute(
+                 """
+                 INSERT INTO working_fact (
+                     fact_id, user_id, agent_id, session_id, workspace_id, branch,
+                     source, statement, files, subject, details,
+                     fact_link, derived_experience_ids,
+-                    status, fact_chain_summary, created_at
+-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++                    status, fact_chain_summary, created_at, origin_request_id, origin_digest
++                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(fact_id) DO UPDATE SET
+                     user_id                = excluded.user_id,
+                     agent_id               = excluded.agent_id,
+@@ -1201,7 +1227,9 @@ class CodingMemoryStore:
+                     fact_link              = excluded.fact_link,
+                     derived_experience_ids = excluded.derived_experience_ids,
+                     status                 = excluded.status,
+-                    fact_chain_summary     = excluded.fact_chain_summary
++                    fact_chain_summary     = excluded.fact_chain_summary,
++                    origin_request_id = excluded.origin_request_id,
++                    origin_digest = excluded.origin_digest
+                 """,
+                 (
+                     fact.fact_id, fact.user_id, fact.agent_id,
+@@ -1215,6 +1243,7 @@ class CodingMemoryStore:
+                     fact.status,
+                     fact.fact_chain_summary or "",
+                     (fact.created_at or datetime.utcnow()).isoformat(),
++                    fact.origin_request_id, fact.origin_digest,
+                 ),
+             )
+ 
+diff --git a/hy_memory/coding/types.py b/hy_memory/coding/types.py
+index 295be7a..cba33c0 100644
+--- a/hy_memory/coding/types.py
++++ b/hy_memory/coding/types.py
+@@ -113,6 +113,8 @@ class CodingMemory:
+     # 时间
+     created_at: Optional[datetime] = None
+     updated_at: Optional[datetime] = None
++    origin_request_id: Optional[str] = None
++    origin_digest: Optional[str] = None
+ 
+     def __post_init__(self) -> None:
+         from ..utils.source_filter import normalize_source
+@@ -137,6 +139,8 @@ class CodingMemory:
+             "extraction_source": self.extraction_source,
+             "created_at": self.created_at.isoformat() if self.created_at else None,
+             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
++            "origin_request_id": self.origin_request_id,
++            "origin_digest": self.origin_digest,
+         }
+ 
+ 
+@@ -250,6 +254,8 @@ class WorkingFact:
+ 
+     # 时间
+     created_at: Optional[datetime] = None  # 产生时间，新的优先
++    origin_request_id: Optional[str] = None
++    origin_digest: Optional[str] = None
+ 
+     def __post_init__(self) -> None:
+         from ..utils.source_filter import normalize_source
+@@ -273,6 +279,8 @@ class WorkingFact:
+             "status": self.status,
+             "fact_chain_summary": self.fact_chain_summary,
+             "created_at": self.created_at.isoformat() if self.created_at else None,
++            "origin_request_id": self.origin_request_id,
++            "origin_digest": self.origin_digest,
+         }
+ 
+ 
+diff --git a/hy_memory/coding/writer.py b/hy_memory/coding/writer.py
+index 8ac4d1e..6ed8510 100644
+--- a/hy_memory/coding/writer.py
++++ b/hy_memory/coding/writer.py
+@@ -199,6 +199,7 @@ class CodingWriter:
+                 branch=branch,
+                 source=source,
+                 input_capture=input_capture,
++                request_id=request_id,
+             )
+ 
+         experience_ids = [op.target_experience_id for op in ops
+diff --git a/hy_memory/coding/record_origin.py b/hy_memory/coding/record_origin.py
+new file mode 100644
+index 0000000..f320a8f
+--- /dev/null
++++ b/hy_memory/coding/record_origin.py
+@@ -0,0 +1,90 @@
++"""Bind a productivity record's semantic version to its producing SDK request."""
++
++import hashlib
++import hmac
++import json
++
++_FIELDS = {
++    "experience": (
++        "experience_id",
++        "user_id",
++        "agent_id",
++        "task",
++        "search_keys",
++        "solution",
++        "boundary_envs",
++        "workspace_id",
++        "branch",
++        "session_id",
++        "files",
++        "confidence",
++        "source",
++        "extraction_source",
++        "created_at",
++        "updated_at",
++    ),
++    "fact": (
++        "fact_id",
++        "user_id",
++        "agent_id",
++        "session_id",
++        "workspace_id",
++        "branch",
++        "source",
++        "statement",
++        "files",
++        "subject",
++        "details",
++        "fact_chain_summary",
++        "created_at",
++    ),
++}
++
++
++def record_digest(kind, record):
++    body = {name: record[name] for name in _FIELDS[kind]}
++    if kind == "experience":
++        body["confidence"] = float(body["confidence"])
++    else:
++        for name in ("subject", "details", "fact_chain_summary"):
++            body[name] = body[name] or ""
++    encoded = json.dumps(
++        ["productivity-origin-v1", kind, record.get("origin_request_id"), body],
++        sort_keys=True,
++        ensure_ascii=False,
++        allow_nan=False,
++        separators=(",", ":"),
++    ).encode()
++    return hashlib.sha256(encoded).hexdigest()
++
++
++def stamp_origin(record, kind, request_id):
++    if request_id is not None and (
++        not isinstance(request_id, str) or not request_id or len(request_id) > 512
++    ):
++        raise ValueError("productivity_origin_request_invalid")
++    record.origin_request_id = request_id
++    record.origin_digest = (
++        record_digest(kind, record.to_dict()) if request_id is not None else None
++    )
++
++
++def verified_origin(kind, record):
++    request = record.get("origin_request_id")
++    digest = record.get("origin_digest")
++    if request is None and digest is None:
++        return None
++    try:
++        valid = (
++            isinstance(request, str)
++            and bool(request)
++            and len(request) <= 512
++            and isinstance(digest, str)
++            and len(digest) == 64
++            and hmac.compare_digest(digest, record_digest(kind, record))
++        )
++    except (KeyError, ValueError, TypeError, OverflowError):
++        valid = False
++    if not valid:
++        raise ValueError("productivity_origin_invalid")
++    return request

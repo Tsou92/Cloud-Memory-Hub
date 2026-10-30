@@ -8,6 +8,7 @@ import pytest
 from hy_memory.coding.fact_reconciler import WorkingFactReconciler, _build_inherited_details
 from hy_memory.coding.input_capture import ReconcileInputCapture
 from hy_memory.coding.reconciler import CodingMemoryReconciler
+from hy_memory.coding.record_origin import verified_origin
 from hy_memory.coding.store import CodingMemoryStore
 from hy_memory.coding.types import CodingMemory, CodingMemoryDraft, WorkingFact, WorkingFactDraft
 from hy_memory.coding.writer import CodingWriter
@@ -324,6 +325,14 @@ def test_real_writer_update_and_fact_history_survive_durable_reopen(tmp_path, mo
                     lambda: sdk._loop_thread.run(store.get_by_id("old", "scope"))
                 )
                 assert current.solution == "new solution"
+                assert verified_origin("experience", current.to_dict()) == request_id
+                for identity in result["fact_ids"]:
+                    produced = await _joined_thread(
+                        lambda identity=identity: sdk._loop_thread.run(
+                            store.get_fact(identity, "scope")
+                        )
+                    )
+                    assert verified_origin("fact", produced.to_dict()) == request_id
                 count = len(prompts)
                 replay = await _joined_thread(sdk.add, messages, **options)
                 assert replay["reconcile_inputs"] == captured and len(prompts) == count

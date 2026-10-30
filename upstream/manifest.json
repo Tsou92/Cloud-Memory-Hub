@@ -54,6 +54,11 @@
       "path": "patches/0010-reconcile-input-snapshots.patch",
       "scope": "immutable_productivity_reconcile_inputs_in_durable_outcomes",
       "digest": "sha256:1700e692df064f0d39644b6ae997d766ddf4283443ff668c83821f0d29aa0572"
+    },
+    {
+      "path": "patches/0011-productivity-record-origins.patch",
+      "scope": "atomic_productivity_producer_identity_and_semantic_digest",
+      "digest": "sha256:e427baaeb0ce18efeebaf0b5efe20a02a633d90c5106137325b41fe265daeb65"
     }
   ]
 }
