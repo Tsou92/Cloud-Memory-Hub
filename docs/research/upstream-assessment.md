@@ -70,3 +70,5 @@
 ## 2026-10-30 普通聊天历史输入增量
 
 补丁 0012 复用 `pipelines/writer.py::_get_recent_history` 的原解析／窗口及姓名渲染，并通过 client 原持久结果透传快照。原函数只返回文本；原生 L1 也没有生产请求标记，故保存实际贡献节点的 ID／正文／身份，保留空标记，后续由 Hub 精确产出索引核验来源。没有新模型调用、历史选择算法或存储后端。保留 payload-only、L1 读取边界、写入缓存／结果／延迟及 reconcile 回归；完整范围和接线边界见 [ADR-0024](../adr/0024-chat-input-evidence.md)。
+
+Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `ChatMessage.from_dict`、`WriteRequest.get_flat_content` 和 `strip_tool_messages`；只增加归档表及来源适配，没有重做原始对话解析或提炼。实测 Core 的 `_hy_agent_id` 包含来源／日期／工作区，保持该既有隔离语义，验证范围见 [接线记录](../reviews/2026-10-30-chat-lineage.md)。

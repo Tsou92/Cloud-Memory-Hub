@@ -436,7 +436,12 @@ def test_evidence_failure_rolls_back_all_receipt_extensions_and_recovery_is_idem
                 context = stored_context(db, jobs[-1])
             with pytest.raises(ValueError, match="lineage_inputs_changed"):
                 lineage._commit(
-                    jobs[-1], event, links, context, capture_inputs(changed, requests[-1])
+                    jobs[-1],
+                    event,
+                    links,
+                    context,
+                    capture_inputs(changed, requests[-1]),
+                    {"scene": "productivity", "capture": None},
                 )
 
     asyncio.run(scenario())
