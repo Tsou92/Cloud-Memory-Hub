@@ -11,6 +11,7 @@ from cloud_memory_hub.governance_inventory import observe_inventory
 from cloud_memory_hub.input_context import InputContext, capture_context, stored_context
 from cloud_memory_hub.output_lineage import OutputLineage
 from cloud_memory_hub.productivity_read import record_id
+from cloud_memory_hub.reconcile_graph import stage_id
 from cloud_memory_hub.remote_access import AccessError
 from hy_memory.coding.store import CodingMemoryStore
 from hy_memory.coding.types import CodingMemory, CodingMemoryDraft, ReconcileOp
@@ -49,6 +50,10 @@ def test_actual_history_survives_trace_queue_cleanup_and_process_reopen(tmp_path
                 return ([CodingMemoryDraft(task="Synthetic")] if len(calls) == 2 else []), []
 
             async def reconcile(*args, **kwargs):
+                # This test double uses no candidate input; explicitly capture that contract.
+                capture = kwargs["input_capture"]
+                token = capture.begin("experience_decision", "experience", [], "")
+                capture.end(token, "used")
                 request = requests[-1]
                 identity = str(uuid4())
                 await store.insert(
@@ -120,7 +125,9 @@ def test_actual_history_survives_trace_queue_cleanup_and_process_reopen(tmp_path
             nodes = await observe_inventory(
                 _sdk_library_bridge(app.core), requests[0].user_id, app.core.state.cmh_lineage
             )
-            assert nodes[identity].parents == {"cmhe:" + job for job in jobs}
+            assert nodes[identity].parents == {"cmhe:" + job for job in jobs} | {
+                stage_id(jobs[1], 0)
+            }
             assert all(not nodes["cmhe:" + job].parents for job in jobs)
             assert len(db_rows(config, "cmh_event_output_links")) == 1
 

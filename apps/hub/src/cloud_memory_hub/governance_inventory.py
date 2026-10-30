@@ -50,7 +50,7 @@ def _node(payload, namespace):
     if payload.get("user_id") != namespace:
         raise GovernanceError("governance_scope_mismatch")
     identity = _identity(payload.get("node_id"))
-    if identity.startswith(("cmhp:", "cmhe:", "cmht:", "cmhv:", "cmhc:")):
+    if identity.startswith(("cmhp:", "cmhe:", "cmht:", "cmhv:", "cmhc:", "cmhi:")):
         raise GovernanceError("governance_record_identity_mismatch")
     content = payload.get("content")
     if not isinstance(content, str) or len(content.encode()) > MAX_CONTENT_BYTES:

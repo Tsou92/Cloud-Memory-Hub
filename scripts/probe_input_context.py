@@ -39,6 +39,10 @@ async def produce(sdk, request, *, output, variant="working"):
         return ([CodingMemoryDraft(task="Synthetic draft")] if output else []), []
 
     async def reconcile(*args, **kwargs):
+        # The synthetic reconciler consumes no candidates. Capture that explicit contract.
+        capture = kwargs["input_capture"]
+        token = capture.begin("experience_decision", "experience", [], "")
+        capture.end(token, "used")
         identity = str(uuid4())
         await store.insert(
             CodingMemory(

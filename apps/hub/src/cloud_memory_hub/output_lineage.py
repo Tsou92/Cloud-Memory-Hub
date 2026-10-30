@@ -23,6 +23,13 @@ from cloud_memory_hub.input_context import (
 )
 from cloud_memory_hub.original_archive import validate_original
 from cloud_memory_hub.productivity_inventory import trace_id
+from cloud_memory_hub.reconcile_evidence import (
+    capture_inputs,
+    check_inputs,
+    commit_inputs,
+    initialize_inputs,
+)
+from cloud_memory_hub.reconcile_graph import ReconcileGraph
 from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.remote_ingest import write_request
 from cloud_memory_hub.sdk_reconcile import MAX_REFERENCES, proven_write
@@ -68,6 +75,7 @@ class OutputLineage:
                     "CREATE INDEX cmh_output_origins ON cmh_event_output_links(kind,output_id)"
                 )
             initialize_context(db)
+            initialize_inputs(db)
             self._check(db)
 
     @staticmethod
@@ -78,6 +86,7 @@ class OutputLineage:
         db.execute("SELECT receipt_id,links_digest FROM cmh_event_outcomes LIMIT 0")
         db.execute("SELECT receipt_id,kind,output_id FROM cmh_event_output_links LIMIT 0")
         check_context(db)
+        check_inputs(db)
 
     def _request(self, job_id, frozen):
         self.governance.require_ready()
@@ -110,7 +119,7 @@ class OutputLineage:
             raise ValueError("lineage_links_invalid")
         return links
 
-    def _commit(self, job_id, event, links, context):
+    def _commit(self, job_id, event, links, context, inputs):
         self.governance.require_ready()
         with self.ingest._database(writing=True) as db:
             self._check(db)
@@ -125,14 +134,16 @@ class OutputLineage:
             if previous is not None:
                 if previous[0] != _digest(links) or self._stored_links(db, job_id) != links:
                     raise ValueError("lineage_result_changed")
-                commit_context(db, job_id, context, event)
-                return
-            db.execute("INSERT INTO cmh_event_outcomes VALUES (?,?)", (job_id, _digest(links)))
-            db.executemany(
-                "INSERT INTO cmh_event_output_links VALUES (?,?,?)",
-                [(job_id, kind, identity) for kind, identity in links],
-            )
+            else:
+                db.execute("INSERT INTO cmh_event_outcomes VALUES (?,?)", (job_id, _digest(links)))
+                db.executemany(
+                    "INSERT INTO cmh_event_output_links VALUES (?,?,?)",
+                    [(job_id, kind, identity) for kind, identity in links],
+                )
             commit_context(db, job_id, context, event)
+            rebuilt = write_request(event)
+            request = MemoryTaskRunner.request_for(rebuilt.idempotency_key, rebuilt.input_records)
+            commit_inputs(db, job_id, inputs, request)
 
     async def observe(self, job_id, frozen):
         # Core can also hold non-Hub jobs. Only our own instance's events have archives.
@@ -151,7 +162,8 @@ class OutputLineage:
             context = await _joined_thread(
                 capture_context, result, sdk._config.coding.db_path, request
             )
-            await _joined_thread(self._commit, job_id, event, links, context)
+            inputs = capture_inputs(result, request)
+            await _joined_thread(self._commit, job_id, event, links, context, inputs)
 
     def _pending(self):
         self.governance.require_ready()
@@ -159,8 +171,11 @@ class OutputLineage:
             self._check(db)
             return db.execute(
                 "SELECT rowid,receipt_id,request_id FROM cmh_event_receipts receipt "
-                "WHERE rowid>? AND NOT EXISTS (SELECT 1 FROM cmh_event_contexts context "
-                "WHERE context.receipt_id=receipt.receipt_id) ORDER BY rowid LIMIT 32",
+                "WHERE rowid>? AND (NOT EXISTS (SELECT 1 FROM cmh_event_contexts context "
+                "WHERE context.receipt_id=receipt.receipt_id) OR NOT EXISTS "
+                "(SELECT 1 FROM cmh_event_inputs inputs "
+                "WHERE inputs.receipt_id=receipt.receipt_id)) "
+                "ORDER BY rowid LIMIT 32",
                 (self._cursor,),
             ).fetchall()
 
@@ -195,7 +210,7 @@ class OutputLineage:
         scope = record.user_id[len(instance_prefix) :]
         targets = [("memory", record.memory_id)]
         targets.extend(("raw", raw) for raw in record.source_raw_ids[:32])
-        originals = set()
+        originals, outputs = set(), []
         with self.ingest._database() as db:
             self._check(db)
             for kind, identity in targets:
@@ -212,6 +227,7 @@ class OutputLineage:
                     if _digest(self._stored_links(db, row["receipt_id"])) != row["links_digest"]:
                         raise ValueError("lineage_links_invalid")
                     originals.add(PREFIX + row["receipt_id"])
+                    outputs.append((row["receipt_id"], identity))
                     originals.update(
                         context_parents(db, stored_context(db, row["receipt_id"]), event)
                     )
@@ -219,6 +235,10 @@ class OutputLineage:
                         break
                 if len(originals) > 32:
                     break
+            graph = ReconcileGraph(
+                db, self.ingest.access.instance_id, scope, self._stored_links, _digest
+            )
+            originals.update(graph.original_parents(outputs))
         return tuple(sorted(originals)[:33])
 
     async def enrich(self, record):
@@ -243,8 +263,10 @@ class OutputLineage:
             self._check(db)
             count, size = db.execute(
                 "SELECT count(*),COALESCE(sum(length(CAST(payload_json AS BLOB)) + "
-                "COALESCE(length(CAST(context_json AS BLOB)),0)),0) "
+                "COALESCE(length(CAST(context_json AS BLOB)),0) + "
+                "COALESCE(length(CAST(inputs_json AS BLOB)),0)),0) "
                 "FROM cmh_event_receipts LEFT JOIN cmh_event_contexts USING(receipt_id) "
+                "LEFT JOIN cmh_event_inputs USING(receipt_id) "
                 "WHERE scope_id=?",
                 (namespace[len(prefix) :],),
             ).fetchone()
@@ -307,4 +329,14 @@ class OutputLineage:
                         raise GovernanceError("governance_reference_unresolved")
                     node = records[identity]
                     records[identity] = replace(node, parents=node.parents | {original} | parents)
+            graph = ReconcileGraph(
+                db,
+                self.ingest.access.instance_id,
+                namespace[len(prefix) :],
+                self._stored_links,
+                _digest,
+            )
+            records = graph.merge(
+                records, [row["receipt_id"] for row in rows if row["links_digest"] is not None]
+            )
         return records
