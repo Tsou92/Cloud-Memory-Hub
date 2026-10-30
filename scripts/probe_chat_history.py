@@ -33,13 +33,13 @@ async def phase(root, mode):
         seen = []
 
         async def extract(self, **kwargs):
-            assert mode == "seed", "replay must not invoke extraction"
+            assert mode in {"seed", "legacy-seed"}, "replay must not invoke extraction"
             seen.append(kwargs["history_context"])
             return AgentResult(success=True, extracted_info={"memory": [], "entities": []})
 
         MemAgent.process_add = extract
         try:
-            if mode == "seed":
+            if mode in {"seed", "legacy-seed"}:
                 state = []
                 for index in range(3):
                     request = dict(
@@ -47,12 +47,15 @@ async def phase(root, mode):
                     )
                     result = await _joined_thread(sdk.add, MESSAGES, **request)
                     assert result["success"] is True
-                    capture = result["chat_history"]
-                    assert capture["status"] == "complete" and capture["rendered"] == seen[-1]
-                    assert {item["node_id"] for item in capture["records"]} == {
-                        item["raw_id"] for item in state
-                    }
-                    assert len(capture["records"]) == index
+                    capture = result.get("chat_history")
+                    if mode == "legacy-seed":
+                        assert "chat_history" not in result
+                    else:
+                        assert capture["status"] == "complete" and capture["rendered"] == seen[-1]
+                        assert {item["node_id"] for item in capture["records"]} == {
+                            item["raw_id"] for item in state
+                        }
+                        assert len(capture["records"]) == index
                     state.append(
                         dict(request=request, captured=capture, raw_id=result["memory_id"])
                     )
@@ -60,9 +63,9 @@ async def phase(root, mode):
                 return
             for item in json.loads(path.read_text()):
                 saved = await bridge.get_sdk_write_outcome(item["request"]["request_id"])
-                assert saved["result"]["chat_history"] == item["captured"]
+                assert saved["result"].get("chat_history") == item["captured"]
                 replay = await _joined_thread(sdk.add, MESSAGES, **item["request"])
-                assert replay["chat_history"] == item["captured"]
+                assert replay.get("chat_history") == item["captured"]
             assert seen == []
         finally:
             MemAgent.process_add = previous
@@ -70,7 +73,7 @@ async def phase(root, mode):
 
 def main():
     if len(sys.argv) == 3:
-        assert sys.argv[1] in {"seed", "read"}
+        assert sys.argv[1] in {"seed", "legacy-seed", "read"}
         asyncio.run(phase(Path(sys.argv[2]), sys.argv[1]))
         return
     with TemporaryDirectory(prefix="cmh-chat-history-") as temporary:
