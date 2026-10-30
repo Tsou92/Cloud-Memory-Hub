@@ -1,0 +1,182 @@
+--- a/hy_memory/pipelines/writer.py
++++ b/hy_memory/pipelines/writer.py
+@@ -60,6 +60,40 @@
+
+ _RECONCILE_ENABLED = os.getenv("RECONCILE_ENABLED", "true").lower() == "true"
+ _MEMORY_AT_UNSET = object()
++
++
++def _chat_history_evidence(nodes=(), identities=(), rendered="", status="complete"):
++    """Freeze only the nodes that contributed to the actual history string."""
++    unavailable = {"schema_version": 1, "status": "unavailable", "records": [], "rendered": ""}
++    try:
++        if len(identities) > 512 or len(rendered) > 2 * 1024 * 1024:
++            return unavailable
++        records = []
++        evidence = {"schema_version": 1, "status": status, "records": records, "rendered": rendered}
++        size = len(json.dumps(evidence, ensure_ascii=False, allow_nan=False).encode())
++        if size > 2 * 1024 * 1024:
++            return unavailable
++        for node in nodes:
++            if node.node_id not in identities:
++                continue
++            record = {
++                name: getattr(node, name, None)
++                for name in ("node_id", "user_id", "agent_id", "session_id", "source", "content")
++            }
++            record["request_id"] = (node.custom or {}).get("request_id")
++            if any(value is not None and not isinstance(value, str) for value in record.values()):
++                return unavailable
++            if any(value is not None and len(value) > 2 * 1024 * 1024 for value in record.values()):
++                return unavailable
++            size += len(json.dumps(record, ensure_ascii=False, allow_nan=False).encode()) + 2
++            if size > 2 * 1024 * 1024:
++                return unavailable
++            records.append(record)
++        if len(records) != len(identities) or {record["node_id"] for record in records} != set(identities):
++            return unavailable
++        return evidence
++    except Exception:
++        return unavailable
+
+
+ def _write_apply_verify_enabled() -> bool:
+@@ -2675,6 +2709,7 @@
+             # 4. MemAgent 处理（可选）
+             agent_mode = request.extra.get("agent_mode", "disabled")
+             response.extra["agent_mode"] = agent_mode
++            response.extra["chat_history"] = _chat_history_evidence(status="not_used")
+
+             _t_workflow = datetime.now()
+             if (agent_mode == "full" and vector_store is not None
+@@ -2683,6 +2718,7 @@
+                 _history_context = ""
+                 _recent_history_ms = 0.0
+                 _recent_history_count = 0
++                _history_capture = _chat_history_evidence(status="unavailable")
+                 try:
+                     _hist_turns = getattr(self.config.extractor, "history_turns", 5) or 5
+                     _t_recent_history = datetime.now()
+@@ -2690,11 +2726,14 @@
+                         vector_store, request.user_id, request.agent_id,
+                         exclude_memory_id=memory_id,
+                         max_turns=_hist_turns * 2,  # k 轮对话 = k*2 条 message
++                        capture=_history_capture,
+                     )
+                     _recent_history_ms = (_t_recent_history and (datetime.now() - _t_recent_history).total_seconds() * 1000) or 0.0
+                     _recent_history_count = len([line for line in (_history_context or "").splitlines() if line.strip()])
+                 except Exception as _hist_err:
+                     logger.warning(f"[write] get_recent_history failed: {_hist_err}")
++
++                response.extra["chat_history"] = _history_capture
+
+                 with tracer.span("mem_agent") as s:
+                     await self._run_agent(
+@@ -2930,6 +2969,7 @@
+         exclude_memory_id: str = "",
+         max_turns: int = 20,
+         max_chars_assistant: int = 500,
++        capture: Optional[Dict[str, Any]] = None,
+     ) -> str:
+         """
+         获取该用户最近的 L1_RAW 对话记录，按轮次拆分后拼成 history context。
+@@ -2957,6 +2997,8 @@
+                 allow_raw_layer=True,
+             )
+             if not nodes:
++                if capture is not None:
++                    capture.update(_chat_history_evidence())
+                 return ""
+
+             # 排除当前正在处理的 memory（避免自引用）
+@@ -2985,7 +3027,9 @@
+
+             # (label, content) 元组列表；label 为 role 或对方真人名字
+             parsed: List[Tuple[str, str]] = []
++            contributors = []
+             user_name: str = ""
++            name_source = None
+             for node in nodes:
+                 content = node.content or ""
+                 for _line_idx, line in enumerate(content.split("\n")):
+@@ -2994,6 +3038,7 @@
+                         label = m.group(1)
+                         body = line[m.end():]
+                         parsed.append((label, body))
++                        contributors.append([(0, len(body), node.node_id)])
+                         continue
+                     # 名字行只可能是每个 node content 的第一行（get_flat_content 插在文首）。
+                     # 逐 node 判断而非用 `not parsed`：parsed 跨 node 累积，第二个 node
+@@ -3003,22 +3048,29 @@
+                         _name = parse_user_name_line(line)
+                         if _name:
+                             user_name = _name
++                            name_source = node.node_id
+                             continue
+                     if parsed:
+                         # 续行：拼回上一条 message（保留换行）
+                         prev_label, prev_body = parsed[-1]
+                         parsed[-1] = (prev_label, prev_body + "\n" + line)
++                        contributors[-1].append((len(prev_body), len(prev_body) + 1 + len(line), node.node_id))
+                     else:
+                         # 开头就是无前缀行（异常/老数据）：当成 user 消息兜底
+                         parsed.append(("user", line))
++                        contributors.append([(0, len(line), node.node_id)])
+
+             # 取最近 max_turns 条 message（按 message 截断，绝不从消息中间切开）
+             recent = parsed[-max_turns:] if len(parsed) > max_turns else parsed
++            recent_sources = contributors[-max_turns:] if len(parsed) > max_turns else contributors
+             if not recent:
++                if capture is not None:
++                    capture.update(_chat_history_evidence())
+                 return ""
+
+             # 格式化：非 user 侧整条截断（含对方真人），user 完整保留
+             all_messages: List[str] = []
++            used = set()
+             if user_name:
+                 from .base import render_user_name_line
+                 from ..utils.lang_detect import is_chinese
+@@ -3029,17 +3081,29 @@
+                 )
+                 if _name_line:
+                     all_messages.append(_name_line)
+-            for label, body in recent:
++                    used.add(name_source)
++                    # Language selection above also consumes the untruncated bodies.
++                    used.update(identity for sources in recent_sources for _, _, identity in sources)
++            for (label, body), sources in zip(recent, recent_sources):
++                left = len(body) - len(body.lstrip())
+                 body = body.strip()
+                 # 截断口径：assistant + 对方真人（非已知 role 的 label）。
+                 # user 完整保留；system / tool 沿用历史行为（不截断）。
+                 _truncate = label == "assistant" or label not in _KNOWN_ROLES
++                visible = len(body[:max_chars_assistant]) if _truncate and len(body) > max_chars_assistant else len(body)
++                used.add(sources[0][2])  # The visible message label has a source too.
++                used.update(identity for start, end, identity in sources if start < left + visible and end > left)
+                 if _truncate and len(body) > max_chars_assistant:
+                     body = body[:max_chars_assistant] + "..."
+                 all_messages.append(f"[{label}]: {body}")
+
+-            return "\n".join(all_messages)
++            rendered = "\n".join(all_messages)
++            if capture is not None:
++                capture.update(_chat_history_evidence(nodes, used, rendered))
++            return rendered
+         except Exception as e:
++            if capture is not None:
++                capture.update(_chat_history_evidence(status="unavailable"))
+             logger.debug(f"[write] _get_recent_history error: {e}")
+             return ""
+
+--- a/hy_memory/client.py
++++ b/hy_memory/client.py
+@@ -2843,6 +2843,8 @@
+         }
+
+         # timing breakdown
++        if "chat_history" in result.extra:
++            resp["chat_history"] = result.extra["chat_history"]
+         _timing = result.extra.get("timing")
+         if _timing:
+             resp["timing"] = _timing

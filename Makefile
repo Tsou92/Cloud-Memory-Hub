@@ -58,6 +58,10 @@ probe-record-origins: prepare-upstream
 probe-reconcile-graph: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_reconcile_graph.py
 
+.PHONY: probe-chat-history
+probe-chat-history: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_chat_history.py
+
 check-upstream: prepare-upstream
 	uv run --locked python .local/upstream/hy-memory/memhub/scripts/fetch_embedding_model.py
 	cd .local/upstream/hy-memory/memhub && uv tool run --from uv==0.12.5 uv run --no-project -- bash scripts/run-tests-isolated.sh core-pr -q
