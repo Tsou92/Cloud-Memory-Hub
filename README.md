@@ -52,6 +52,7 @@
 | 编程链治理观察 | [轮次与线程关系](docs/adr/0021-coding-chain-inventory.md) · [验证记录](docs/reviews/2026-10-29-chain-inventory.md) |
 | 合并决策输入留存 | [不可变输入快照](docs/adr/0022-reconcile-input-snapshots.md) · [验证记录](docs/reviews/2026-10-29-reconcile-inputs.md) |
 | 原生记录生产来源 | [来源标记与关系设计](docs/adr/0023-reconcile-input-lineage.md) · [验证记录](docs/reviews/2026-10-30-record-origins.md) |
+| 合并输入来源图 | [输入归档与关系验证](docs/reviews/2026-10-30-reconcile-graph.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查

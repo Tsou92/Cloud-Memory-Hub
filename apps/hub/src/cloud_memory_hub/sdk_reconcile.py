@@ -97,7 +97,7 @@ async def proven_write(bridge, job_id, request, operation):
     memories = _ids(result.get("memory_ids", []))
     if any(
         isinstance(identity, str)
-        and identity.startswith(("cmhp:", "cmhe:", "cmht:", "cmhv:", "cmhc:"))
+        and identity.startswith(("cmhp:", "cmhe:", "cmht:", "cmhv:", "cmhc:", "cmhi:"))
         for identity in (single, *memories)
     ):
         raise ValueError("sdk_outcome_reserved_identity")
