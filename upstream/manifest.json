@@ -59,6 +59,11 @@
       "path": "patches/0011-productivity-record-origins.patch",
       "scope": "atomic_productivity_producer_identity_and_semantic_digest",
       "digest": "sha256:4ee5d6191b9e410137bc84880c6411b32f8b03b18c58fcec55225842d7519356"
+    },
+    {
+      "path": "patches/0012-chat-history-inputs.patch",
+      "scope": "immutable_chat_history_inputs_in_durable_outcomes",
+      "digest": "sha256:fd47dc2733aae0aa2a9fe55eb497a98648f4dbf4ea5bf6f23b242f55198c2a1a"
     }
   ]
 }

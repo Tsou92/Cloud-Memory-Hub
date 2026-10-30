@@ -52,6 +52,8 @@ jobs:
         run: make check-upstream
       - name: Verify persisted reconciliation inputs across processes
         run: make probe-reconcile-graph
+      - name: Verify chat history inputs across processes
+        run: make probe-chat-history
       - name: Verify reused web components and fresh SDK startup
         run: make check-web
       - name: Build Linux amd64 image, verify offline model and restart persistence

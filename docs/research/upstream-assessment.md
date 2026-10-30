@@ -66,3 +66,7 @@
 ## 2026-10-30 原生来源标记增量
 
 补丁 0011 继续复用固定提交的 `coding/store.py` 追加列迁移与 SQL upsert、两类 reconciler 及 writer；原实现没有同正文原子写入的生产 request_id／内容摘要，故增加这两个可空字段及共享核验函数，不另建记忆存储。复用上游 store、reconciler、fact_reconciler、writer、路由和提示词语言测试；本项目新增多轮来源与旧写入检测测试。理由、兼容性及验证边界见 [ADR-0023](../adr/0023-reconcile-input-lineage.md) 和[记录](../reviews/2026-10-30-record-origins.md)。
+
+## 2026-10-30 普通聊天历史输入增量
+
+补丁 0012 复用 `pipelines/writer.py::_get_recent_history` 的原解析／窗口及姓名渲染，并通过 client 原持久结果透传快照。原函数只返回文本；原生 L1 也没有生产请求标记，故保存实际贡献节点的 ID／正文／身份，保留空标记，后续由 Hub 精确产出索引核验来源。没有新模型调用、历史选择算法或存储后端。保留 payload-only、L1 读取边界、写入缓存／结果／延迟及 reconcile 回归；完整范围和接线边界见 [ADR-0024](../adr/0024-chat-input-evidence.md)。
