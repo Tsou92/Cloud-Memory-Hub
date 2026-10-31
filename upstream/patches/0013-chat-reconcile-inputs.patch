@@ -1,0 +1,256 @@
+--- a/hy_memory/agent/reconciler.py
++++ b/hy_memory/agent/reconciler.py
+@@ -40,6 +40,7 @@
+     _log_llm_content_enabled,
+ )
+ from ..config import MemoryConfig
++from ..coding.input_capture import ReconcileInputCapture
+
+ logger = logging.getLogger(__name__)
+
+@@ -154,6 +155,7 @@
+     # writer，ADD-all / degraded ADD 可直接落库，避免同一事实再次请求 embedding。
+     # 仅按完全相同 content 复用；LLM 改写后的 UPDATE/SUPERSEDE 会重新计算，防止错配。
+     new_memory_embeddings: Dict[str, List[float]] = field(default_factory=dict)
++    input_capture: Optional[Dict[str, Any]] = None
+
+
+ # ================================================================
+@@ -756,8 +758,22 @@
+             new_memories: 新记忆内容列表（content only，用于 embed 搜索）
+             new_memories_with_meta: 可选，含 tags 的完整 meta
+         """
++        capture = ReconcileInputCapture()
++        capture_token = None
++
++        def finish(result, *, skipped=False):
++            if skipped:
++                token = capture.begin("memory_decision", "memory", [], "")
++                capture.end(token, "skipped")
++            elif capture_token is not None:
++                capture.end(capture_token, "fallback" if result.degraded or not result.success else "used")
++            else:
++                capture.unavailable = True
++            result.input_capture = capture.result()
++            return result
++
+         if not new_memories:
+-            return ReconcileResult(ops=[], success=True)
++            return finish(ReconcileResult(ops=[], success=True), skipped=True)
+
+         from ..models.memory import MemoryLayer, MemoryStatus, MemoryNode
+         import asyncio
+@@ -1244,7 +1260,7 @@
+                     f"{len(new_memories)} new memories → {len(all_add_ops)} ops"
+                 )
+                 _log_ops_detail(all_add_ops)
+-                return ReconcileResult(
++                return finish(ReconcileResult(
+                     ops=all_add_ops,
+                     success=True,
+                     prompt_tokens=_tok_pt,
+@@ -1252,7 +1268,7 @@
+                     total_tokens=_tok_total,
+                     candidate_scores=per_memory_candidates,
+                     new_memory_embeddings=new_memory_embeddings,
+-                )
++                ), skipped=True)
+
+             # ── Step 4: 构造 prompt ──
+             _structure_metadata_on = bool(getattr(
+@@ -1346,6 +1362,9 @@
+                     getattr(self.config.llm, "few_shot_enabled", False)
+                 ),
+                 structure_metadata_enabled=_structure_metadata_on,
++            )
++            capture_token = capture.begin(
++                "memory_decision", "memory", sorted_candidates, prompt,
+             )
+
+             # ── Step 5: LLM 调用 + 重试 ──
+@@ -1474,7 +1493,7 @@
+                     f"[reconciler] falling back to ADD-all: {len(_fb)} memories "
+                     f"({error_code})"
+                 )
+-                return ReconcileResult(
++                return finish(ReconcileResult(
+                     ops=_fb,
+                     success=bool(_fb),
+                     error=None if _fb else error_msg,
+@@ -1484,7 +1503,7 @@
+                     completion_tokens=_tok_ct,
+                     total_tokens=_tok_total,
+                     new_memory_embeddings=new_memory_embeddings,
+-                )
++                ))
+
+             # 写 RECONCILE pipeline log
+             if cache and request_id:
+@@ -1536,7 +1555,7 @@
+                 f"{len(candidate_map)} candidates → {len(ops)} ops"
+             )
+             _log_ops_detail(ops)
+-            return ReconcileResult(
++            return finish(ReconcileResult(
+                 ops=ops,
+                 success=True,
+                 prompt_tokens=_tok_pt,
+@@ -1544,7 +1563,7 @@
+                 total_tokens=_tok_total,
+                 candidate_scores=per_memory_candidates,
+                 new_memory_embeddings=new_memory_embeddings,
+-            )
++            ))
+
+         except Exception as e:
+             logger.error(f"[reconciler] failed: {e}", exc_info=True)
+@@ -1556,12 +1575,12 @@
+                     f"[reconciler] falling back to ADD-all after unexpected error: "
+                     f"{len(_fb)} memories"
+                 )
+-                return ReconcileResult(
++                return finish(ReconcileResult(
+                     ops=_fb, success=True,
+                     degraded=True, degraded_reason=f"EXCEPTION:{type(e).__name__}",
+                     new_memory_embeddings=dict(new_memory_embeddings or {}),
+-                )
+-            return ReconcileResult(ops=[], success=False, error=str(e))
++                ))
++            return finish(ReconcileResult(ops=[], success=False, error=str(e)))
+
+     @staticmethod
+     def _inherit_exact_input_structure(
+--- a/hy_memory/pipelines/writer.py
++++ b/hy_memory/pipelines/writer.py
+@@ -1241,6 +1241,7 @@
+         req_id: str,
+         source_raw_memory_id: str = "",
+         precomputed_embeddings: Optional[Dict[str, List[float]]] = None,
++        capture: Optional[Dict[str, Any]] = None,
+     ) -> Tuple[List[str], Optional[str], Dict[str, int], Dict[str, int]]:
+         """Serialize reconcile/apply per user, preserving timeline semantics."""
+         async with _reconcile_user_lock(request.user_id or "default"):
+@@ -1252,6 +1253,7 @@
+                 req_id=req_id,
+                 source_raw_memory_id=source_raw_memory_id,
+                 precomputed_embeddings=precomputed_embeddings,
++                capture=capture,
+             )
+
+     async def _reconcile_and_store_locked(
+@@ -1263,6 +1265,7 @@
+         req_id: str,
+         source_raw_memory_id: str = "",
+         precomputed_embeddings: Optional[Dict[str, List[float]]] = None,
++        capture: Optional[Dict[str, Any]] = None,
+     ) -> Tuple[List[str], Optional[str], Dict[str, int], Dict[str, int]]:
+         """
+         对新 memories 做 reconcile，执行 ADD（含 EVOLVE），写 WRITE_SUMMARY log。
+@@ -1305,6 +1308,11 @@
+             new_memory_embeddings=precomputed_embeddings,
+             source=request.source,
+         )
++        if capture is not None:
++            capture.clear()
++            capture.update(getattr(recon_result, "input_capture", None) or {
++                "schema_version": 1, "status": "unavailable", "stages": [],
++            })
+
+         if not recon_result.success:
+             return [], recon_result.error, {"add": 0, "supersede": 0, "update": 0, "total": 0}, {"prompt": 0, "completion": 0, "total": 0}
+@@ -2436,6 +2444,9 @@
+         """
+         start_time = datetime.now()
+         response = WriteResponse()
++        response.extra["chat_reconcile_inputs"] = {
++            "schema_version": 1, "status": "not_used", "stages": [],
++        }
+
+         if not request.request_id:
+             request.request_id = get_request_id()
+@@ -2494,6 +2505,9 @@
+
+             _t_recon = datetime.now()
+             if _RECONCILE_ENABLED:
++                response.extra["chat_reconcile_inputs"] = {
++                    "schema_version": 1, "status": "unavailable", "stages": [],
++                }
+                 stored_ids, recon_error, ops_counts, recon_tokens = await self._reconcile_and_store(
+                     new_memory_texts=new_memory_texts,
+                     new_memories_meta=new_memories_meta,
+@@ -2501,6 +2515,7 @@
+                     vector_store=vector_store,
+                     req_id=_req_id,
+                     precomputed_embeddings=precomputed_embeddings,
++                    capture=response.extra["chat_reconcile_inputs"],
+                 )
+             else:
+                 stored_ids, recon_error, ops_counts, recon_tokens = await self._direct_store(
+@@ -2568,6 +2583,9 @@
+         """执行 Lite 写入流程。"""
+         start_time = datetime.now()
+         response = WriteResponse()
++        response.extra["chat_reconcile_inputs"] = {
++            "schema_version": 1, "status": "not_used", "stages": [],
++        }
+
+         # request_id 归一化：优先用 client 显式透传的 request.request_id（contextvar-immune），
+         # 兜底用 contextvar（保护直接调用 write() 的测试 / 其它 caller）。
+@@ -3519,6 +3537,9 @@
+
+             if new_memory_texts:
+                 if _RECONCILE_ENABLED:
++                    response.extra["chat_reconcile_inputs"] = {
++                        "schema_version": 1, "status": "unavailable", "stages": [],
++                    }
+                     stored_ids, recon_error, ops_counts, recon_tokens = await self._reconcile_and_store(
+                         new_memory_texts=new_memory_texts,
+                         new_memories_meta=new_memories_meta,
+@@ -3527,6 +3548,7 @@
+                         req_id=_req_id,
+                         source_raw_memory_id=memory_id,
+                         precomputed_embeddings=precomputed_embeddings,
++                        capture=response.extra["chat_reconcile_inputs"],
+                     )
+                 else:
+                     stored_ids, recon_error, ops_counts, recon_tokens = await self._direct_store(
+--- a/hy_memory/client.py
++++ b/hy_memory/client.py
+@@ -2845,6 +2845,8 @@
+         # timing breakdown
+         if "chat_history" in result.extra:
+             resp["chat_history"] = result.extra["chat_history"]
++        if "chat_reconcile_inputs" in result.extra:
++            resp["chat_reconcile_inputs"] = result.extra["chat_reconcile_inputs"]
+         _timing = result.extra.get("timing")
+         if _timing:
+             resp["timing"] = _timing
+@@ -3153,6 +3155,9 @@
+         resp["reconcile_tokens"] = result.extra.get(
+             "reconcile_tokens", {"prompt": 0, "completion": 0, "total": 0}
+         )
++
++        if "chat_reconcile_inputs" in result.extra:
++            resp["chat_reconcile_inputs"] = result.extra["chat_reconcile_inputs"]
+
+         if result.success:
+             logger.info(
+--- a/hy_memory/coding/input_capture.py
++++ b/hy_memory/coding/input_capture.py
+@@ -20,13 +20,15 @@
+         try:
+             if len(self.stages) >= self.MAX_STAGES:
+                 raise ValueError("stage budget")
+-            key = {"experience": "experience_id", "fact": "fact_id"}[kind]
++            key = {"experience": "experience_id", "fact": "fact_id", "memory": "node_id"}[kind]
+             snapshots = []
+             for record in records:
+                 self._records += 1
+                 if self._records > self.MAX_RECORDS:
+                     raise ValueError("record budget")
+                 payload = record.to_dict()
++                if kind == "memory":
++                    payload.pop("embedding", None)
+                 identity = payload[key]
+                 if not isinstance(identity, str) or not identity:
+                     raise ValueError("identity")

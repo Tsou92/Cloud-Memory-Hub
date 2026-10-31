@@ -260,5 +260,10 @@ def test_lite_write_explicitly_records_that_history_was_not_used(tmp_path, monke
                 "records": [],
                 "rendered": "",
             }
+            assert result["chat_reconcile_inputs"] == {
+                "schema_version": 1,
+                "status": "not_used",
+                "stages": [],
+            }
 
     asyncio.run(scenario())
