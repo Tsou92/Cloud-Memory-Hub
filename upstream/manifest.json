@@ -64,6 +64,11 @@
       "path": "patches/0012-chat-history-inputs.patch",
       "scope": "immutable_chat_history_inputs_in_durable_outcomes",
       "digest": "sha256:fd47dc2733aae0aa2a9fe55eb497a98648f4dbf4ea5bf6f23b242f55198c2a1a"
+    },
+    {
+      "path": "patches/0013-chat-reconcile-inputs.patch",
+      "scope": "immutable_chat_reconcile_inputs_in_durable_outcomes",
+      "digest": "sha256:4b895d6c38f1a547c4748d2942ca2cd263b519fd82b1d89924b94816b92dc0b5"
     }
   ]
 }

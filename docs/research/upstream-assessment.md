@@ -71,4 +71,8 @@
 
 补丁 0012 复用 `pipelines/writer.py::_get_recent_history` 的原解析／窗口及姓名渲染，并通过 client 原持久结果透传快照。原函数只返回文本；原生 L1 也没有生产请求标记，故保存实际贡献节点的 ID／正文／身份，保留空标记，后续由 Hub 精确产出索引核验来源。没有新模型调用、历史选择算法或存储后端。保留 payload-only、L1 读取边界、写入缓存／结果／延迟及 reconcile 回归；完整范围和接线边界见 [ADR-0024](../adr/0024-chat-input-evidence.md)。
 
+## 2026-10-31 普通聊天合并输入增量
+
+补丁 0013 在原生 `MemoryReconciler.reconcile` 的链头合并、去重和实际提示构造之后冻结候选；复用已有有界快照与持久结果，不复制检索、合并算法或修改模型调用。`Extractor.extract` 的 existing_tags 和 basic_profile_fields 仅为保留参数，固定源码未使用它们构造实际提示；中英文与配置组合实测用于防止凭形参虚构依赖。快照保存可变 MemoryNode 的当时 payload，尚不等于已证明生产版本来源，见 [ADR-0025](../adr/0025-chat-reconcile-evidence.md)。
+
 Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `ChatMessage.from_dict`、`WriteRequest.get_flat_content` 和 `strip_tool_messages`；只增加归档表及来源适配，没有重做原始对话解析或提炼。实测 Core 的 `_hy_agent_id` 包含来源／日期／工作区，保持该既有隔离语义，验证范围见 [接线记录](../reviews/2026-10-30-chat-lineage.md)。
