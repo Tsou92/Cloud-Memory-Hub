@@ -10,6 +10,7 @@ from hy_memory.agent.llm_provider import LLMResponse
 from hy_memory.agent.mem_agent import AgentResult, MemAgent
 from hy_memory.agent.reconciler import MemoryReconciler
 from hy_memory.coding.input_capture import ReconcileInputCapture
+from hy_memory.coding.record_origin import verified_origin
 from hy_memory.config import MemoryConfig
 from hy_memory.models.memory import MemoryLayer, MemoryNode, MemoryStatus
 from hy_memory.pipelines._retrieval.reconcile_retrieval import ReconcileHybridRetriever
@@ -306,12 +307,17 @@ def test_real_writer_durable_result_and_replay(tmp_path, monkeypatch, method, op
             assert capture["stages"][0]["rendered"] == calls[0]
             assert capture["stages"][0]["inputs"][0]["id"] == first["memory_id"]
             assert capture["stages"][0]["inputs"][0]["record"]["content"] == "Synthetic fact"
+            assert (
+                verified_origin("memory", capture["stages"][0]["inputs"][0]["record"])
+                == requests[0]
+            )
             if operation == "UPDATE":
                 current = await _joined_thread(
                     lambda: sdk._loop_thread.run(sdk._vector_store.get_by_id(target["id"]))
                 )
                 assert current.content == "Synthetic revised fact"
                 assert current.node_id == target["id"]
+                assert verified_origin("memory", current.to_dict()) == requests[1]
             results.append(result)
 
         def forbidden(*args, **kwargs):

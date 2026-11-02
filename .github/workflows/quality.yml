@@ -58,6 +58,10 @@ jobs:
         run: make probe-chat-graph
       - name: Native chat reconciliation evidence and replay
         run: make probe-chat-reconcile
+      - name: Memory version origins on all native backends
+        run: make check-memory-origins
+      - name: Persisted native memory origin and replay
+        run: make probe-memory-origins
       - name: Verify reused web components and fresh SDK startup
         run: make check-web
       - name: Build Linux amd64 image, verify offline model and restart persistence

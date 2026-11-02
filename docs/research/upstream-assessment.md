@@ -75,4 +75,8 @@
 
 补丁 0013 在原生 `MemoryReconciler.reconcile` 的链头合并、去重和实际提示构造之后冻结候选；复用已有有界快照与持久结果，不复制检索、合并算法或修改模型调用。`Extractor.extract` 的 existing_tags 和 basic_profile_fields 仅为保留参数，固定源码未使用它们构造实际提示；中英文与配置组合实测用于防止凭形参虚构依赖。快照保存可变 MemoryNode 的当时 payload，尚不等于已证明生产版本来源，见 [ADR-0025](../adr/0025-chat-reconcile-evidence.md)。
 
+## 2026-11-02 普通记忆生产版本增量
+
+补丁 0014 复用 record_origin 的摘要/校验、MemoryNode 和 VectorStoreBase 的共同 payload，以及原生 writer 已有的旧节点读取。上游 custom.request_id 在 UPDATE 后仍保留创建请求，不能充当版本生产者，因此增加独立可空标记和三个后端共有的未标记语义更新失效规则。没有新增存储、模型或检索算法；对应本地真实后端、写入/重开和上游回归见 [ADR-0026](../adr/0026-chat-memory-origins.md) 与[验证记录](../reviews/2026-11-02-memory-origins.md)。
+
 Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `ChatMessage.from_dict`、`WriteRequest.get_flat_content` 和 `strip_tool_messages`；只增加归档表及来源适配，没有重做原始对话解析或提炼。实测 Core 的 `_hy_agent_id` 包含来源／日期／工作区，保持该既有隔离语义，验证范围见 [接线记录](../reviews/2026-10-30-chat-lineage.md)。
