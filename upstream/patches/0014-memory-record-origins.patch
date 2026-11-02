@@ -1,0 +1,269 @@
+--- a/hy_memory/coding/record_origin.py
++++ b/hy_memory/coding/record_origin.py
+@@ -1,8 +1,24 @@
+-"""Bind a productivity record's semantic version to its producing SDK request."""
++"""Bind a memory record's semantic version to its producing SDK request."""
+
+ import hashlib
+ import hmac
+ import json
++
++_MEMORY_FIELDS = (
++    "node_id",
++    "user_id",
++    "agent_id",
++    "session_id",
++    "source",
++    "owner",
++    "layer",
++    "content",
++    "memory_at",
++    "gmt_created",
++    "tags",
++)
++_ORIGIN_FIELDS = frozenset({"origin_request_id", "origin_digest"})
++_MEMORY_UPDATES = frozenset(_MEMORY_FIELDS) | {"custom"}
+
+ _FIELDS = {
+     "experience": (
+@@ -42,14 +58,26 @@
+
+
+ def record_digest(kind, record):
+-    body = {name: record[name] for name in _FIELDS[kind]}
++    domain = "productivity-origin-v1"
++    if kind == "memory":
++        domain = "chat-memory-origin-v1"
++        body = {name: record[name] for name in _MEMORY_FIELDS}
++        custom = record.get("custom") or {}
++        if not isinstance(custom, dict):
++            raise ValueError("memory_origin_custom_invalid")
++        body["structure"] = {
++            name: custom.get(name)
++            for name in ("topic_paths", "event_facet", "topic_assignments")
++        }
++    else:
++        body = {name: record[name] for name in _FIELDS[kind]}
+     if kind == "experience":
+         body["confidence"] = float(body["confidence"])
+-    else:
++    elif kind == "fact":
+         for name in ("subject", "details", "fact_chain_summary"):
+             body[name] = body[name] or ""
+     encoded = json.dumps(
+-        ["productivity-origin-v1", kind, record.get("origin_request_id"), body],
++        [domain, kind, record.get("origin_request_id"), body],
+         sort_keys=True,
+         ensure_ascii=False,
+         allow_nan=False,
+@@ -88,3 +116,41 @@
+     if not valid:
+         raise ValueError("productivity_origin_invalid")
+     return request
++
++
++def stamp_memory_origin(node, request_id):
++    """Unobservable origin must not change the existing write behavior."""
++    try:
++        stamp_origin(node, "memory", request_id or None)
++    except (KeyError, ValueError, TypeError, OverflowError, AttributeError):
++        node.origin_request_id = node.origin_digest = None
++    return node
++
++
++def memory_update_origin(old, updates, request_id):
++    """Reuse the writer's existing old-node read; never synthesize missing state."""
++    from ..models.memory import MemoryNode
++
++    result = dict(updates)
++    result.update(origin_request_id=None, origin_digest=None)
++    if old is None:
++        return result
++    try:
++        payload = old.to_dict()
++        payload.update(updates)
++        node = stamp_memory_origin(MemoryNode.from_dict(payload), request_id)
++        result.update(
++            origin_request_id=node.origin_request_id, origin_digest=node.origin_digest
++        )
++    except (KeyError, ValueError, TypeError, OverflowError, AttributeError):
++        pass
++    return result
++
++
++def invalidate_memory_origin(updates):
++    """Partial untracked semantic changes must not inherit a previous producer."""
++    result = dict(updates)
++    keys = result.keys()
++    if (_MEMORY_UPDATES | _ORIGIN_FIELDS) & keys and not _ORIGIN_FIELDS <= keys:
++        result.update(origin_request_id=None, origin_digest=None)
++    return result
+--- a/hy_memory/data/vector_store_base.py
++++ b/hy_memory/data/vector_store_base.py
+@@ -714,6 +714,8 @@
+
+         return {
+             "node_id": node.node_id,
++            "origin_request_id": node.origin_request_id,
++            "origin_digest": node.origin_digest,
+             "isolation_key": node.get_isolation_key(),
+             "user_id": node.user_id,
+             "agent_id": node.agent_id,
+--- a/hy_memory/data/vector_store_chroma.py
++++ b/hy_memory/data/vector_store_chroma.py
+@@ -19,6 +19,7 @@
+ )
+ from ..config import MemoryConfig
+ from ..utils.async_executor import run_in_executor_guarded
++from ..coding.record_origin import invalidate_memory_origin
+ from .vector_store_base import VectorStoreBase, passes_created_after
+
+ # created_after 走 post-filter，先按倍数扩池再过滤，避免过滤后不够 limit
+@@ -172,7 +173,7 @@
+         if not updates:
+             return True
+         point_id = self._node_id_to_point_id(node_id)
+-        updates = dict(updates)
++        updates = invalidate_memory_origin(updates)
+         new_embedding = updates.pop("embedding", None)  # 取出向量单独处理
+         # Chroma metadata 只支持 str/int/float/bool，序列化复杂类型
+         import json as _json_up
+--- a/hy_memory/data/vector_store_faiss.py
++++ b/hy_memory/data/vector_store_faiss.py
+@@ -24,6 +24,7 @@
+ )
+ from ..config import MemoryConfig
+ from ..utils.async_executor import run_in_executor_guarded
++from ..coding.record_origin import invalidate_memory_origin
+ from .vector_store_base import VectorStoreBase, passes_created_after
+
+ logger = logging.getLogger(__name__)
+@@ -244,7 +245,7 @@
+         if not updates:
+             return True
+         point_id = self._node_id_to_point_id(node_id)
+-        updates = dict(updates)
++        updates = invalidate_memory_origin(updates)
+         new_embedding = updates.pop("embedding", None)  # 取出向量单独处理
+         try:
+             def _update():
+--- a/hy_memory/data/vector_store_qdrant.py
++++ b/hy_memory/data/vector_store_qdrant.py
+@@ -28,6 +28,7 @@
+ )
+ from ..config import MemoryConfig
+ from ..utils.async_executor import run_in_executor_guarded
++from ..coding.record_origin import invalidate_memory_origin
+ from .vector_store_base import VectorStoreBase
+ from .vector_store_chroma import _vdb_executor
+
+@@ -427,7 +428,7 @@
+             UpdateVectorsOperation,
+         )
+         point_id = self._node_id_to_point_id(node_id)
+-        updates = dict(updates)
++        updates = invalidate_memory_origin(updates)
+         new_embedding = updates.pop("embedding", None)  # 取出向量单独处理
+         try:
+             lexical_changed = "content" in updates or "tags" in updates
+@@ -548,7 +549,7 @@
+         prepared = []
+         missing_payload_ids = []
+         for node_id, raw_updates in updates_by_id:
+-            updates = dict(raw_updates or {})
++            updates = invalidate_memory_origin(raw_updates or {})
+             lexical_changed = "content" in updates or "tags" in updates
+             if lexical_changed and ("content" not in updates or "tags" not in updates):
+                 missing_payload_ids.append(node_id)
+--- a/hy_memory/models/memory.py
++++ b/hy_memory/models/memory.py
+@@ -327,6 +327,9 @@
+     # 与 tags 等长的 NER label（GPE/PERSON/...）；主题词为空串。写入时标注，读侧 boost 用。
+     tag_ners: List[str] = field(default_factory=list)
+
++    origin_request_id: Optional[str] = None
++    origin_digest: Optional[str] = None
++
+     def __post_init__(self):
+         from ..utils.source_filter import normalize_source
+         self.source = normalize_source(self.source)
+@@ -420,6 +423,8 @@
+         """序列化为字典"""
+         return {
+             "node_id": self.node_id,
++            "origin_request_id": self.origin_request_id,
++            "origin_digest": self.origin_digest,
+             "user_id": self.user_id,
+             "agent_id": self.agent_id,
+             "session_id": self.session_id,
+@@ -558,6 +563,8 @@
+             source_turn_index=data.get("source_turn_index"),
+             evidence_chain=data.get("evidence_chain", []),
+             # 扩展
++            origin_request_id=data.get("origin_request_id") or None,
++            origin_digest=data.get("origin_digest") or None,
+             custom=data.get("custom", {}),
+             tags=data.get("tags", []) or [],
+             tag_ners=list(data.get("tag_ners") or []),
+--- a/hy_memory/pipelines/writer.py
++++ b/hy_memory/pipelines/writer.py
+@@ -47,6 +47,7 @@
+ from ..data.vector_store_base import VectorStoreBase
+ from ..utils.tracer import PipelineTracer, create_tracer
+ from ..utils.log_setup import get_request_id
++from ..coding.record_origin import memory_update_origin, stamp_memory_origin
+ from ..utils.pipeline_observability import is_pipeline_trace_enabled
+ from ._retrieval import tag_index as _tag_index_helper
+ from ._retrieval.retrieval_clauses import (
+@@ -1494,6 +1495,7 @@
+                     )
+                 if merged_custom:
+                     updates["custom"] = merged_custom
++                updates = memory_update_origin(old_node, updates, req_id)
+                 update_rows.append((op.memory_id, updates))
+                 update_nodes.append((op_idx, self._graph_stub_node(
+                     op.memory_id, content, layer, list(op.tags or []), request,
+@@ -1583,7 +1585,7 @@
+                 ), op))
+
+             batch_ids = await vector_store.upsert_batch(
+-                [node for node, _op in add_nodes]
++                [stamp_memory_origin(node, req_id) for node, _op in add_nodes]
+             )
+             accepted = set(batch_ids or [])
+             for node, op in add_nodes:
+@@ -1840,6 +1842,7 @@
+                             similarity=1.0, method="write_session",
+                         )
+                     try:
++                        _updates = memory_update_origin(_old, _updates, req_id)
+                         await vector_store.update_payload(target_id, _updates)
+                     except Exception as e:
+                         logger.warning(f"[reconciler] in-place UPDATE failed on {target_id}: {e}")
+@@ -1932,7 +1935,7 @@
+                     # 长链下极易撞 5KB 上限。
+                     custom=self._fact_custom(op, req_id, request),
+                 )
+-                nid = await vector_store.upsert(new_node)
++                nid = await vector_store.upsert(stamp_memory_origin(new_node, req_id))
+                 stored_ids.append(nid)
+                 graph_payload.append((new_node, op))
+                 if target_id:
+@@ -2015,7 +2018,7 @@
+                 tag_ners=list(getattr(op, "tag_ners", None) or []),
+                 custom=self._fact_custom(op, req_id, request),
+             )
+-            nid = await vector_store.upsert(new_node)
++            nid = await vector_store.upsert(stamp_memory_origin(new_node, req_id))
+             stored_ids.append(nid)
+             graph_payload.append((new_node, op))
+             add_cnt += 1
+@@ -2212,7 +2215,7 @@
+                     ),
+                 },
+             )
+-            nid = await vector_store.upsert(new_node)
++            nid = await vector_store.upsert(stamp_memory_origin(new_node, req_id))
+             stored_ids.append(nid)
+             stored_nodes.append(new_node)
+             await self._emit_reconcile_apply(

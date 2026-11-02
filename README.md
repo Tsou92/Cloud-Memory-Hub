@@ -55,6 +55,7 @@
 | 合并输入来源图 | [输入归档与关系验证](docs/reviews/2026-10-30-reconcile-graph.md) |
 | 普通聊天历史输入 | [捕获设计](docs/adr/0024-chat-input-evidence.md) · [SDK 验证](docs/reviews/2026-10-30-chat-history.md) · [Hub 来源接线](docs/reviews/2026-10-30-chat-lineage.md) |
 | 普通聊天合并输入 | [实际候选快照与兼容设计](docs/adr/0025-chat-reconcile-evidence.md) · [NAS 验证](docs/reviews/2026-10-31-chat-reconcile.md)；可变记忆版本的生产来源接线仍待完成 |
+| 普通记忆生产版本 | [设计](docs/adr/0026-chat-memory-origins.md) · [验证记录](docs/reviews/2026-11-02-memory-origins.md)；原生版本标记已实现，Hub 来源接线继续进行 |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查

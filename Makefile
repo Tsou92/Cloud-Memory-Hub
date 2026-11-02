@@ -70,6 +70,13 @@ probe-chat-graph: prepare-upstream
 probe-chat-reconcile: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_chat_reconcile.py
 
+.PHONY: check-memory-origins probe-memory-origins
+check-memory-origins: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub --with faiss-cpu==1.15.1 --with qdrant-client==1.19.1 python -m pytest -q tests/test_memory_origins.py
+
+probe-memory-origins: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_memory_origins.py
+
 check-upstream: prepare-upstream
 	uv run --locked python .local/upstream/hy-memory/memhub/scripts/fetch_embedding_model.py
 	cd .local/upstream/hy-memory/memhub && uv tool run --from uv==0.12.5 uv run --no-project -- bash scripts/run-tests-isolated.sh core-pr -q
