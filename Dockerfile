@@ -55,6 +55,8 @@ ARG CMH_REVISION=development
 LABEL org.opencontainers.image.title="Cloud Memory Hub" \
     org.opencontainers.image.revision=$CMH_REVISION
 USER 1000:1000
+# Validate model access as the runtime user, including cached asset permissions.
+RUN /opt/cmh/venv/bin/python -c "from one_memory.embedding_assets import verify_assets; verify_assets()"
 WORKDIR /data
 EXPOSE 8800
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
