@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -252,15 +253,20 @@ def test_unused_legacy_arguments_do_not_enter_actual_extract_prompt(content, cus
 
 
 @pytest.mark.parametrize("method", ["add", "add_extracted"])
-def test_real_writer_durable_result_and_replay(tmp_path, monkeypatch, method):
+@pytest.mark.parametrize("operation", ["ADD", "UPDATE"])
+def test_real_writer_durable_result_and_replay(tmp_path, monkeypatch, method, operation):
     config = config_for(tmp_path)
     requests = [str(uuid4()), str(uuid4())]
     calls, results = [], []
+    target = {}
 
     async def complete(**kwargs):
         calls.append(kwargs["prompt"])
+        op = {"op": operation, "content": "Synthetic fact"}
+        if operation == "UPDATE":
+            op.update(memory_id=target["id"], content="Synthetic revised fact")
         return LLMResponse(
-            content='[{"op":"ADD","content":"Synthetic fact"}]',
+            content=json.dumps([op]),
             tokens_used=1,
             prompt_tokens=1,
             completion_tokens=0,
@@ -285,6 +291,7 @@ def test_real_writer_durable_result_and_replay(tmp_path, monkeypatch, method):
                 request_id=requests[0],
             )
             assert first["success"]
+            target["id"] = first["memory_id"]
             assert first["chat_reconcile_inputs"]["stages"][0]["status"] == "skipped"
             result = await _joined_thread(
                 getattr(sdk, method),
@@ -298,6 +305,13 @@ def test_real_writer_durable_result_and_replay(tmp_path, monkeypatch, method):
             assert capture["status"] == "complete"
             assert capture["stages"][0]["rendered"] == calls[0]
             assert capture["stages"][0]["inputs"][0]["id"] == first["memory_id"]
+            assert capture["stages"][0]["inputs"][0]["record"]["content"] == "Synthetic fact"
+            if operation == "UPDATE":
+                current = await _joined_thread(
+                    lambda: sdk._loop_thread.run(sdk._vector_store.get_by_id(target["id"]))
+                )
+                assert current.content == "Synthetic revised fact"
+                assert current.node_id == target["id"]
             results.append(result)
 
         def forbidden(*args, **kwargs):
