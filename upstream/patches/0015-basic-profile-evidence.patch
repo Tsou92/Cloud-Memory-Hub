@@ -1,0 +1,349 @@
+--- a/hy_memory/agent/tools/basic_profile.py
++++ b/hy_memory/agent/tools/basic_profile.py
+@@ -31,6 +31,9 @@
+ from dataclasses import dataclass
+ from datetime import datetime
+ from typing import Any, Dict, List, Optional
++
++from ...coding.record_origin import stamp_profile_origin
++from .profile_capture import ProfileInputCapture
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -247,20 +250,31 @@
+     embed_service,
+     allowed_fields: Optional[List[str]] = None,
+     client_meta: Optional[Dict[str, Any]] = None,
++    request_id: Optional[str] = None,
++    capture: Optional[Dict[str, Any]] = None,
+ ) -> BasicProfileUpsertResult:
+     """按 user_id 串行更新全局唯一的 L0 Basic Info 链。"""
+-    normalized_user_id = (user_id or "").strip()
+-    if not normalized_user_id:
+-        return BasicProfileUpsertResult(success=False, error="user_id required")
+-    async with _user_lock(normalized_user_id):
+-        return await _upsert_basic_profile_unlocked(
+-            user_id=normalized_user_id,
+-            kv=kv,
+-            vector_store=vector_store,
+-            embed_service=embed_service,
+-            allowed_fields=allowed_fields,
+-            client_meta=client_meta,
+-        )
++    evidence = ProfileInputCapture(capture)
++    result = None
++    try:
++        normalized_user_id = (user_id or "").strip()
++        if not normalized_user_id:
++            result = BasicProfileUpsertResult(success=False, error="user_id required")
++        else:
++            async with _user_lock(normalized_user_id):
++                result = await _upsert_basic_profile_unlocked(
++                    user_id=normalized_user_id,
++                    kv=kv,
++                    vector_store=vector_store,
++                    embed_service=embed_service,
++                    allowed_fields=allowed_fields,
++                    client_meta=client_meta,
++                    request_id=request_id,
++                    evidence=evidence,
++                )
++        return result
++    finally:
++        evidence.finish(result)
+ 
+ 
+ async def _upsert_basic_profile_unlocked(
+@@ -271,6 +285,8 @@
+     embed_service,
+     allowed_fields: Optional[List[str]] = None,
+     client_meta: Optional[Dict[str, Any]] = None,
++    request_id: Optional[str] = None,
++    evidence: ProfileInputCapture,
+ ) -> BasicProfileUpsertResult:
+     """
+     把 LLM 提取出的 basic_info kv 入库到 user-level L0_BASIC_INFO 演化链。
+@@ -288,6 +304,7 @@
+ 
+     new_kv = _sanitize_kv(kv or {}, allowed_fields=allowed_fields)
+     if not new_kv:
++        evidence.decision([], BASIC_FIELDS if allowed_fields is None else allowed_fields, new_kv, {}, [])
+         return BasicProfileUpsertResult(
+             success=True, changed=False, reason="no valid fields after sanitize"
+         )
+@@ -299,6 +316,10 @@
+     latest_nodes = _latest_l0_heads_from_nodes(all_l0_nodes)
+     existing_full_kv = _assemble_full_kv_from_nodes(
+         all_l0_nodes, allowed_fields=allowed_fields,
++    )
++    evidence.decision(
++        all_l0_nodes, BASIC_FIELDS if allowed_fields is None else allowed_fields,
++        new_kv, existing_full_kv, latest_nodes,
+     )
+ 
+     diff_kv: Dict[str, Any] = {}
+@@ -364,16 +385,23 @@
+         tags=["basic_info"],
+     )
+ 
++    stamp_profile_origin(new_node, request_id)
++    evidence.effect("attempted_output_ids", new_node_id)
+     try:
+-        await vector_store.upsert(new_node)
++        stored_id = await vector_store.upsert(new_node)
++        if stored_id == new_node_id:
++            evidence.effect("output_ids", new_node_id)
++        else:
++            evidence.failed()
+     except Exception as e:
+         return BasicProfileUpsertResult(success=False, error=f"upsert failed: {e}")
+ 
+     # 把全部历史 active/latest 链头标记为 superseded，收敛为一个 user-level 链头。
+     supersede_failures: List[str] = []
+     for old_head in latest_nodes:
++        evidence.effect("attempted_supersede_ids", old_head.node_id)
+         try:
+-            await vector_store.update_payload(
++            updated = await vector_store.update_payload(
+                 old_head.node_id,
+                 {
+                     "is_latest": False,
+@@ -381,7 +409,12 @@
+                     "status": MemoryStatus.SUPERSEDED.value,
+                 },
+             )
++            if updated is True:
++                evidence.effect("superseded_ids", old_head.node_id)
++            else:
++                evidence.failed()
+         except Exception as e:
++            evidence.failed()
+             supersede_failures.append(old_head.node_id)
+             logger.warning(
+                 f"[basic_profile] failed to supersede old L0 node "
+--- a/hy_memory/client.py
++++ b/hy_memory/client.py
+@@ -2847,6 +2847,8 @@
+             resp["chat_history"] = result.extra["chat_history"]
+         if "chat_reconcile_inputs" in result.extra:
+             resp["chat_reconcile_inputs"] = result.extra["chat_reconcile_inputs"]
++        if "basic_profile_inputs" in result.extra:
++            resp["basic_profile_inputs"] = result.extra["basic_profile_inputs"]
+         _timing = result.extra.get("timing")
+         if _timing:
+             resp["timing"] = _timing
+@@ -3158,6 +3160,8 @@
+ 
+         if "chat_reconcile_inputs" in result.extra:
+             resp["chat_reconcile_inputs"] = result.extra["chat_reconcile_inputs"]
++        if "basic_profile_inputs" in result.extra:
++            resp["basic_profile_inputs"] = result.extra["basic_profile_inputs"]
+ 
+         if result.success:
+             logger.info(
+--- a/hy_memory/coding/input_capture.py
++++ b/hy_memory/coding/input_capture.py
+@@ -20,14 +20,14 @@
+         try:
+             if len(self.stages) >= self.MAX_STAGES:
+                 raise ValueError("stage budget")
+-            key = {"experience": "experience_id", "fact": "fact_id", "memory": "node_id"}[kind]
++            key = {"experience": "experience_id", "fact": "fact_id", "memory": "node_id", "profile": "node_id"}[kind]
+             snapshots = []
+             for record in records:
+                 self._records += 1
+                 if self._records > self.MAX_RECORDS:
+                     raise ValueError("record budget")
+                 payload = record.to_dict()
+-                if kind == "memory":
++                if kind in {"memory", "profile"}:
+                     payload.pop("embedding", None)
+                 identity = payload[key]
+                 if not isinstance(identity, str) or not identity:
+--- a/hy_memory/coding/record_origin.py
++++ b/hy_memory/coding/record_origin.py
+@@ -59,8 +59,8 @@
+ 
+ def record_digest(kind, record):
+     domain = "productivity-origin-v1"
+-    if kind == "memory":
+-        domain = "chat-memory-origin-v1"
++    if kind in {"memory", "profile"}:
++        domain = "basic-profile-origin-v1" if kind == "profile" else "chat-memory-origin-v1"
+         body = {name: record[name] for name in _MEMORY_FIELDS}
+         custom = record.get("custom") or {}
+         if not isinstance(custom, dict):
+@@ -69,6 +69,13 @@
+             name: custom.get(name)
+             for name in ("topic_paths", "event_facet", "topic_assignments")
+         }
++        if kind == "profile":
++            body["basic_info_kv"] = custom["basic_info_kv"]
++            # Chroma decodes empty scalar strings as None. These two empty
++            # identity fields express the same native user-level L0 scope.
++            for name in ("agent_id", "session_id"):
++                if body[name] is None:
++                    body[name] = ""
+     else:
+         body = {name: record[name] for name in _FIELDS[kind]}
+     if kind == "experience":
+@@ -120,8 +127,16 @@
+ 
+ def stamp_memory_origin(node, request_id):
+     """Unobservable origin must not change the existing write behavior."""
++    return _stamp_node_origin(node, "memory", request_id)
++
++
++def stamp_profile_origin(node, request_id):
++    return _stamp_node_origin(node, "profile", request_id)
++
++
++def _stamp_node_origin(node, kind, request_id):
+     try:
+-        stamp_origin(node, "memory", request_id or None)
++        stamp_origin(node, kind, request_id or None)
+     except (KeyError, ValueError, TypeError, OverflowError, AttributeError):
+         node.origin_request_id = node.origin_digest = None
+     return node
+--- a/hy_memory/pipelines/writer.py
++++ b/hy_memory/pipelines/writer.py
+@@ -42,6 +42,7 @@
+ from ..agent.mem_agent import MemAgent, ProcessMode
+ from ..agent.reconciler import MemoryReconciler
+ from ..agent.tools.basic_profile import upsert_basic_profile
++from ..agent.tools.profile_capture import profile_capture_result
+ from ..models.memory import MemoryNode, MemoryLayer, MemoryStatus, SourceType
+ from ..data.vector_store import create_vector_store
+ from ..data.vector_store_base import VectorStoreBase
+@@ -2450,6 +2451,7 @@
+         response.extra["chat_reconcile_inputs"] = {
+             "schema_version": 1, "status": "not_used", "stages": [],
+         }
++        response.extra["basic_profile_inputs"] = profile_capture_result()
+ 
+         if not request.request_id:
+             request.request_id = get_request_id()
+@@ -2589,6 +2591,7 @@
+         response.extra["chat_reconcile_inputs"] = {
+             "schema_version": 1, "status": "not_used", "stages": [],
+         }
++        response.extra["basic_profile_inputs"] = profile_capture_result()
+ 
+         # request_id 归一化：优先用 client 显式透传的 request.request_id（contextvar-immune），
+         # 兜底用 contextvar（保护直接调用 write() 的测试 / 其它 caller）。
+@@ -3391,6 +3394,7 @@
+         tool_results_summary: List[Dict[str, Any]] = []
+ 
+         if isinstance(basic_info_raw, dict) and basic_info_raw:
++            response.extra["basic_profile_inputs"] = profile_capture_result("unavailable")
+             try:
+                 _bp_result = await upsert_basic_profile(
+                     user_id=request.user_id,
+@@ -3399,6 +3403,8 @@
+                     embed_service=self.embed_service,
+                     allowed_fields=list(_basic_profile_fields.keys()),
+                     client_meta=getattr(request, "client_meta", None),
++                    request_id=request.request_id,
++                    capture=response.extra["basic_profile_inputs"],
+                 )
+                 # 把 upsert 结果包成原 tool_results 形态（向后兼容 pipeline log 解析）
+                 tool_results_summary.append({
+--- /dev/null
++++ b/hy_memory/agent/tools/profile_capture.py
+@@ -0,0 +1,96 @@
++"""Call-local evidence of the existing deterministic L0 update, not another write."""
++
++import json
++
++from ...coding.input_capture import ReconcileInputCapture
++
++_EFFECTS = (
++    "attempted_output_ids",
++    "output_ids",
++    "attempted_supersede_ids",
++    "superseded_ids",
++)
++
++
++def profile_capture_result(status="not_used"):
++    return {
++        "schema_version": 1,
++        "status": status,
++        "stages": [],
++        "effects_complete": True,
++        **{key: [] for key in _EFFECTS},
++    }
++
++
++class ProfileInputCapture:
++    # The unchanged native query returns at most 1000 old nodes, plus one new ID.
++    MAX_EFFECTS = 1024
++    MAX_ID_CHARS = 512
++
++    def __init__(self, target):
++        self.target = target
++        self.inputs = ReconcileInputCapture()
++        self.effects = profile_capture_result("unavailable")
++
++    def decision(self, nodes, fields, incoming, existing, heads):
++        if self.target is None:
++            return
++        token = self.inputs.begin(
++            "basic_profile_update",
++            "profile",
++            nodes,
++            lambda: json.dumps(
++                {
++                    "allowed_fields": fields,
++                    "incoming_kv": incoming,
++                    "existing_kv": existing,
++                    "head_ids": [n.node_id for n in heads],
++                },
++                ensure_ascii=False,
++                sort_keys=True,
++                allow_nan=False,
++            ),
++        )
++        self.inputs.end(token, "used")
++
++    def effect(self, key, identity):
++        if self.target is None or not self.effects["effects_complete"]:
++            return
++        if (
++            not isinstance(identity, str)
++            or not identity
++            or len(identity) > self.MAX_ID_CHARS
++            or len(self.effects[key]) >= self.MAX_EFFECTS
++        ):
++            self.effects["effects_complete"] = False
++            self.failed()
++            return
++        self.effects[key].append(identity)
++
++    def failed(self):
++        self.inputs.unavailable = True
++
++    def finish(self, result):
++        if self.target is None:
++            return
++        try:
++            if result is None or not result.success:
++                self.failed()
++            payload = dict(self.effects)
++            payload.update(self.inputs.result(required=("basic_profile_update",)))
++            if (
++                len(json.dumps(payload, ensure_ascii=False, allow_nan=False).encode())
++                > self.inputs.MAX_BYTES
++            ):
++                payload.update(status="unavailable", stages=[])
++            if (
++                len(json.dumps(payload, ensure_ascii=False, allow_nan=False).encode())
++                > self.inputs.MAX_BYTES
++            ):
++                payload = profile_capture_result("unavailable")
++                payload["effects_complete"] = False
++        except Exception:
++            payload = profile_capture_result("unavailable")
++            payload["effects_complete"] = False
++        self.target.clear()
++        self.target.update(payload)

@@ -74,6 +74,11 @@
       "path": "patches/0014-memory-record-origins.patch",
       "scope": "native_memory_semantic_origin_and_untracked_update_invalidation",
       "digest": "sha256:9e7dcdc3fb52bc9edcfa3b4c7e21c06d3ee7fab20120288d2345da9c6f027edc"
+    },
+    {
+      "path": "patches/0015-basic-profile-evidence.patch",
+      "scope": "native_basic_profile_input_and_side_effect_evidence_with_producer_origin",
+      "digest": "sha256:c23c0ebaf4187b9982a8f4d799d4b8ecf5b4c78423210d02933d0b32e82658f3"
     }
   ]
 }
