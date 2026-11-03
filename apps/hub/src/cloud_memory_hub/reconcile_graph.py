@@ -117,23 +117,27 @@ class ReconcileGraph:
             if target in self.targets(entry, stage)
         )
 
-    def producer(self, item, variant, consumer):
-        identity = verified_origin(item["kind"], item["record"])
+    def producer_receipt(self, identity, consumer, *, error="governance_input"):
+        """Resolve an already-checked semantic origin within the shared scan budget."""
         if identity is None:
-            raise GovernanceError("governance_input_origin_unproven")
+            raise GovernanceError(error + "_origin_unproven")
         if identity not in self.producers:
             rows = self.db.execute(
                 "SELECT receipt_id,scope_id FROM cmh_event_receipts WHERE request_id=? LIMIT 2",
                 (identity,),
             ).fetchall()
             if len(rows) != 1:
-                raise GovernanceError("governance_input_original_unproven")
+                raise GovernanceError(error + "_original_unproven")
             if rows[0][1] != self.scope:
-                raise GovernanceError("governance_input_scope_mismatch")
+                raise GovernanceError(error + "_scope_mismatch")
             self.producers[identity] = rows[0][0]
         receipt = self.producers[identity]
         if receipt == consumer:
-            raise GovernanceError("governance_input_self_reference")
+            raise GovernanceError(error + "_self_reference")
+        return receipt
+
+    def producer(self, item, variant, consumer):
+        receipt = self.producer_receipt(verified_origin(item["kind"], item["record"]), consumer)
         entry = self.entry(receipt)
         request, record = entry["request"], item["record"]
         if (record["user_id"], record["agent_id"], record["source"]) != (

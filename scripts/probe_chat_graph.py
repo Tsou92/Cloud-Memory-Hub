@@ -7,13 +7,16 @@ import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from uuid import uuid4
 
 import hy_memory.pipelines.writer as native_writer
 from cloud_memory_hub.app import create_hub
 from cloud_memory_hub.config import HubConfig
 from httpx import ASGITransport, AsyncClient
+from hy_memory.agent.llm_provider import LLMResponse
 from hy_memory.agent.mem_agent import AgentResult, MemAgent
+from hy_memory.agent.reconciler import MemoryReconciler
 from one_memory.api import _sdk_library_bridge
 from one_memory.hy_memory_bridge import _joined_thread
 from one_memory.memory_processing import MemoryTaskRunner
@@ -22,7 +25,7 @@ from probe_original_archive import environment
 from probe_original_archive import phase as archive_phase
 
 
-async def phase(root, mode):
+async def phase(root, mode, *, memory_reconcile=False):
     os.environ.update(environment(root))
     if mode == "seed":
         await archive_phase(root, "seed")
@@ -61,12 +64,37 @@ async def phase(root, mode):
                     return AgentResult(
                         success=True,
                         extracted_info={
-                            "memory": [{"content": "Synthetic fact " + str(len(state["chat"]))}]
+                            "memory": [
+                                {
+                                    "content": "Synthetic fact"
+                                    if memory_reconcile
+                                    else "Synthetic fact " + str(len(state["chat"]))
+                                }
+                            ]
                         },
                     )
 
+                async def complete(**kwargs):
+                    return LLMResponse(
+                        content=json.dumps(
+                            [
+                                {
+                                    "op": "UPDATE",
+                                    "memory_id": state["chat"][0]["memory"],
+                                    "content": "Synthetic revised fact " + str(len(state["chat"])),
+                                }
+                            ]
+                        ),
+                        tokens_used=1,
+                        prompt_tokens=1,
+                        completion_tokens=0,
+                    )
+
                 previous, reconcile = MemAgent.process_add, native_writer._RECONCILE_ENABLED
-                MemAgent.process_add, native_writer._RECONCILE_ENABLED = extract, False
+                previous_llm = MemoryReconciler._get_llm
+                MemAgent.process_add, native_writer._RECONCILE_ENABLED = extract, memory_reconcile
+                if memory_reconcile:
+                    MemoryReconciler._get_llm = lambda self: SimpleNamespace(complete=complete)
                 try:
                     for index in range(3):
                         current = (
@@ -106,12 +134,16 @@ async def phase(root, mode):
                                 "receipt": receipt,
                                 "raw": result["memory_id"],
                                 "memory": result["memory_ids"][0],
+                                "request_id": request.request_id,
                             }
                         )
                     assert queue.clear_terminal_payloads() == 3
+                    if memory_reconcile:
+                        assert len({item["memory"] for item in state["chat"]}) == 1
                     state_path.write_text(json.dumps(state))
                 finally:
                     MemAgent.process_add, native_writer._RECONCILE_ENABLED = previous, reconcile
+                    MemoryReconciler._get_llm = previous_llm
                 return
 
             def forbidden(*args, **kwargs):
@@ -150,6 +182,16 @@ async def phase(root, mode):
                 assert "cmhe:" + item["receipt"] not in selected and item["raw"] not in selected
                 if mode == "read":
                     assert "cmhj:" + item["receipt"] in selected and item["memory"] in selected
+                    if memory_reconcile:
+                        assert "cmhm:" + item["receipt"] in selected
+            if mode == "read" and memory_reconcile:
+                from cloud_memory_hub.memory_evidence import stored_memory
+
+                with app.core.state.cmh_ingest._database() as db:
+                    capture = stored_memory(db, third["receipt"], None)["capture"]
+                record = capture["stages"][0]["inputs"][0]["record"]
+                assert record["origin_request_id"] == second["request_id"]
+                assert record["content"] == "Synthetic revised fact 1"
 
 
 def main():

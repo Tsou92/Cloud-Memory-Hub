@@ -1,8 +1,8 @@
 """Immutable ordinary-chat history, additive to older reconciliation archives."""
 
+from cloud_memory_hub.evidence_archive import EvidenceArchive
 from cloud_memory_hub.privacy import parse_json
-from cloud_memory_hub.reconcile_evidence import MAX_BYTES, MAX_ITEMS, digest, encode
-from cloud_memory_hub.remote_access import AccessError
+from cloud_memory_hub.reconcile_evidence import MAX_BYTES, MAX_ITEMS, encode
 
 _FIELDS = {"node_id", "user_id", "agent_id", "session_id", "source", "content", "request_id"}
 
@@ -59,54 +59,8 @@ def capture_chat(result, request):
     return validate(parse_json(encoded), request)
 
 
-def initialize_chat(db):
-    if db.execute("SELECT name FROM sqlite_master WHERE name='cmh_chat_schema'").fetchone() is None:
-        if db.execute(
-            "SELECT name FROM sqlite_master WHERE name='cmh_event_chat_inputs'"
-        ).fetchone():
-            raise AccessError("lineage_chat_store_unrecognized", 503)
-        db.execute("CREATE TABLE cmh_chat_schema(id INTEGER PRIMARY KEY,version INTEGER)")
-        db.execute("INSERT INTO cmh_chat_schema VALUES (1,1)")
-        db.execute(
-            "CREATE TABLE cmh_event_chat_inputs(receipt_id TEXT PRIMARY KEY "
-            "REFERENCES cmh_event_outcomes(receipt_id), "
-            "chat_json TEXT NOT NULL, chat_digest TEXT NOT NULL)"
-        )
-    check_chat(db)
-
-
-def check_chat(db):
-    if [tuple(row) for row in db.execute("SELECT id,version FROM cmh_chat_schema")] != [(1, 1)]:
-        raise AccessError("lineage_chat_store_version_unsupported", 503)
-    db.execute("SELECT receipt_id,chat_json,chat_digest FROM cmh_event_chat_inputs LIMIT 0")
-
-
-def stored_chat(db, receipt, request):
-    row = db.execute(
-        "SELECT CASE WHEN length(CAST(chat_json AS BLOB))<=? THEN chat_json END,"
-        "chat_digest FROM cmh_event_chat_inputs WHERE receipt_id=?",
-        (MAX_BYTES, receipt),
-    ).fetchone()
-    if row is None:
-        return None
-    if row[0] is None or digest(row[0]) != row[1]:
-        raise ValueError("lineage_chat_digest_invalid")
-    value = validate(parse_json(row[0]), request)
-    if encode(value) != row[0]:
-        raise ValueError("lineage_chat_encoding_invalid")
-    return value
-
-
-def commit_chat(db, receipt, value, request):
-    validate(value, request)
-    encoded = encode(value)
-    if len(encoded.encode()) > MAX_BYTES:
-        raise ValueError("lineage_chat_limit")
-    previous = stored_chat(db, receipt, request)
-    if previous is not None:
-        if previous != value:
-            raise ValueError("lineage_chat_changed")
-        return
-    db.execute(
-        "INSERT INTO cmh_event_chat_inputs VALUES (?,?,?)", (receipt, encoded, digest(encoded))
-    )
+_archive = EvidenceArchive("chat", "cmh_chat_schema", "cmh_event_chat_inputs", validate)
+initialize_chat = _archive.initialize
+check_chat = _archive.check
+stored_chat = _archive.stored
+commit_chat = _archive.commit

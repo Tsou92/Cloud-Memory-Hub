@@ -62,6 +62,8 @@ jobs:
         run: make check-memory-origins
       - name: Persisted native memory origin and replay
         run: make probe-memory-origins
+      - name: Verify ordinary memory input ancestry across processes
+        run: make probe-memory-graph
       - name: Verify reused web components and fresh SDK startup
         run: make check-web
       - name: Build Linux amd64 image, verify offline model and restart persistence
