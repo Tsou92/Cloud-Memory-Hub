@@ -259,6 +259,7 @@ def test_chat_archive_rolls_back_and_completed_recovery_never_rewrites(tmp_path,
             jobs, requests, results, _, _, _ = await produce(app, web, config, monkeypatch)
             lineage = app.core.state.cmh_lineage
             tables = (
+                "cmh_event_memory_inputs",
                 "cmh_event_chat_inputs",
                 "cmh_event_inputs",
                 "cmh_event_contexts",

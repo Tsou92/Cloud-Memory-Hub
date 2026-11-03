@@ -80,3 +80,5 @@
 补丁 0014 复用 record_origin 的摘要/校验、MemoryNode 和 VectorStoreBase 的共同 payload，以及原生 writer 已有的旧节点读取。上游 custom.request_id 在 UPDATE 后仍保留创建请求，不能充当版本生产者，因此增加独立可空标记和三个后端共有的未标记语义更新失效规则。没有新增存储、模型或检索算法；对应本地真实后端、写入/重开和上游回归见 [ADR-0026](../adr/0026-chat-memory-origins.md) 与[验证记录](../reviews/2026-11-02-memory-origins.md)。
 
 Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `ChatMessage.from_dict`、`WriteRequest.get_flat_content` 和 `strip_tool_messages`；只增加归档表及来源适配，没有重做原始对话解析或提炼。实测 Core 的 `_hy_agent_id` 包含来源／日期／工作区，保持该既有隔离语义，验证范围见 [接线记录](../reviews/2026-10-30-chat-lineage.md)。
+
+2026-11-03 普通记忆合并接线沿用补丁 0013/0014 的快照与版本摘要、原生 MemoryNode 格式和已有 Hub 原文/产出索引；抽取聊天归档的共有 SQL，复用回执缓存、历史关系与预算，未更改上游算法。上游缺少 Hub 项目/回执概念，故新增内部归档及图适配，见 [ADR-0027](../adr/0027-chat-reconcile-lineage.md) 和[验证记录](../reviews/2026-11-03-memory-lineage.md)。

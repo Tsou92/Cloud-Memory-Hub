@@ -395,6 +395,8 @@ def test_evidence_failure_rolls_back_all_receipt_extensions_and_recovery_is_idem
             jobs, requests, results, *_ = await produce(app, web, config, monkeypatch, "working")
             lineage = app.core.state.cmh_lineage
             with sqlite3.connect(config.config_dir / "remote-access.sqlite3") as db:
+                db.execute("DELETE FROM cmh_event_memory_inputs WHERE receipt_id=?", (jobs[-1],))
+                db.execute("DELETE FROM cmh_event_chat_inputs WHERE receipt_id=?", (jobs[-1],))
                 db.execute("DELETE FROM cmh_event_inputs WHERE receipt_id=?", (jobs[-1],))
                 db.execute("DELETE FROM cmh_event_contexts WHERE receipt_id=?", (jobs[-1],))
                 db.execute("DELETE FROM cmh_event_output_links WHERE receipt_id=?", (jobs[-1],))
@@ -407,6 +409,8 @@ def test_evidence_failure_rolls_back_all_receipt_extensions_and_recovery_is_idem
                 await lineage.observe(jobs[-1], None)
             with app.core.state.cmh_ingest._database() as db:
                 for table in (
+                    "cmh_event_memory_inputs",
+                    "cmh_event_chat_inputs",
                     "cmh_event_outcomes",
                     "cmh_event_output_links",
                     "cmh_event_contexts",
@@ -441,6 +445,7 @@ def test_evidence_failure_rolls_back_all_receipt_extensions_and_recovery_is_idem
                     links,
                     context,
                     capture_inputs(changed, requests[-1]),
+                    {"scene": "productivity", "capture": None},
                     {"scene": "productivity", "capture": None},
                 )
 

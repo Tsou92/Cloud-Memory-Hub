@@ -23,6 +23,13 @@ from cloud_memory_hub.input_context import (
     initialize_context,
     stored_context,
 )
+from cloud_memory_hub.memory_evidence import (
+    capture_memory,
+    check_memory,
+    commit_memory,
+    initialize_memory,
+)
+from cloud_memory_hub.memory_graph import MemoryGraph
 from cloud_memory_hub.original_archive import validate_original
 from cloud_memory_hub.productivity_inventory import trace_id
 from cloud_memory_hub.reconcile_evidence import (
@@ -79,6 +86,7 @@ class OutputLineage:
             initialize_context(db)
             initialize_inputs(db)
             initialize_chat(db)
+            initialize_memory(db)
             self._check(db)
 
     @staticmethod
@@ -91,6 +99,7 @@ class OutputLineage:
         check_context(db)
         check_inputs(db)
         check_chat(db)
+        check_memory(db)
 
     def _request(self, job_id, frozen):
         self.governance.require_ready()
@@ -123,7 +132,7 @@ class OutputLineage:
             raise ValueError("lineage_links_invalid")
         return links
 
-    def _commit(self, job_id, event, links, context, inputs, chat):
+    def _commit(self, job_id, event, links, context, inputs, chat, memory):
         self.governance.require_ready()
         with self.ingest._database(writing=True) as db:
             self._check(db)
@@ -149,6 +158,7 @@ class OutputLineage:
             request = MemoryTaskRunner.request_for(rebuilt.idempotency_key, rebuilt.input_records)
             commit_inputs(db, job_id, inputs, request)
             commit_chat(db, job_id, chat, request)
+            commit_memory(db, job_id, memory, request)
 
     async def observe(self, job_id, frozen):
         # Core can also hold non-Hub jobs. Only our own instance's events have archives.
@@ -169,7 +179,8 @@ class OutputLineage:
             )
             inputs = capture_inputs(result, request)
             chat = capture_chat(result, request)
-            await _joined_thread(self._commit, job_id, event, links, context, inputs, chat)
+            memory = capture_memory(result, request)
+            await _joined_thread(self._commit, job_id, event, links, context, inputs, chat, memory)
 
     def _pending(self):
         self.governance.require_ready()
@@ -182,7 +193,9 @@ class OutputLineage:
                 "(SELECT 1 FROM cmh_event_inputs inputs "
                 "WHERE inputs.receipt_id=receipt.receipt_id) OR NOT EXISTS "
                 "(SELECT 1 FROM cmh_event_chat_inputs chat "
-                "WHERE chat.receipt_id=receipt.receipt_id)) "
+                "WHERE chat.receipt_id=receipt.receipt_id) OR NOT EXISTS "
+                "(SELECT 1 FROM cmh_event_memory_inputs memory "
+                "WHERE memory.receipt_id=receipt.receipt_id)) "
                 "ORDER BY rowid LIMIT 32",
                 (self._cursor,),
             ).fetchall()
@@ -247,7 +260,9 @@ class OutputLineage:
                 db, self.ingest.access.instance_id, scope, self._stored_links, _digest
             )
             originals.update(graph.original_parents(outputs))
-            originals.update(ChatGraph(graph).original_parents(outputs))
+            chat = ChatGraph(graph)
+            originals.update(chat.original_parents(outputs))
+            originals.update(MemoryGraph(graph, chat).original_parents(outputs))
         return tuple(sorted(originals)[:33])
 
     async def enrich(self, record):
@@ -274,10 +289,12 @@ class OutputLineage:
                 "SELECT count(*),COALESCE(sum(length(CAST(payload_json AS BLOB)) + "
                 "COALESCE(length(CAST(context_json AS BLOB)),0) + "
                 "COALESCE(length(CAST(inputs_json AS BLOB)),0) + "
-                "COALESCE(length(CAST(chat_json AS BLOB)),0)),0) "
+                "COALESCE(length(CAST(chat_json AS BLOB)),0) + "
+                "COALESCE(length(CAST(memory_json AS BLOB)),0)),0) "
                 "FROM cmh_event_receipts LEFT JOIN cmh_event_contexts USING(receipt_id) "
                 "LEFT JOIN cmh_event_inputs USING(receipt_id) "
                 "LEFT JOIN cmh_event_chat_inputs USING(receipt_id) "
+                "LEFT JOIN cmh_event_memory_inputs USING(receipt_id) "
                 "WHERE scope_id=?",
                 (namespace[len(prefix) :],),
             ).fetchone()
@@ -349,5 +366,7 @@ class OutputLineage:
             )
             receipts = [row["receipt_id"] for row in rows if row["links_digest"] is not None]
             records = graph.merge(records, receipts)
-            records = ChatGraph(graph).merge(records, receipts)
+            chat = ChatGraph(graph)
+            records = MemoryGraph(graph, chat).merge(records, receipts)
+            records = chat.merge(records, receipts)
         return records
