@@ -82,3 +82,5 @@
 Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `ChatMessage.from_dict`、`WriteRequest.get_flat_content` 和 `strip_tool_messages`；只增加归档表及来源适配，没有重做原始对话解析或提炼。实测 Core 的 `_hy_agent_id` 包含来源／日期／工作区，保持该既有隔离语义，验证范围见 [接线记录](../reviews/2026-10-30-chat-lineage.md)。
 
 2026-11-03 普通记忆合并接线沿用补丁 0013/0014 的快照与版本摘要、原生 MemoryNode 格式和已有 Hub 原文/产出索引；抽取聊天归档的共有 SQL，复用回执缓存、历史关系与预算，未更改上游算法。上游缺少 Hub 项目/回执概念，故新增内部归档及图适配，见 [ADR-0027](../adr/0027-chat-reconcile-lineage.md) 和[验证记录](../reviews/2026-11-03-memory-lineage.md)。
+
+补丁 0015 复用 agent/tools/basic_profile.py 的单次用户级查询、清洗、排序、差异、迁移及互斥；复用已有有界快照、来源字段及 SDK 持久结果。原画像旁路只在过程日志中给出新节点，缺少完整结果和部分失败证据，因此增加可选捕获与独立 profile 摘要域。不复制画像算法、不增加查询或模型调用，保留原返回合同和用户级范围。上游画像 meta、画像 API、payload-only、模型及持久回执回归见 [ADR-0028](../adr/0028-basic-profile-evidence.md) 与[验证记录](../reviews/2026-11-03-profile-evidence.md)。

@@ -81,6 +81,10 @@ probe-memory-origins: prepare-upstream
 probe-memory-graph: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_memory_graph.py
 
+.PHONY: probe-profile-evidence
+probe-profile-evidence: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_profile_evidence.py
+
 check-upstream: prepare-upstream
 	uv run --locked python .local/upstream/hy-memory/memhub/scripts/fetch_embedding_model.py
 	cd .local/upstream/hy-memory/memhub && uv tool run --from uv==0.12.5 uv run --no-project -- bash scripts/run-tests-isolated.sh core-pr -q
