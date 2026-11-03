@@ -447,6 +447,7 @@ def test_evidence_failure_rolls_back_all_receipt_extensions_and_recovery_is_idem
                     capture_inputs(changed, requests[-1]),
                     {"scene": "productivity", "capture": None},
                     {"scene": "productivity", "capture": None},
+                    {"scene": "productivity", "capture": None},
                 )
 
     asyncio.run(scenario())

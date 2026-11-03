@@ -84,3 +84,5 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 2026-11-03 普通记忆合并接线沿用补丁 0013/0014 的快照与版本摘要、原生 MemoryNode 格式和已有 Hub 原文/产出索引；抽取聊天归档的共有 SQL，复用回执缓存、历史关系与预算，未更改上游算法。上游缺少 Hub 项目/回执概念，故新增内部归档及图适配，见 [ADR-0027](../adr/0027-chat-reconcile-lineage.md) 和[验证记录](../reviews/2026-11-03-memory-lineage.md)。
 
 补丁 0015 复用 agent/tools/basic_profile.py 的单次用户级查询、清洗、排序、差异、迁移及互斥；复用已有有界快照、来源字段及 SDK 持久结果。原画像旁路只在过程日志中给出新节点，缺少完整结果和部分失败证据，因此增加可选捕获与独立 profile 摘要域。不复制画像算法、不增加查询或模型调用，保留原返回合同和用户级范围。上游画像 meta、画像 API、payload-only、模型及持久回执回归见 [ADR-0028](../adr/0028-basic-profile-evidence.md) 与[验证记录](../reviews/2026-11-03-profile-evidence.md)。
+
+画像 Hub 接线继续使用补丁 0015、原生 MemoryNode/from_dict、profile 来源摘要、画像清洗/链头/完整 KV 纯函数和向量库读取；抽取已有普通记忆证据校验与图遍历作为共享模块。只新增 Hub 作用域相关归档/索引及关系，不改变上游算法或旧产出摘要。对应 [ADR-0029](../adr/0029-basic-profile-lineage.md) 和[记录](../reviews/2026-11-03-profile-lineage.md)。

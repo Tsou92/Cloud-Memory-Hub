@@ -18,6 +18,7 @@ from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.privacy import PrivacyError, parse_json
 from cloud_memory_hub.productivity_inventory import observe_productivity
+from cloud_memory_hub.sdk_reconcile import RESERVED_PREFIXES
 
 MAX_RECORDS = 10_000
 MAX_EDGES = 100_000
@@ -50,9 +51,7 @@ def _node(payload, namespace):
     if payload.get("user_id") != namespace:
         raise GovernanceError("governance_scope_mismatch")
     identity = _identity(payload.get("node_id"))
-    if identity.startswith(
-        ("cmhp:", "cmhe:", "cmht:", "cmhv:", "cmhc:", "cmhi:", "cmhj:", "cmhm:")
-    ):
+    if identity.startswith(RESERVED_PREFIXES):
         raise GovernanceError("governance_record_identity_mismatch")
     content = payload.get("content")
     if not isinstance(content, str) or len(content.encode()) > MAX_CONTENT_BYTES:
@@ -110,7 +109,7 @@ async def _check_ownership(vector, graph, records, vector_ids, namespace):
             raise GovernanceError("governance_backend_conflict")
 
 
-async def _observe(sdk, namespace):
+async def _observe(sdk, namespace, profile_origins=None):
     vector = sdk._vector_store
     if not isinstance(vector, ChromaVectorStore):
         raise GovernanceError("governance_backend_unsupported")
@@ -134,6 +133,21 @@ async def _observe(sdk, namespace):
     def add(payload, expected_id=None):
         nonlocal used
         node = _node(payload, namespace)
+        if node.layer == "l0_basic_info" and profile_origins is not None:
+            from hy_memory.coding.record_origin import verified_origin
+
+            producer = verified_origin("profile", payload)
+            if (
+                payload.get("agent_id") not in (None, "")
+                or payload.get("session_id") not in (None, "")
+                or payload.get("source") != "default"
+                or (
+                    node.record_id in profile_origins
+                    and profile_origins[node.record_id] != producer
+                )
+            ):
+                raise GovernanceError("governance_profile_output_unproven")
+            profile_origins[node.record_id] = producer
         if expected_id is not None and expected_id != vector._node_id_to_point_id(node.record_id):
             raise GovernanceError("governance_record_identity_mismatch")
         used += len(node.content.encode())
@@ -252,9 +266,12 @@ async def observe_inventory(bridge, namespace, lineage=None):
             raise GovernanceError("governance_sdk_version_unsupported")
         async with bridge.exclusive_access():
             sdk = await bridge._get_client()
-            nodes = await _joined_thread(lambda: sdk._loop_thread.run(_observe(sdk, namespace)))
+            profile_origins = {} if lineage is not None else None
+            nodes = await _joined_thread(
+                lambda: sdk._loop_thread.run(_observe(sdk, namespace, profile_origins))
+            )
             if lineage is not None:
-                nodes = await _joined_thread(lineage.inventory, namespace, nodes)
+                nodes = await _joined_thread(lineage.inventory, namespace, nodes, profile_origins)
             require_chain_origins(nodes)
             check_budget(nodes)
             return nodes
