@@ -57,7 +57,7 @@
 | 普通聊天合并输入 | [实际候选快照与兼容设计](docs/adr/0025-chat-reconcile-evidence.md) · [NAS 验证](docs/reviews/2026-10-31-chat-reconcile.md) |
 | 普通记忆生产版本 | [设计](docs/adr/0026-chat-memory-origins.md) · [验证记录](docs/reviews/2026-11-02-memory-origins.md) |
 | 普通记忆合并来源 | [关系与兼容设计](docs/adr/0027-chat-reconcile-lineage.md) · [安装与 NAS 验证](docs/reviews/2026-11-03-memory-lineage.md)；完整输入覆盖与删除执行仍待完成 |
-| 基础画像输入与写入证据 | [旁路设计与兼容性](docs/adr/0028-basic-profile-evidence.md) · [验证记录](docs/reviews/2026-11-03-profile-evidence.md)；Hub 来源关系仍待接通 |
+| 基础画像输入与写入证据 | [原生旁路设计](docs/adr/0028-basic-profile-evidence.md) · [SDK 验证](docs/reviews/2026-11-03-profile-evidence.md) · [Hub 来源接线](docs/adr/0029-basic-profile-lineage.md) · [接线验证](docs/reviews/2026-11-03-profile-lineage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
 ## 本地质量检查

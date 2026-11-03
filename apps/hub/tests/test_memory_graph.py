@@ -111,11 +111,13 @@ def test_actual_sdk_update_versions_survive_reaping_restart_and_scoped_reads(tmp
                 "cmhe:" + jobs[1],
                 "cmhe:" + jobs[0],
                 "cmhj:" + jobs[0],
+                "cmhj:" + jobs[1],
             }
             assert nodes[third].parents == {
                 "cmhe:" + jobs[2],
                 "cmhe:" + jobs[1],
                 "cmhj:" + jobs[1],
+                "cmhj:" + jobs[2],
                 second,
             }
             assert target not in nodes[second].parents
@@ -124,6 +126,10 @@ def test_actual_sdk_update_versions_survive_reaping_restart_and_scoped_reads(tmp
             selected = plan_relations(nodes, (second,))["record_ids"]
             assert {third, target} <= set(selected)
             assert "cmhe:" + jobs[2] not in selected
+            # The prompt snapshot itself contains text extracted using this history.
+            # Selecting that history must include its captured downstream prompt too.
+            selected_history = plan_relations(nodes, ("cmhj:" + jobs[1],))["record_ids"]
+            assert second in selected_history
             reply = await read_memory(web, headers, event, target)
             assert reply.status_code == 200, reply.text
             assert {"cmhe:" + job for job in jobs} <= set(

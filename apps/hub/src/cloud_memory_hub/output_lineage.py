@@ -6,6 +6,7 @@ import logging
 from dataclasses import replace
 from importlib.metadata import version
 
+from hy_memory.coding.record_origin import verified_origin
 from one_memory.hy_memory_bridge import _joined_thread
 from one_memory.memory_processing import MemoryTaskRunner
 from one_memory.memory_server.durable_queue import COMPLETED
@@ -32,6 +33,18 @@ from cloud_memory_hub.memory_evidence import (
 from cloud_memory_hub.memory_graph import MemoryGraph
 from cloud_memory_hub.original_archive import validate_original
 from cloud_memory_hub.productivity_inventory import trace_id
+from cloud_memory_hub.profile_evidence import (
+    LAYER as PROFILE_LAYER,
+)
+from cloud_memory_hub.profile_evidence import (
+    capture_profile,
+    check_profile,
+    commit_profile,
+    initialize_profile,
+    prove_profile_outputs,
+    read_profile,
+)
+from cloud_memory_hub.profile_graph import ProfileGraph
 from cloud_memory_hub.reconcile_evidence import (
     capture_inputs,
     check_inputs,
@@ -87,6 +100,7 @@ class OutputLineage:
             initialize_inputs(db)
             initialize_chat(db)
             initialize_memory(db)
+            initialize_profile(db)
             self._check(db)
 
     @staticmethod
@@ -100,6 +114,7 @@ class OutputLineage:
         check_inputs(db)
         check_chat(db)
         check_memory(db)
+        check_profile(db)
 
     def _request(self, job_id, frozen):
         self.governance.require_ready()
@@ -132,7 +147,7 @@ class OutputLineage:
             raise ValueError("lineage_links_invalid")
         return links
 
-    def _commit(self, job_id, event, links, context, inputs, chat, memory):
+    def _commit(self, job_id, event, links, context, inputs, chat, memory, profile):
         self.governance.require_ready()
         with self.ingest._database(writing=True) as db:
             self._check(db)
@@ -159,6 +174,7 @@ class OutputLineage:
             commit_inputs(db, job_id, inputs, request)
             commit_chat(db, job_id, chat, request)
             commit_memory(db, job_id, memory, request)
+            commit_profile(db, job_id, profile, request)
 
     async def observe(self, job_id, frozen):
         # Core can also hold non-Hub jobs. Only our own instance's events have archives.
@@ -180,7 +196,11 @@ class OutputLineage:
             inputs = capture_inputs(result, request)
             chat = capture_chat(result, request)
             memory = capture_memory(result, request)
-            await _joined_thread(self._commit, job_id, event, links, context, inputs, chat, memory)
+            profile = capture_profile(result, request)
+            await prove_profile_outputs(bridge, profile, request)
+            await _joined_thread(
+                self._commit, job_id, event, links, context, inputs, chat, memory, profile
+            )
 
     def _pending(self):
         self.governance.require_ready()
@@ -195,7 +215,9 @@ class OutputLineage:
                 "(SELECT 1 FROM cmh_event_chat_inputs chat "
                 "WHERE chat.receipt_id=receipt.receipt_id) OR NOT EXISTS "
                 "(SELECT 1 FROM cmh_event_memory_inputs memory "
-                "WHERE memory.receipt_id=receipt.receipt_id)) "
+                "WHERE memory.receipt_id=receipt.receipt_id) OR NOT EXISTS "
+                "(SELECT 1 FROM cmh_event_profile_inputs profile "
+                "WHERE profile.receipt_id=receipt.receipt_id)) "
                 "ORDER BY rowid LIMIT 32",
                 (self._cursor,),
             ).fetchall()
@@ -224,7 +246,7 @@ class OutputLineage:
         finally:
             self._running = False
 
-    def _references(self, record):
+    def _references(self, record, profile=None):
         instance_prefix = f"cmh:{self.ingest.access.instance_id}:"
         if not record.user_id.startswith(instance_prefix):
             return ()
@@ -236,15 +258,29 @@ class OutputLineage:
             self._check(db)
             for kind, identity in targets:
                 rows = db.execute(
-                    "SELECT receipt.*,outcome.links_digest FROM cmh_event_output_links link "
+                    "SELECT receipt.*,outcome.links_digest FROM "
+                    "(SELECT receipt_id FROM cmh_event_output_links WHERE kind=? AND output_id=? "
+                    "UNION SELECT receipt_id FROM cmh_event_profile_outputs "
+                    "WHERE ?='memory' AND output_id=?) link "
                     "JOIN cmh_event_receipts receipt USING(receipt_id) "
                     "JOIN cmh_event_outcomes outcome USING(receipt_id) "
-                    "WHERE link.kind=? AND link.output_id=? AND receipt.scope_id=? "
+                    "WHERE receipt.scope_id=? "
                     "ORDER BY receipt.rowid LIMIT 33",
-                    (kind, identity, scope),
+                    (kind, identity, kind, identity, scope),
                 ).fetchall()
                 for row in rows:
                     event = validate_original(row, self.ingest.access.instance_id)
+                    if (
+                        profile is not None
+                        and identity == record.memory_id
+                        and (
+                            profile["agent_id"] not in (None, "")
+                            or profile["session_id"] not in (None, "")
+                            or profile["source"] != "default"
+                            or verified_origin("profile", profile) != row["request_id"]
+                        )
+                    ):
+                        raise ValueError("lineage_profile_output_changed")
                     if _digest(self._stored_links(db, row["receipt_id"])) != row["links_digest"]:
                         raise ValueError("lineage_links_invalid")
                     originals.add(PREFIX + row["receipt_id"])
@@ -263,16 +299,30 @@ class OutputLineage:
             chat = ChatGraph(graph)
             originals.update(chat.original_parents(outputs))
             originals.update(MemoryGraph(graph, chat).original_parents(outputs))
+            originals.update(ProfileGraph(graph, chat).original_parents(outputs))
         return tuple(sorted(originals)[:33])
 
     async def enrich(self, record):
         if record is None:
             return None
-        originals = await _joined_thread(self._references, record)
+        profile = None
+        if record.layer == PROFILE_LAYER:
+            bridge = self.bridge()
+            async with bridge.exclusive_access():
+                profile = await read_profile(bridge, record.memory_id)
+                if (profile["user_id"], profile["content"], profile["layer"]) != (
+                    record.user_id,
+                    record.content,
+                    record.layer,
+                ):
+                    raise ValueError("lineage_profile_output_changed")
+                originals = await _joined_thread(self._references, record, profile)
+        else:
+            originals = await _joined_thread(self._references, record)
         references = tuple(dict.fromkeys((*originals, *record.source_raw_ids)))
         return record.model_copy(update={"source_raw_ids": references})
 
-    def inventory(self, namespace, nodes):
+    def inventory(self, namespace, nodes, profile_origins=None):
         """Merge complete scoped relation sets, not the display reference limit."""
         from cloud_memory_hub.governance_inventory import MAX_CONTENT_BYTES, MAX_EDGES, MAX_RECORDS
 
@@ -290,11 +340,13 @@ class OutputLineage:
                 "COALESCE(length(CAST(context_json AS BLOB)),0) + "
                 "COALESCE(length(CAST(inputs_json AS BLOB)),0) + "
                 "COALESCE(length(CAST(chat_json AS BLOB)),0) + "
-                "COALESCE(length(CAST(memory_json AS BLOB)),0)),0) "
+                "COALESCE(length(CAST(memory_json AS BLOB)),0) + "
+                "COALESCE(length(CAST(profile_json AS BLOB)),0)),0) "
                 "FROM cmh_event_receipts LEFT JOIN cmh_event_contexts USING(receipt_id) "
                 "LEFT JOIN cmh_event_inputs USING(receipt_id) "
                 "LEFT JOIN cmh_event_chat_inputs USING(receipt_id) "
                 "LEFT JOIN cmh_event_memory_inputs USING(receipt_id) "
+                "LEFT JOIN cmh_event_profile_inputs USING(receipt_id) "
                 "WHERE scope_id=?",
                 (namespace[len(prefix) :],),
             ).fetchone()
@@ -368,5 +420,6 @@ class OutputLineage:
             records = graph.merge(records, receipts)
             chat = ChatGraph(graph)
             records = MemoryGraph(graph, chat).merge(records, receipts)
+            records = ProfileGraph(graph, chat, profile_origins).merge(records, receipts)
             records = chat.merge(records, receipts)
         return records

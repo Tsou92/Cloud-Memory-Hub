@@ -14,6 +14,17 @@ from cloud_memory_hub.sdk_productivity import productivity_references
 
 BATCH_SIZE = 32
 MAX_REFERENCES = 512
+RESERVED_PREFIXES = (
+    "cmhp:",
+    "cmhe:",
+    "cmht:",
+    "cmhv:",
+    "cmhc:",
+    "cmhi:",
+    "cmhj:",
+    "cmhm:",
+    "cmhb:",
+)
 _ID = re.compile(r"[A-Za-z0-9_:-]{1,200}\Z")
 _LOG = logging.getLogger(__name__)
 
@@ -96,10 +107,7 @@ async def proven_write(bridge, job_id, request, operation):
     single = result.get("memory_id")
     memories = _ids(result.get("memory_ids", []))
     if any(
-        isinstance(identity, str)
-        and identity.startswith(
-            ("cmhp:", "cmhe:", "cmht:", "cmhv:", "cmhc:", "cmhi:", "cmhj:", "cmhm:")
-        )
+        isinstance(identity, str) and identity.startswith(RESERVED_PREFIXES)
         for identity in (single, *memories)
     ):
         raise ValueError("sdk_outcome_reserved_identity")

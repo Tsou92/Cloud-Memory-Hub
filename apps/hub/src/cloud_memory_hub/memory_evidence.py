@@ -1,47 +1,13 @@
 """Validate native ordinary-memory candidates without inventing absent producers."""
 
-from dataclasses import fields
-
-from hy_memory.coding.record_origin import verified_origin
-from hy_memory.models.memory import MemoryNode
-
 from cloud_memory_hub.evidence_archive import EvidenceArchive
+from cloud_memory_hub.native_evidence import validate_native_record
 from cloud_memory_hub.privacy import parse_json
 from cloud_memory_hub.reconcile_evidence import MAX_BYTES, MAX_ITEMS, encode
-from cloud_memory_hub.sdk_reconcile import _ids
-
-_FIELDS = {item.name for item in fields(MemoryNode)} - {"embedding"}
-_ORIGIN = {"origin_request_id", "origin_digest"}
 
 
 def _record(item, request):
-    if not isinstance(item, dict) or set(item) != {"kind", "id", "record"}:
-        raise ValueError("lineage_memory_record_invalid")
-    record = item["record"]
-    if (
-        item["kind"] != "memory"
-        or not isinstance(record, dict)
-        or set(record) not in (_FIELDS, _FIELDS - _ORIGIN)
-        or item["id"] != record.get("node_id")
-    ):
-        raise ValueError("lineage_memory_record_invalid")
-    _ids([item["id"]])
-    # Reuse the native schema; reject lossy coercions rather than normalize evidence.
-    try:
-        normalized = MemoryNode.from_dict(record).to_dict()
-    except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
-        raise ValueError("lineage_memory_record_invalid") from exc
-    normalized.pop("embedding")
-    for name in _ORIGIN - record.keys():
-        normalized.pop(name)
-    if normalized != record:
-        raise ValueError("lineage_memory_record_invalid")
-    verified_origin("memory", record)
-    if request is not None:
-        if record["user_id"] != request.user_id:
-            raise ValueError("lineage_memory_scope_mismatch")
-        if record.get("origin_request_id") == request.request_id:
-            raise ValueError("lineage_memory_self_reference")
+    validate_native_record(item, "memory", request)
 
 
 def validate(value, request=None):
