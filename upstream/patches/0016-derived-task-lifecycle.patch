@@ -1,0 +1,113 @@
+--- a/hy_memory/pipelines/writer.py
++++ b/hy_memory/pipelines/writer.py
+@@ -990,7 +990,7 @@
+             logger.debug(f"[episode] EPISODE trace failed: {e}")
+
+     def _schedule_episode_summary(self, request: WriteRequest, episode_id: str) -> None:
+-        """episode 关闭时后台总结它一次（fire-and-forget，不阻塞写入）。"""
++        """Start a closed-episode summary; the owning write joins it before return."""
+         rcfg = getattr(self.config, "recall", None)
+         if not episode_id or rcfg is None:
+             return
+@@ -1025,7 +1025,12 @@
+                 except Exception as e:
+                     logger.warning(f"[episode-summary] failed (non-fatal): {e}")
+
+-            asyncio.create_task(_run())
++            task = asyncio.create_task(_run())
++            tasks = getattr(request, "_episode_summary_tasks", None)
++            if tasks is None:
++                tasks = []
++                setattr(request, "_episode_summary_tasks", tasks)
++            tasks.append(task)
+         except Exception as e:
+             logger.debug(f"[episode-summary] schedule failed: {e}")
+
+@@ -1157,21 +1162,56 @@
+
+     @staticmethod
+     async def _await_graph_projection(request: Optional[WriteRequest]) -> None:
+-        """Join a request's graph work exactly once before returning."""
++        """Keep the early graph join used by session/series finalization."""
++        await MemoryWriter._await_request_tasks(request, ("_graph_projection_task",))
++
++    @staticmethod
++    async def _await_derived_tasks(request: WriteRequest) -> None:
++        await MemoryWriter._await_request_tasks(
++            request, ("_graph_projection_task", "_episode_summary_tasks"),
++        )
++
++    @staticmethod
++    async def _await_request_tasks(request, attributes) -> None:
++        """Drain this write before SDK outcome completion or admission release.
++
++        main write + derived tasks -> shielded join -> outcome / cancellation
++        Caller cancellation is re-raised only after all owned tasks are terminal.
++        """
+         if request is None:
+             return
+-        task = getattr(request, "_graph_projection_task", None)
+-        if task is None:
++        handles = {
++            name: getattr(request, name, None) for name in attributes
++        }
++        tasks = []
++        for handle in handles.values():
++            if handle is not None:
++                tasks.extend(handle if isinstance(handle, list) else [handle])
++        if not tasks:
+             return
++        pending = asyncio.gather(*tasks, return_exceptions=True)
++        interrupted = None
+         try:
+-            await task
+-        except Exception as exc:
+-            logger.warning("[graph] projection join failed (non-fatal): %s", exc)
++            while not pending.done():
++                try:
++                    await asyncio.shield(pending)
++                except asyncio.CancelledError as exc:
++                    interrupted = exc
++            results = pending.result()
+         finally:
+-            try:
+-                delattr(request, "_graph_projection_task")
+-            except AttributeError:
+-                pass
++            if pending.done():
++                for name, handle in handles.items():
++                    if handle is not None and getattr(request, name, None) is handle:
++                        delattr(request, name)
++        if interrupted is not None:
++            raise interrupted
++        for result in results:
++            if isinstance(result, asyncio.CancelledError):
++                raise result
++            if isinstance(result, Exception):
++                logger.warning("[derived] task join failed (non-fatal)")
++            elif isinstance(result, BaseException):
++                raise result
+
+     def _attach_graph_executor_diagnostics(self, response: WriteResponse) -> None:
+         snapshot = getattr(self._graph_store, "executor_snapshot", None)
+@@ -2567,9 +2607,10 @@
+             response.error_message = str(e)
+             return response
+         finally:
+-            await self._await_graph_projection(request)
++            await self._await_derived_tasks(request)
+             response.extra["workload"] = workload_snapshot()
+             self._attach_graph_executor_diagnostics(response)
++            response.elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000
+             try:
+                 await self._emit_write_timeline(request, tracer)
+             except Exception:
+@@ -2960,7 +3001,7 @@
+             except Exception:
+                 pass
+         finally:
+-            await self._await_graph_projection(request)
++            await self._await_derived_tasks(request)
+             response.extra["workload"] = workload_snapshot()
+             self._attach_graph_executor_diagnostics(response)
+             response.elapsed_ms = (datetime.now() - start_time).total_seconds() * 1000

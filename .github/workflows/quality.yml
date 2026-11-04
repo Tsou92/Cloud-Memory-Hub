@@ -68,6 +68,8 @@ jobs:
         run: make probe-profile-evidence
       - name: Verify scoped profile ancestry and no-write backfill
         run: make probe-profile-graph
+      - name: Verify derived writes complete before SDK outcomes and maintenance
+        run: make probe-derived-lifecycle
       - name: Verify reused web components and fresh SDK startup
         run: make check-web
       - name: Build Linux amd64 image, verify offline model and restart persistence
