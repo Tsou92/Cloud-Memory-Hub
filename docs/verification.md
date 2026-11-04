@@ -81,6 +81,8 @@
 
 后续 Hub 接线新增 test_profile_archive.py、test_profile_graph.py 和 make probe-profile-graph，验证同作用域跨 Agent 的独立产出索引、原始来源、当前画像来源校验、事务中断/无重写补档与隔离；普通合并快照同时补齐本次聊天历史父边，避免遗漏快照中的派生内容。见 [ADR-0029](adr/0029-basic-profile-lineage.md) 和[记录](reviews/2026-11-03-profile-lineage.md)。不据此宣称完整输入时序、安全删除或恢复已完成。
 
+2026-11-04 派生任务生命周期增加 test_derived_task_lifecycle.py 和 make probe-derived-lifecycle，关联 FR-02、FR-04、FR-10、FR-11、ENG-01。覆盖会话摘要与图投影的正常／失败／提前返回、重复取消、请求隔离、实际 SDK 回执和维护屏障、跨进程重开与禁止重新提炼的重放。生命周期收尾不等于摘要输入来源或删除范围已完整，见 [ADR-0030](adr/0030-derived-task-lifecycle.md) 与[记录](reviews/2026-11-04-derived-lifecycle.md)。
+
 `make check` 运行仓库工具的格式和静态检查、门禁行为测试、文档相对链接检查、禁止入库路径检查、detect-secrets 扫描以及 Git 空白检查。凭证扫描禁止联网验证候选凭证，检测输出只显示文件位置和类型。
 
 该扫描只覆盖当前 Git 跟踪文件及未忽略的新文件，不是历史提交扫描或运行时凭证过滤。公开发布前另做完整 Git 历史与制品扫描。远程 CI 尚未运行，不能由本机通过推定。

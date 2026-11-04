@@ -79,6 +79,11 @@
       "path": "patches/0015-basic-profile-evidence.patch",
       "scope": "native_basic_profile_input_and_side_effect_evidence_with_producer_origin",
       "digest": "sha256:c23c0ebaf4187b9982a8f4d799d4b8ecf5b4c78423210d02933d0b32e82658f3"
+    },
+    {
+      "path": "patches/0016-derived-task-lifecycle.patch",
+      "scope": "join_request_owned_episode_and_graph_tasks_before_write_outcome",
+      "digest": "sha256:3564ba4bcbfeaa5adb0b1be78bd3baacf6faa9603d66bd3b49dbd1a08da5836e"
     }
   ]
 }

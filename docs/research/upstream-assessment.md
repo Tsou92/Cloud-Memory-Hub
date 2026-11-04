@@ -86,3 +86,5 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 补丁 0015 复用 agent/tools/basic_profile.py 的单次用户级查询、清洗、排序、差异、迁移及互斥；复用已有有界快照、来源字段及 SDK 持久结果。原画像旁路只在过程日志中给出新节点，缺少完整结果和部分失败证据，因此增加可选捕获与独立 profile 摘要域。不复制画像算法、不增加查询或模型调用，保留原返回合同和用户级范围。上游画像 meta、画像 API、payload-only、模型及持久回执回归见 [ADR-0028](../adr/0028-basic-profile-evidence.md) 与[验证记录](../reviews/2026-11-03-profile-evidence.md)。
 
 画像 Hub 接线继续使用补丁 0015、原生 MemoryNode/from_dict、profile 来源摘要、画像清洗/链头/完整 KV 纯函数和向量库读取；抽取已有普通记忆证据校验与图遍历作为共享模块。只新增 Hub 作用域相关归档/索引及关系，不改变上游算法或旧产出摘要。对应 [ADR-0029](../adr/0029-basic-profile-lineage.md) 和[记录](../reviews/2026-11-03-profile-lineage.md)。
+
+补丁 0016 复用 writer 的会话滚动摘要、图投影请求句柄和 SDK 终态回执流程。原会话摘要未保存任务句柄，可能在写入回执完成后继续写入；新增请求级句柄与共同收尾，保留并发并在取消后等待实际完成。不引入新任务队列、存储或摘要算法。上游 episode、写入结果、executor、图投影和并发门控回归，以及 Hub 准入和真实 SDK 重开探针见 [ADR-0030](../adr/0030-derived-task-lifecycle.md) 与[验证记录](../reviews/2026-11-04-derived-lifecycle.md)。
