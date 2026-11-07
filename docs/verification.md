@@ -77,6 +77,8 @@
 
 ## 当前工程检查
 
+2026-11-07 治理执行增加 test_governance_execution.py 和 make probe-governance-execution，关联 FR-09、FR-10、FR-11、FR-12。覆盖忘记的范围、抑制、幂等、崩溃续做和篡改拒绝，彻底删除的逐字节核验、无关数据保留、中断续做与恢复旧数据后重新清理；已知 HNSW 预分配缺口单独固定。见 [ADR-0032](adr/0032-governance-execution.md) 与[验证记录](reviews/2026-11-07-governance-execution.md)。
+
 2026-11-03 基础画像增加 test_profile_evidence.py 和 make probe-profile-evidence，关联 FR-08、FR-09、FR-10、FR-11、FR-12。覆盖原生差异/迁移、实际旧输入冻结、部分副作用、取消/故障/预算、结构化 KV 摘要、Chroma 空身份格式，以及只有画像产出的 SDK 跨进程持久结果与禁止写入重放。见 [ADR-0028](adr/0028-basic-profile-evidence.md) 和[验证记录](reviews/2026-11-03-profile-evidence.md)；尚不等于 Hub 画像来源图或删除闭环。
 
 后续 Hub 接线新增 test_profile_archive.py、test_profile_graph.py 和 make probe-profile-graph，验证同作用域跨 Agent 的独立产出索引、原始来源、当前画像来源校验、事务中断/无重写补档与隔离；普通合并快照同时补齐本次聊天历史父边，避免遗漏快照中的派生内容。见 [ADR-0029](adr/0029-basic-profile-lineage.md) 和[记录](reviews/2026-11-03-profile-lineage.md)。不据此宣称完整输入时序、安全删除或恢复已完成。
