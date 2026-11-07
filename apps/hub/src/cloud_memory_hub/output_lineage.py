@@ -101,6 +101,9 @@ class OutputLineage:
             initialize_chat(db)
             initialize_memory(db)
             initialize_profile(db)
+            from cloud_memory_hub.governance_purge import Purger
+
+            Purger.initialize(db)
             self._check(db)
 
     @staticmethod
@@ -168,6 +171,10 @@ class OutputLineage:
                     "INSERT INTO cmh_event_output_links VALUES (?,?,?)",
                     [(job_id, kind, identity) for kind, identity in links],
                 )
+            if db.execute(
+                "SELECT 1 FROM cmh_purged_snapshots WHERE receipt_id=?", (job_id,)
+            ).fetchone():
+                raise ValueError("lineage_snapshot_purged")
             commit_context(db, job_id, context, event)
             rebuilt = write_request(event)
             request = MemoryTaskRunner.request_for(rebuilt.idempotency_key, rebuilt.input_records)
@@ -218,6 +225,9 @@ class OutputLineage:
                 "WHERE memory.receipt_id=receipt.receipt_id) OR NOT EXISTS "
                 "(SELECT 1 FROM cmh_event_profile_inputs profile "
                 "WHERE profile.receipt_id=receipt.receipt_id)) "
+                # A governance purge removed a snapshot on purpose; never recapture it.
+                "AND NOT EXISTS (SELECT 1 FROM cmh_purged_snapshots purged "
+                "WHERE purged.receipt_id=receipt.receipt_id) "
                 "ORDER BY rowid LIMIT 32",
                 (self._cursor,),
             ).fetchall()

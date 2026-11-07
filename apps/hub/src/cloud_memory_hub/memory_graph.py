@@ -5,6 +5,7 @@ from hy_memory.utils.source_filter import normalize_source
 
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.memory_evidence import stored_memory
+from cloud_memory_hub.purged_evidence import purged
 from cloud_memory_hub.source_history import PREFIX as ORIGINAL
 from cloud_memory_hub.version_input_graph import VersionInputGraph
 
@@ -38,6 +39,9 @@ class MemoryGraph(VersionInputGraph):
             (receipt,),
         ).fetchone()
         if row is None:
+            if purged(graph.db, PREFIX, receipt):
+                self.captures[receipt] = None
+                return None
             raise GovernanceError("governance_memory_capture_missing")
         graph.bytes += row[0]
         if graph.bytes > graph.byte_limit:

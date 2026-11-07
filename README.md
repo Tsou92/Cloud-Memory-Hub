@@ -58,7 +58,7 @@
 | 普通记忆生产版本 | [设计](docs/adr/0026-chat-memory-origins.md) · [验证记录](docs/reviews/2026-11-02-memory-origins.md) |
 | 普通记忆合并来源 | [关系与兼容设计](docs/adr/0027-chat-reconcile-lineage.md) · [安装与 NAS 验证](docs/reviews/2026-11-03-memory-lineage.md)；完整输入覆盖与删除执行仍待完成 |
 | 基础画像输入与写入证据 | [原生旁路设计](docs/adr/0028-basic-profile-evidence.md) · [SDK 验证](docs/reviews/2026-11-03-profile-evidence.md) · [Hub 来源接线](docs/adr/0029-basic-profile-lineage.md) · [接线验证](docs/reviews/2026-11-03-profile-lineage.md) |
-| 忘记与彻底删除执行 | [状态机与抑制点](docs/adr/0032-governance-execution.md)；忘记已实现，彻底删除待实现 |
+| 忘记与彻底删除执行 | [状态机、清理清单与已知缺口](docs/adr/0032-governance-execution.md) |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 

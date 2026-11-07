@@ -1,6 +1,7 @@
 """Composition only: persistence, memory processing and UI remain upstream."""
 
 import secrets
+from contextlib import asynccontextmanager
 
 from one_memory.api import _sdk_library_bridge, create_app
 from one_memory.config import Settings
@@ -12,6 +13,7 @@ from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.governance_execution import ExecutionStore, GovernanceExecutor
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_preview import GovernancePreview
+from cloud_memory_hub.governance_purge import Purger
 from cloud_memory_hub.output_lineage import OutputLineage
 from cloud_memory_hub.privacy import CredentialFilter
 from cloud_memory_hub.remote_api import create_remote_api
@@ -96,9 +98,25 @@ def create_hub(config: HubConfig) -> CloudBoundary:
     )
     core.state.cmh_previews = previews
     executor = GovernanceExecutor(
-        governance, lambda: _sdk_library_bridge(core), previews, sdk_admission, lineage
+        governance,
+        lambda: _sdk_library_bridge(core),
+        previews,
+        sdk_admission,
+        lineage,
+        Purger(ingest, lambda: _sdk_library_bridge(core), config.data_dir),
     )
     core.state.cmh_executor = executor
+    # Before serving or draining: finish interrupted executions and re-apply
+    # completed purges to restored business data (ADR-0032).
+    core_lifespan = core.router.lifespan_context
+
+    @asynccontextmanager
+    async def governed_lifespan(app):
+        async with core_lifespan(app) as state:
+            await executor.resume()
+            yield state
+
+    core.router.lifespan_context = governed_lifespan
     return CloudBoundary(
         core,
         config,

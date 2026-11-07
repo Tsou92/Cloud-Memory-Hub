@@ -148,12 +148,12 @@ class GovernanceAuthority:
         return pending_operations(self.journal, store), store.operations()
 
     def require_ready(self) -> None:
-        # Reads may proceed while a forget is planned: its Hub suppression rows
-        # are durable and enforced. Any other unfinished intent (purge, foreign
-        # writer, missing plan) quarantines the instance (ADR-0032).
+        # Reads may proceed while a forget/purge is planned: its Hub suppression
+        # rows are durable and enforced. An intent without a plan (foreign
+        # writer, lost execution store) quarantines the instance (ADR-0032).
         pending, planned = self._pending()
         for intent in pending:
-            if intent.action != "forget" or intent.operation_id not in planned:
+            if intent.operation_id not in planned:
                 raise GovernanceError("governance_execution_pending")
 
     def require_writes_ready(self) -> None:

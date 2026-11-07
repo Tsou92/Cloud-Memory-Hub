@@ -278,3 +278,238 @@ def test_tampered_execution_state_quarantines(tmp_path, monkeypatch, damage):
     # Tampering cannot silently empty the suppression set.
     with pytest.raises(GovernanceError):
         create_hub(config)
+
+
+def hnsw_slack(path):
+    # Known gap (ADR-0032): Chroma's Rust HNSW writer preallocates
+    # data_level0.bin and leaves unused slots uninitialised, so they can hold
+    # fragments of recently freed process memory. Measured by
+    # test_hnsw_slack_is_the_only_residue_and_is_not_a_stored_record.
+    return path.name == "data_level0.bin"
+
+
+def scan(root, needle):
+    """Every file under the instance that still contains the bytes."""
+    return sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if path.is_file() and not hnsw_slack(path) and needle.encode() in path.read_bytes()
+    )
+
+
+def test_purge_removes_every_stored_copy_and_keeps_unrelated_data(tmp_path, monkeypatch):
+    config = config_for(tmp_path)
+    root = tmp_path
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            jobs, _, results, headers, event, _ = await produce(app, web, config, monkeypatch)
+            admin = {"Authorization": "Bearer " + config.admin_token}
+            scope = event["scope_id"]
+            # Purge the last original: its fact and snapshot, not earlier turns.
+            last = "cmhe:" + jobs[2]
+            reply = await web.post(
+                PREVIEW,
+                headers=admin,
+                json={"scope_id": scope, "action": "purge", "record_ids": [last], "limit": 50},
+            )
+            assert reply.status_code == 200, reply.text
+            view = reply.json()
+            scoped = {item["record_id"] for item in view["items"]}
+            purged_fact = results[2]["memory_ids"][0]
+            kept_fact = results[0]["memory_ids"][0]
+            assert purged_fact in scoped and kept_fact not in scoped
+            assert scan(root, "Synthetic fact 3")
+            reply = await web.post(
+                EXECUTE,
+                headers=admin,
+                json={
+                    "scope_id": scope,
+                    "action": "purge",
+                    "record_ids": [last],
+                    "expected_view": view["view_digest"],
+                },
+            )
+            assert reply.status_code == 200, reply.text
+            assert reply.json()["action"] == "purge"
+            assert reply.json()["raw_retained_for_explicit_read"] == 0
+            for kind, identity in (("memories", purged_fact), ("history", last)):
+                assert (await read(web, headers, scope, kind, identity)).status_code == 404
+            # Unrelated records remain readable.
+            assert (await read(web, headers, scope, "memories", kept_fact)).status_code == 200
+            assert (
+                await read(web, headers, scope, "history", "cmhe:" + jobs[0])
+            ).status_code == 200
+            # Lineage over the remaining records is still complete.
+            remaining = await preview(web, admin, scope, ["cmhe:" + jobs[0]])
+            assert purged_fact not in {item["record_id"] for item in remaining["items"]}
+            await app.core.state.cmh_lineage.reconcile_completed()
+
+        # After the process exits, no byte of the purged text remains anywhere
+        # (SDK vector/FTS/WAL queue, history, cache, Hub archive, queue DB, logs).
+        assert scan(root, "Synthetic fact 3") == []
+        assert scan(root, "Synthetic fact 1")
+        with sqlite3.connect(config.config_dir / "remote-access.sqlite3") as db:
+            assert not db.execute(
+                "SELECT 1 FROM cmh_event_receipts WHERE receipt_id=?", (jobs[2],)
+            ).fetchone()
+
+        # Restart: no quarantine, purged records stay gone, backfill does not recapture.
+        async with fixture(config) as (app, web):
+            await app.core.state.cmh_lineage.reconcile_completed()
+            assert (await read(web, headers, scope, "memories", purged_fact)).status_code == 404
+            assert (await read(web, headers, scope, "memories", kept_fact)).status_code == 200
+        assert scan(root, "Synthetic fact 3") == []
+
+    asyncio.run(scenario())
+
+
+def test_purge_of_unsupported_kind_refuses_before_any_intent(tmp_path, monkeypatch):
+    from cloud_memory_hub.governance_purge import partition
+
+    with pytest.raises(GovernanceError, match="purge_kind_unsupported"):
+        partition({"cmhp:coding:f:1": "memory"})
+    native, receipts, snapshots = partition(
+        {"a": "memory", "cmhe:r1": "raw", "cmhj:r2": "raw", "cmhi:r3:0": "raw"}
+    )
+    assert (native, receipts) == ({"a"}, {"r1"})
+    assert snapshots == {("cmhj:", "r2"), ("cmhi:", "r3")}
+
+
+def test_interrupted_purge_hides_content_blocks_writes_and_resumes(tmp_path, monkeypatch):
+    from cloud_memory_hub import governance_purge
+
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            jobs, _, results, headers, event, _ = await produce(app, web, config, monkeypatch)
+            admin = {"Authorization": "Bearer " + config.admin_token}
+            scope, last = event["scope_id"], "cmhe:" + jobs[2]
+            view = (
+                await web.post(
+                    PREVIEW,
+                    headers=admin,
+                    json={"scope_id": scope, "action": "purge", "record_ids": [last]},
+                )
+            ).json()
+            original = governance_purge.Purger._sdk_side_tables
+
+            def crash(*args):
+                raise RuntimeError("synthetic crash mid-purge")
+
+            monkeypatch.setattr(governance_purge.Purger, "_sdk_side_tables", crash)
+            reply = await web.post(
+                EXECUTE,
+                headers=admin,
+                json={
+                    "scope_id": scope,
+                    "action": "purge",
+                    "record_ids": [last],
+                    "expected_view": view["view_digest"],
+                },
+            )
+            assert reply.status_code == 503
+            # Hidden from every read while unfinished, and new writes wait.
+            fact = results[2]["memory_ids"][0]
+            assert (await read(web, headers, scope, "memories", fact)).status_code == 404
+            assert (await read(web, headers, scope, "history", last)).status_code == 404
+            with pytest.raises(GovernanceError, match="execution_pending"):
+                app.core.state.cmh_governance.require_writes_ready()
+            monkeypatch.setattr(governance_purge.Purger, "_sdk_side_tables", original)
+            await app.core.state.cmh_executor.resume()
+            app.core.state.cmh_governance.require_writes_ready()
+        assert scan(tmp_path, "Synthetic fact 3") == []
+
+    asyncio.run(scenario())
+
+
+def test_restored_old_data_replays_completed_purge_before_serving(tmp_path, monkeypatch):
+    import shutil
+
+    config = config_for(tmp_path)
+    backup = tmp_path.parent / (tmp_path.name + "-backup")
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            jobs, _, results, headers, event, _ = await produce(app, web, config, monkeypatch)
+            admin = {"Authorization": "Bearer " + config.admin_token}
+            scope, last = event["scope_id"], "cmhe:" + jobs[2]
+        # Business-data backup from before the purge (governance dir excluded).
+        shutil.copytree(config.data_dir, backup / "data")
+        shutil.copytree(config.config_dir, backup / "config")
+        async with fixture(config) as (app, web):
+            view = (
+                await web.post(
+                    PREVIEW,
+                    headers=admin,
+                    json={"scope_id": scope, "action": "purge", "record_ids": [last]},
+                )
+            ).json()
+            reply = await web.post(
+                EXECUTE,
+                headers=admin,
+                json={
+                    "scope_id": scope,
+                    "action": "purge",
+                    "record_ids": [last],
+                    "expected_view": view["view_digest"],
+                },
+            )
+            assert reply.status_code == 200, reply.text
+        # Restore the old business data; governance keeps its newer ledger.
+        for name, target in (("data", config.data_dir), ("config", config.config_dir)):
+            shutil.rmtree(target)
+            shutil.copytree(backup / name, target)
+        assert scan(tmp_path, "Synthetic fact 3")
+        # A real restore stops the service; a new process opens the restored
+        # files. Chroma caches clients per path in-process, so drop that cache.
+        from chromadb.api.client import SharedSystemClient
+
+        SharedSystemClient.clear_system_cache()
+        async with fixture(config) as (app, web):
+            fact = results[2]["memory_ids"][0]
+            assert (await read(web, headers, scope, "memories", fact)).status_code == 404
+            assert (await read(web, headers, scope, "history", last)).status_code == 404
+        assert scan(tmp_path, "Synthetic fact 3") == []
+
+    asyncio.run(scenario())
+
+
+def test_hnsw_slack_is_the_only_residue_and_is_not_a_stored_record(tmp_path, monkeypatch):
+    """Pin the known gap: residue, if any, is only in HNSW slack, never in a slot
+    the index counts as an element; everything else is clean."""
+    import struct
+
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            jobs, _, _, _, event, _ = await produce(app, web, config, monkeypatch)
+            admin = {"Authorization": "Bearer " + config.admin_token}
+            last = "cmhe:" + jobs[2]
+            view = (
+                await web.post(
+                    PREVIEW,
+                    headers=admin,
+                    json={"scope_id": event["scope_id"], "action": "purge", "record_ids": [last]},
+                )
+            ).json()
+            reply = await web.post(
+                EXECUTE,
+                headers=admin,
+                json={
+                    "scope_id": event["scope_id"],
+                    "action": "purge",
+                    "record_ids": [last],
+                    "expected_view": view["view_digest"],
+                },
+            )
+            assert reply.status_code == 200, reply.text
+
+    asyncio.run(scenario())
+    for level0 in tmp_path.rglob("data_level0.bin"):
+        header = (level0.parent / "header.bin").read_bytes()
+        _, _, _, count, size = struct.unpack_from("<IQQQQ", header, 0)
+        used = level0.read_bytes()[: count * size]
+        assert b"Synthetic fact 3" not in used
