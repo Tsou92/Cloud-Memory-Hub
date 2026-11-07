@@ -398,3 +398,39 @@ def test_cancelled_preview_joins_formatter_before_releasing_its_budget(tmp_path,
         assert (await service.preview(request))["total"] == 1
 
     asyncio.run(scenario())
+
+
+DERIVATION_FLAGS = (
+    ("mode", "ultra"),
+    ("llm.enable_intention", True),
+    ("recall.episode_summary_enabled", True),
+    ("recall.session_episode_enabled", True),
+    ("recall.series_episode_enabled", True),
+    ("graph_store.topic_summary_enabled", True),
+)
+
+
+def test_unmodeled_derived_writers_are_off_and_refuse_preview(tmp_path):
+    config = config_for(tmp_path)
+
+    async def scenario():
+        app = create_hub(config)
+        async with app.core.router.lifespan_context(app.core):
+            bridge = _sdk_library_bridge(app.core)
+            sdk = await bridge._get_client()
+            # The real runtime configuration passes; nothing below is a stand-in.
+            governance_inventory.require_modeled_derivations(sdk._config)
+            service = app.core.state.cmh_previews
+            request = PreviewRequest(scope_id="global", action="forget", record_ids=("missing",))
+            for path, value in DERIVATION_FLAGS:
+                owner, _, name = path.rpartition(".")
+                target = sdk._config if not owner else getattr(sdk._config, owner)
+                previous = getattr(target, name)
+                setattr(target, name, value)
+                try:
+                    with pytest.raises(AccessError, match="governance_derivation_unmodeled"):
+                        await service.preview(request)
+                finally:
+                    setattr(target, name, previous)
+
+    asyncio.run(scenario())

@@ -251,6 +251,24 @@ async def _observe(sdk, namespace, profile_origins=None):
     return records
 
 
+def require_modeled_derivations(config):
+    """Derived writers whose inputs are not captured must stay off (ADR-0031).
+
+    finalize_session has no Hub caller, so dynamic episodes are unreachable even
+    though the pinned bridge enables their read-side capsules.
+    """
+    recall, graph = config.recall, config.graph_store
+    if (
+        config.mode == "ultra"
+        or config.llm.enable_intention
+        or recall.episode_summary_enabled
+        or recall.session_episode_enabled
+        or recall.series_episode_enabled
+        or graph.topic_summary_enabled
+    ):
+        raise GovernanceError("governance_derivation_unmodeled")
+
+
 def check_budget(records):
     if (
         len(records) > MAX_RECORDS
@@ -266,6 +284,7 @@ async def observe_inventory(bridge, namespace, lineage=None):
             raise GovernanceError("governance_sdk_version_unsupported")
         async with bridge.exclusive_access():
             sdk = await bridge._get_client()
+            require_modeled_derivations(sdk._config)
             profile_origins = {} if lineage is not None else None
             nodes = await _joined_thread(
                 lambda: sdk._loop_thread.run(_observe(sdk, namespace, profile_origins))
