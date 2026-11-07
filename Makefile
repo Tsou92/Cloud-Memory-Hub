@@ -103,3 +103,7 @@ check-container:
 
 check-web:
 	docker build --platform linux/amd64 --target web-tests .
+
+.PHONY: probe-governance-execution
+probe-governance-execution: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_governance_execution.py
