@@ -1,0 +1,153 @@
+--- a/hy_memory/client.py
++++ b/hy_memory/client.py
+@@ -42,6 +42,7 @@
+ from .data.history_store import HistoryStore
+ from .data.cache import create_cache
+ from .utils.log_setup import setup_logging, set_request_id, request_id_scope
++from .utils.pipeline_observability import logged_content as _logged
+ from .utils.async_executor import (
+     await_concurrent_future_guarded,
+     concurrent_result_guarded,
+@@ -2790,7 +2791,7 @@
+                 f"[add] writing {preview} user={uid} "
+                 f"agent_id={agent_id} session_id={session_id} mode={self._mode}"
+             )
+-            logger.info(f"[add] messages detail: {[m.to_dict() for m in chat_messages]}")
++            logger.info(f"[add] messages detail: {_logged([m.to_dict() for m in chat_messages])}")
+         else:
+             logger.info(
+                 f"[add] writing text({len(content)} chars) user={uid} "
+@@ -3993,14 +3994,14 @@
+             decided_variant = HyMemoryClient._scene_variant(scene)
+             logger.info(
+                 f"[search] scene explicit={decided_scene} (no LLM judge); "
+-                f"target={effective_target_query!r}"
++                f"target={_logged(effective_target_query)!r}"
+             )
+         elif not agentic_enabled and not queries_supplied:
+             # 默认 light search 仅指 query="..."：固定 normal，绝不调用 LLM。
+             decided_scene = "normal"
+             logger.info(
+                 f"[search] search_mode=default single-query scene=normal (no LLM); "
+-                f"target={target_query!r}"
++                f"target={_logged(target_query)!r}"
+             )
+         elif agentic_enabled:
+             # agentic：单/多 query 都强制一次 LLM 完成三分类 + rewrite + 时间解析。
+@@ -4042,7 +4043,7 @@
+             else:
+                 decided_scene = "normal"
+                 logger.info(
+-                    f"[search] agentic rewrite-LLM fallback=normal; target={target_query!r}"
++                    f"[search] agentic rewrite-LLM fallback=normal; target={_logged(target_query)!r}"
+                 )
+         elif rewrite_enabled and not _too_long:
+             # default + queries= 的原逻辑：配置开启时一次 LLM 做 rewrite/time，
+@@ -4121,7 +4122,7 @@
+             decided_scene = "normal"
+             logger.info(
+                 f"[search] default multi-query features disabled; no LLM; "
+-                f"target={target_query!r}"
++                f"target={_logged(target_query)!r}"
+             )
+ 
+         # ────────────────────────────────────────────────────────────
+@@ -4174,7 +4175,7 @@
+             else:
+                 logger.info(
+                     f"[search] routing to PRODUCTIVITY path variant={decided_variant}: "
+-                    f"target={effective_target_query!r} "
++                    f"target={_logged(effective_target_query)!r} "
+                     f"workspace_id={workspace_id!r} branch={branch!r}"
+                 )
+                 return await self._search_coding(
+@@ -4201,7 +4202,7 @@
+         # Chat 召回链路（原有逻辑）
+         # ────────────────────────────────────────────────────────────
+         logger.info(
+-            f"[search] query='{effective_target_query}' user_ids={effective_user_ids} "
++            f"[search] query='{_logged(effective_target_query)}' user_ids={effective_user_ids} "
+             f"agent_ids={effective_agent_ids} session_ids={effective_session_ids} limit={limit}"
+         )
+ 
+--- a/hy_memory/pipelines/reader_base.py
++++ b/hy_memory/pipelines/reader_base.py
+@@ -23,6 +23,7 @@
+ signals, local rerank, candidate guards, quota merge, evolution, and formatting.
+ """
+ 
++from ..utils.pipeline_observability import logged_content as _logged
+ from typing import Any, Dict, List, Optional, Set, Tuple
+ from datetime import datetime
+ import asyncio
+@@ -3574,7 +3575,7 @@
+                 f"hidden_l0={len(hidden_l0_hits)} fwd_l6={len(forward_l6)} rev_l6={len(reverse_l6)} "
+                 f"fused_l6={len(fused_l6)} graph_intent={len(graph_intention_hits)} "
+                 f"returned={len(final_results)} "
+-                f"query='{request.query[:80]}'"
++                f"query='{_logged(request.query)}'"
+             )
+ 
+             response.success = True
+--- a/hy_memory/utils/pipeline_observability.py
++++ b/hy_memory/utils/pipeline_observability.py
+@@ -29,6 +29,7 @@
+ import asyncio
+ import concurrent.futures
+ import json
++import re
+ import logging
+ import os
+ import threading
+@@ -110,6 +111,42 @@
+     )
+ 
+ 
++def logged_content(value) -> str:
++    """Text for a log line: the value itself only when content logging is on."""
++    text = value if isinstance(value, str) else str(value)
++    return text if is_llm_content_logging_enabled() else redact_content(text)
++
++
++_ID_KEY = re.compile(r"(^|_)(id|ids)$")
++_METADATA_KEYS = frozenset({
++    "op", "step", "layer", "status", "scene", "mode", "kind", "variant", "reason",
++    "error", "error_code", "verified", "source", "owner", "valid_until", "memory_at",
++})
++
++
++def _redact_parsed_value(value, key=""):
++    if isinstance(value, dict):
++        return {k: _redact_parsed_value(v, str(k)) for k, v in value.items()}
++    if isinstance(value, list):
++        return [_redact_parsed_value(v, key) for v in value]
++    if isinstance(value, str) and not (
++        key in _METADATA_KEYS or _ID_KEY.search(key) or key.endswith(("_ms", "_at"))
++    ):
++        return redact_content(value)
++    return value
++
++
++def redact_parsed(parsed_str: str) -> str:
++    """Keep the JSON shape, IDs, counts and enums; redact free-text values."""
++    if not parsed_str:
++        return parsed_str
++    try:
++        obj = json.loads(parsed_str)
++    except (TypeError, ValueError):
++        return redact_content(parsed_str)
++    return json.dumps(_redact_parsed_value(obj), ensure_ascii=False, default=str)
++
++
+ def redact_content(value: str) -> str:
+     """Keep diagnostics without persisting the original sensitive text."""
+     import hashlib
+@@ -325,6 +362,8 @@
+         if not is_llm_content_logging_enabled():
+             prompt = redact_content(prompt)
+             response = redact_content(response)
++            # parsed carries extracted facts and queries too (EXTRACT, READ_*).
++            parsed = redact_parsed(parsed)
+ 
+         _prev = _last_event.get(request_id)
+         step_elapsed_ms = round((_now - _prev) * 1000, 2) if _prev is not None else 0.0

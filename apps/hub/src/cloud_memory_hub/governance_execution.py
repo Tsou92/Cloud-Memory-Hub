@@ -28,7 +28,7 @@ class ExecuteRequest(PreviewRequest):
     """The administrator confirms exactly the view they reviewed."""
 
     model_config = ConfigDict(revalidate_instances="always")
-    action: str = Field(pattern=r"^forget$")
+    action: str = Field(pattern=r"^(forget|purge)$")
     expected_view: str = Field(pattern=r"^[0-9a-f]{64}$")
     operation_id: str | None = None
 
@@ -117,11 +117,15 @@ class ExecutionStore:
         }
 
     def suppressed(self, scope_id):
-        """Every suppression whose intent was durably planned; conservative on crash."""
-        return {
-            row["record_id"]: row["kind"]
-            for row in self._rows("SELECT * FROM suppressed WHERE scope_id=?", (scope_id,))
-        }
+        """record -> kind, or "purged" when any purge covers it; conservative on crash."""
+        purges = {key for key, (_, intent) in self.operations().items() if intent.action == "purge"}
+        result = {}
+        for row in self._rows("SELECT * FROM suppressed WHERE scope_id=?", (scope_id,)):
+            if row["operation_id"] in purges:
+                result[row["record_id"]] = "purged"
+            else:
+                result.setdefault(row["record_id"], row["kind"])
+        return result
 
     def records(self, operation_id):
         return sorted(
@@ -197,7 +201,9 @@ def pending_operations(journal, store):
 
 
 class GovernanceExecutor:
-    def __init__(self, authority, bridge, previews, admission, lineage=None):
+    def __init__(self, authority, bridge, previews, admission, lineage=None, purger=None):
+        self.purger = purger
+        self._replayed = False
         self.authority = authority
         self.bridge = bridge
         self.previews = previews
@@ -249,15 +255,40 @@ class GovernanceExecutor:
 
         await _joined_thread(lambda: sdk._loop_thread.run(run()))
 
-    async def _finish(self, intent, records):
+    async def _finish(self, intent, records, contents=()):
         native = [i for i in records if not i.startswith(RESERVED_PREFIXES)]
-        # Hub-owned identities (originals, input snapshots) have no SDK node;
-        # the Hub suppression table alone governs them.
-        await self._suppress_sdk(await self.bridge()._get_client(), native)
+        if intent.action == "purge":
+            # Suppression rows stay: they are the durable rule that blocks
+            # re-extraction and re-import after the content itself is gone.
+            # contents is only available in the executing process; a resumed
+            # purge is verified by ID absence through the same idempotent steps.
+            await self.purger.run(records, contents)
+        else:
+            # Hub-owned identities (originals, input snapshots) have no SDK node;
+            # the Hub suppression table alone governs them.
+            await self._suppress_sdk(await self.bridge()._get_client(), native)
         await _joined_thread(self.store.complete, intent)
+
+    async def replay_purges(self):
+        """Restored business data must not bring purged records back (ADR-0032).
+
+        Runs once per process before writes. Each purge step is idempotent, so a
+        record that is still absent costs one lookup and nothing is rewritten.
+        """
+        if self._replayed or self.purger is None:
+            return
+        operations = await _joined_thread(self.store.operations)
+        for operation_id, (state, intent) in operations.items():
+            if state == "completed" and intent.action == "purge":
+                records = await _joined_thread(self.store.records, operation_id)
+                if await self.purger.present(records):
+                    async with self.admission.exclusive():
+                        await self.purger.run(records, ())
+        self._replayed = True
 
     async def resume(self):
         """Finish planned forgets, drop plans whose intent never committed."""
+        await self.replay_purges()
         planned = await _joined_thread(self.store.operations)
         if all(state == "completed" for state, _ in planned.values()):
             return
@@ -291,7 +322,7 @@ class GovernanceExecutor:
                 return {
                     "operation_id": intent.operation_id,
                     "scope_id": intent.scope_id,
-                    "action": "forget",
+                    "action": intent.action,
                     "state": "completed",
                     "suppressed_count": len(intent.targets),
                 }
@@ -305,7 +336,7 @@ class GovernanceExecutor:
                 lambda: self.previews._format(
                     PreviewRequest(
                         scope_id=request.scope_id,
-                        action="forget",
+                        action=request.action,
                         record_ids=request.record_ids,
                         limit=1,
                     ),
@@ -316,12 +347,17 @@ class GovernanceExecutor:
                 raise GovernanceError("governance_preview_changed")
             plan = plan_relations(nodes, request.record_ids)
             records = {identity: nodes[identity].kind for identity in plan["record_ids"]}
+            if request.action == "purge":
+                from cloud_memory_hub.governance_purge import partition
+
+                partition(records)  # Refuse unsupported kinds before any intent.
+            contents = [nodes[identity].content for identity in plan["record_ids"]]
             journal = self.authority.journal
             intent = Intent(
                 operation_id=request.operation_id or str(uuid4()),
                 actor_id=actor_id,
                 scope_id=request.scope_id,
-                action="forget",
+                action=request.action,
                 targets=tuple(
                     journal.target(request.scope_id, kind, identity)
                     for identity, kind in sorted(records.items())
@@ -330,13 +366,16 @@ class GovernanceExecutor:
             # Order: plan (IDs) -> journal intent -> SDK state -> completed.
             await _joined_thread(self.store.plan, intent, records)
             checkpoint = await _joined_thread(self.authority.append, intent)
-            await self._finish(intent, records)
+            await self._finish(intent, records, contents)
+        purge = request.action == "purge"
         return {
             "operation_id": intent.operation_id,
             "scope_id": request.scope_id,
-            "action": "forget",
+            "action": request.action,
             "state": "completed",
             "checkpoint": json.loads(checkpoint.model_dump_json()),
             "suppressed_count": len(records),
-            "raw_retained_for_explicit_read": sum(kind == "raw" for kind in records.values()),
+            "raw_retained_for_explicit_read": 0
+            if purge
+            else sum(kind == "raw" for kind in records.values()),
         }

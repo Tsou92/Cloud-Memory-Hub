@@ -48,3 +48,9 @@
 - 实际执行测试发现两个 drain 入口把已退役的 evidence_store 传给 SDK 成功后的 release_sdk_staging，导致 RetiredAuthorityAccess；改用已有 memory_write_evidence_store，保留原 staging 清理。
 - Hub 必须同时从固定上游源码构建 SDK 和 Core，不能只应用源码补丁却继续安装未带补丁的 PyPI SDK。
 - 保留原队列／bridge／SDK 路由回归；Hub 实际 drain 测试包含提交失败、恢复、类型冲突和重启。详细结果见[关联验证](../../docs/reviews/2026-10-28-output-lineage.md)。
+
+## 0017-content-free-logs.patch
+
+- 实测上游在 INFO 级别把完整用户消息（`[add] messages detail`）、检索查询（`[search] target/query`、`[read/hybrid] query`）写入按天滚动、保留 15 天的文本日志；JSONL 管线日志的 `parsed` 字段（EXTRACT、S1_L1_UPSERT、RECONCILE_APPLY、READ_*）也含正文。这些副本无法按记录精确删除，与彻底删除冲突（ADR-0032）。
+- 复用上游已有的 `MEMORY_LOG_LLM_CONTENT` 开关与 `redact_content`：开关关闭（MemHub 非 debug 级别的默认）时，文本日志位置只记录长度和截断摘要；`parsed` 保留 JSON 结构、ID、计数和枚举字段，只替换自由文本值。debug 级别仍保留完整内容供诊断。
+- 不改变日志级别、行格式、文件位置或任何业务路径。实测脚本在接纳、提炼、检索、删除全流程后扫描日志目录，确认无合成标记。

@@ -9,6 +9,7 @@ from hy_memory.utils.source_filter import normalize_source
 from cloud_memory_hub.chat_evidence import stored_chat
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
+from cloud_memory_hub.purged_evidence import purged
 from cloud_memory_hub.reconcile_evidence import encode
 from cloud_memory_hub.source_history import PREFIX as ORIGINAL
 
@@ -67,6 +68,9 @@ class ChatGraph:
             (receipt,),
         ).fetchone()
         if row is None:
+            if purged(graph.db, PREFIX, receipt):
+                self.nodes[receipt] = None
+                return None
             raise GovernanceError("governance_chat_capture_missing")
         graph.bytes += row[0]
         if graph.bytes > graph.byte_limit:

@@ -77,8 +77,9 @@ class RemoteRead:
             if record is None:
                 return False
             identity = record.raw_id if history else record.memory_id
-            # A forgotten original stays readable on explicit history access.
-            if not history and identity in hidden:
+            # A forgotten original stays readable on explicit history access;
+            # a purged one is gone (and its row deleted) - hide it while purging.
+            if identity in hidden and (not history or hidden[identity] == "purged"):
                 return False
             return self._visible(record, namespace, history=history)
 

@@ -12,6 +12,7 @@ from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.input_context import context_parents, stored_context
 from cloud_memory_hub.original_archive import validate_original
 from cloud_memory_hub.productivity_read import parse_id, record_id
+from cloud_memory_hub.purged_evidence import purged
 from cloud_memory_hub.reconcile_evidence import STAGES, encode, stored_inputs
 from cloud_memory_hub.remote_ingest import write_request
 from cloud_memory_hub.source_history import PREFIX as ORIGINAL
@@ -71,7 +72,9 @@ class ReconcileGraph:
             raise GovernanceError("governance_input_output_unproven")
         inputs = stored_inputs(self.db, receipt, request)
         if inputs is None:
-            raise GovernanceError("governance_input_capture_missing")
+            if not purged(self.db, PREFIX, receipt):
+                raise GovernanceError("governance_input_capture_missing")
+            inputs = {"variant": None, "capture": None}
         capture = inputs["capture"]
         if capture is not None and capture["status"] == "unavailable":
             raise GovernanceError("governance_input_capture_incomplete")
