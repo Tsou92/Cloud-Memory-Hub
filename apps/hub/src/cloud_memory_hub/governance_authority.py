@@ -139,10 +139,27 @@ class GovernanceAuthority:
         """Internal primitive; the future user endpoint must authorize the intent."""
         return self._run(intent)
 
+    def _pending(self):
+        from cloud_memory_hub.governance_execution import ExecutionStore, pending_operations
+
+        if not self.verify():
+            return [], {}
+        store = ExecutionStore(self.journal)
+        return pending_operations(self.journal, store), store.operations()
+
     def require_ready(self) -> None:
-        # Do not serve an intent this runtime cannot enforce. This quarantine is
-        # temporary infrastructure, not the user's selective forget/purge feature.
-        if self.verify():
+        # Reads may proceed while a forget is planned: its Hub suppression rows
+        # are durable and enforced. Any other unfinished intent (purge, foreign
+        # writer, missing plan) quarantines the instance (ADR-0032).
+        pending, planned = self._pending()
+        for intent in pending:
+            if intent.action != "forget" or intent.operation_id not in planned:
+                raise GovernanceError("governance_execution_pending")
+
+    def require_writes_ready(self) -> None:
+        """New SDK writes wait until every intent is fully executed."""
+        self.require_ready()
+        if self._pending()[0]:
             raise GovernanceError("governance_execution_pending")
 
 

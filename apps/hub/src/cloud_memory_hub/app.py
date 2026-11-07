@@ -9,6 +9,7 @@ from pydantic import SecretStr
 from cloud_memory_hub.boundary import CloudBoundary
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_authority import open_authority
+from cloud_memory_hub.governance_execution import ExecutionStore, GovernanceExecutor
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_preview import GovernancePreview
 from cloud_memory_hub.output_lineage import OutputLineage
@@ -51,12 +52,17 @@ def create_hub(config: HubConfig) -> CloudBoundary:
     )
 
     async def reconcile_unknown():
+        # Finish a forget interrupted by a crash before any further writes.
+        await core.state.cmh_executor.resume()
         await reconciler.run()
         await lineage.reconcile_completed()
 
+    suppressions = ExecutionStore(governance.journal)
+    ingest.suppressed = suppressions.suppressed
+
     def source_write_authorizer(source_key):
         try:
-            governance.require_ready()
+            governance.require_writes_ready()
         except GovernanceError:
             return False
         return ingest.source_write_authorizer(source_key)
@@ -77,7 +83,9 @@ def create_hub(config: HubConfig) -> CloudBoundary:
     core.state.cmh_governance = governance
     originals = SourceHistory(ingest)
     reads = RemoteRead(
-        devices, lambda: UnifiedReadBridge(_sdk_library_bridge(core), originals, lineage)
+        devices,
+        lambda: UnifiedReadBridge(_sdk_library_bridge(core), originals, lineage),
+        suppressions.suppressed,
     )
     core.state.cmh_reads = reads
     previews = GovernancePreview(
@@ -87,10 +95,14 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         lineage,
     )
     core.state.cmh_previews = previews
+    executor = GovernanceExecutor(
+        governance, lambda: _sdk_library_bridge(core), previews, sdk_admission, lineage
+    )
+    core.state.cmh_executor = executor
     return CloudBoundary(
         core,
         config,
         internal_token,
-        remote_api=create_remote_api(devices, ingest, reads, previews),
+        remote_api=create_remote_api(devices, ingest, reads, previews, executor),
         governance=governance,
     )

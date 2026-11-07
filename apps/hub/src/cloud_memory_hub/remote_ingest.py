@@ -147,6 +147,7 @@ class RemoteIngest:
         self.access = access
         self.queue_provider = queue_provider
         self.privacy = CredentialFilter()
+        self.suppressed = lambda scope: {}
         with access._connection(writing=True) as db:
             extension = db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='cmh_ingest_schema'"
@@ -340,6 +341,18 @@ class RemoteIngest:
                 (event.source_id, event.conversation_id, event.record_id, event.revision),
             ).fetchone():
                 raise AccessError("record_revision_conflict", 409)
+            # A forgotten source record must not be re-extracted under a new revision
+            # (ADR-0032). Same-content re-import under new IDs needs a fingerprint.
+            hidden = self.suppressed(event.scope_id)
+            if hidden and any(
+                "cmhe:" + row[0] in hidden
+                for row in db.execute(
+                    "SELECT receipt_id FROM cmh_event_receipts WHERE source_id=? "
+                    "AND conversation_id=? AND record_id=?",
+                    (event.source_id, event.conversation_id, event.record_id),
+                )
+            ):
+                raise AccessError("governance_source_suppressed", 409)
             try:
                 job = queue.submit(request)
             except ValueError:

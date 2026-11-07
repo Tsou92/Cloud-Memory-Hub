@@ -1,0 +1,342 @@
+"""Execute forget (ADR-0032 slice 1): durable suppression, not physical deletion.
+
+State lives beside the journal in the governance directory and holds record IDs
+only, never content. The journal intent is the authority; this table records
+how far execution reached so a restart can finish it.
+"""
+
+import hmac
+import json
+import sqlite3
+from contextlib import contextmanager
+from uuid import uuid4
+
+from one_memory.hy_memory_bridge import _joined_thread
+from pydantic import ConfigDict, Field, ValidationError, field_validator
+
+from cloud_memory_hub.governance_inventory import observe_inventory
+from cloud_memory_hub.governance_journal import GovernanceError, Intent
+from cloud_memory_hub.governance_plan import PreviewRequest, plan_relations
+from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
+from cloud_memory_hub.sdk_reconcile import RESERVED_PREFIXES
+
+SCHEMA = 1
+SUPPRESSED_STATUS = "archived"
+
+
+class ExecuteRequest(PreviewRequest):
+    """The administrator confirms exactly the view they reviewed."""
+
+    model_config = ConfigDict(revalidate_instances="always")
+    action: str = Field(pattern=r"^forget$")
+    expected_view: str = Field(pattern=r"^[0-9a-f]{64}$")
+    operation_id: str | None = None
+
+    @field_validator("operation_id")
+    @classmethod
+    def operation(cls, value):
+        from cloud_memory_hub.events import canonical_uuid
+
+        return None if value is None else canonical_uuid(value)
+
+
+class ExecutionStore:
+    """planned (IDs saved, intent maybe not yet appended) -> completed."""
+
+    def __init__(self, journal):
+        self.journal = journal
+        self.path = journal.path.with_name("execution.sqlite3")
+
+    def _sign(self, values):
+        return self.journal._mac("execution-v1", values)
+
+    @contextmanager
+    def _connection(self, *, writing=False):
+        try:
+            DeviceAccessStore._check_private(self.path.parent, directory=True)
+            if writing and not self.path.exists():
+                self.path.touch(mode=0o600, exist_ok=False)
+            DeviceAccessStore._check_private(self.path)
+            db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=10)
+            db.row_factory = sqlite3.Row
+            try:
+                db.execute("PRAGMA synchronous=FULL")
+                db.execute("BEGIN IMMEDIATE" if writing else "BEGIN")
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version == 0 and writing:
+                    db.execute(
+                        "CREATE TABLE operations (operation_id TEXT PRIMARY KEY, "
+                        "scope_id TEXT NOT NULL, intent TEXT NOT NULL, "
+                        "state TEXT NOT NULL CHECK(state IN ('planned','completed')), "
+                        "signature TEXT NOT NULL)"
+                    )
+                    db.execute(
+                        "CREATE TABLE suppressed (operation_id TEXT NOT NULL "
+                        "REFERENCES operations(operation_id), scope_id TEXT NOT NULL, "
+                        "record_id TEXT NOT NULL, kind TEXT NOT NULL, signature TEXT NOT NULL, "
+                        "PRIMARY KEY(operation_id, record_id))"
+                    )
+                    db.execute("CREATE INDEX suppressed_scope ON suppressed(scope_id, record_id)")
+                    db.execute(f"PRAGMA user_version={SCHEMA}")
+                elif version != SCHEMA:
+                    raise GovernanceError("governance_execution_version_unsupported")
+                yield db
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+        except GovernanceError:
+            raise
+        except Exception:
+            raise GovernanceError("governance_execution_unavailable") from None
+
+    def _check(self, row, table):
+        values = [row[key] for key in row.keys() if key != "signature"]
+        if not hmac.compare_digest(row["signature"], self._sign([table, *values])):
+            raise GovernanceError("governance_execution_tampered")
+
+    def _rows(self, query, values=()):
+        if not self.path.exists():
+            return []
+        with self._connection() as db:
+            rows = db.execute(query, values).fetchall()
+            table = "operations" if "FROM operations" in query else "suppressed"
+            for row in rows:
+                self._check(row, table)
+            return rows
+
+    def operations(self):
+        # Verify suppression rows here too: startup and every readiness check
+        # pass through this, so a tampered row cannot wait for a scoped read.
+        self._rows("SELECT * FROM suppressed")
+        return {
+            row["operation_id"]: (row["state"], Intent.model_validate_json(row["intent"]))
+            for row in self._rows("SELECT * FROM operations")
+        }
+
+    def suppressed(self, scope_id):
+        """Every suppression whose intent was durably planned; conservative on crash."""
+        return {
+            row["record_id"]: row["kind"]
+            for row in self._rows("SELECT * FROM suppressed WHERE scope_id=?", (scope_id,))
+        }
+
+    def records(self, operation_id):
+        return sorted(
+            row["record_id"]
+            for row in self._rows("SELECT * FROM suppressed WHERE operation_id=?", (operation_id,))
+        )
+
+    def plan(self, intent, records):
+        payload = intent.model_dump_json()
+        with self._connection(writing=True) as db:
+            existing = db.execute(
+                "SELECT * FROM operations WHERE operation_id=?", (intent.operation_id,)
+            ).fetchone()
+            if existing is not None:
+                self._check(existing, "operations")
+                if existing["intent"] != payload:
+                    raise GovernanceError("governance_operation_conflict")
+                return
+            values = [intent.operation_id, intent.scope_id, payload, "planned"]
+            db.execute(
+                "INSERT INTO operations VALUES (?,?,?,?,?)",
+                (*values, self._sign(["operations", *values])),
+            )
+            for identity, kind in sorted(records.items()):
+                values = [intent.operation_id, intent.scope_id, identity, kind]
+                db.execute(
+                    "INSERT INTO suppressed VALUES (?,?,?,?,?)",
+                    (*values, self._sign(["suppressed", *values])),
+                )
+
+    def complete(self, intent):
+        values = [intent.operation_id, intent.scope_id, intent.model_dump_json(), "completed"]
+        with self._connection(writing=True) as db:
+            changed = db.execute(
+                "UPDATE operations SET state='completed', signature=? "
+                "WHERE operation_id=? AND state='planned'",
+                (self._sign(["operations", *values]), intent.operation_id),
+            ).rowcount
+            if (
+                not changed
+                and not db.execute(
+                    "SELECT 1 FROM operations WHERE operation_id=? AND state='completed'",
+                    (intent.operation_id,),
+                ).fetchone()
+            ):
+                raise GovernanceError("governance_operation_unplanned")
+
+    def discard(self, operation_id):
+        """Only for a plan whose intent never reached the journal."""
+        with self._connection(writing=True) as db:
+            db.execute("DELETE FROM suppressed WHERE operation_id=?", (operation_id,))
+            db.execute(
+                "DELETE FROM operations WHERE operation_id=? AND state='planned'", (operation_id,)
+            )
+
+
+def pending_operations(journal, store):
+    """Journal intents the execution store has not finished."""
+    done = {key: state for key, (state, _) in store.operations().items()}
+    pending = []
+    for scope in journal.scopes():
+        cursor = None
+        while True:
+            page = journal.changes(scope, after=cursor, limit=1000)
+            for entry in page["entries"]:
+                intent = Intent.model_validate(entry["intent"])
+                if done.get(intent.operation_id) != "completed":
+                    pending.append(intent)
+            cursor = page["cursor"]
+            if not page["has_more"]:
+                break
+    return pending
+
+
+class GovernanceExecutor:
+    def __init__(self, authority, bridge, previews, admission, lineage=None):
+        self.authority = authority
+        self.bridge = bridge
+        self.previews = previews
+        self.admission = admission
+        self.lineage = lineage
+        self.store = ExecutionStore(authority.journal)
+        # One administrator identity today; recorded so later multi-admin audit
+        # does not need a journal migration.
+        self.actor_id = authority.access.instance_id
+
+    async def run(self, request):
+        try:
+            request = ExecuteRequest.model_validate(request)
+        except ValidationError:
+            raise AccessError("invalid_request", 422) from None
+        try:
+            return await self.execute(request, self.actor_id)
+        except GovernanceError as error:
+            code = str(error)
+            status = {
+                "governance_selection_not_found": 404,
+                "governance_preview_changed": 409,
+                "governance_operation_conflict": 409,
+                "governance_reference_unresolved": 409,
+                "governance_scan_limit": 409,
+            }.get(code, 503)
+            raise AccessError(code, status) from None
+        except AccessError:
+            raise
+        except Exception:
+            # The SDK may raise with stored content in the message.
+            raise AccessError("governance_execution_unavailable", 503) from None
+
+    async def _suppress_sdk(self, sdk, identities):
+        """archived/is_latest only: excluded from SDK recall and reconcile, origin intact."""
+        vector = sdk._vector_store
+
+        async def run():
+            for identity in identities:
+                node = await vector.get_by_id(identity)
+                if node is None:
+                    # A concurrently removed record is already out of every read.
+                    continue
+                if node.status.value != SUPPRESSED_STATUS or node.is_latest:
+                    if not await vector.update_payload(
+                        identity, {"status": SUPPRESSED_STATUS, "is_latest": False}
+                    ):
+                        raise GovernanceError("governance_suppression_incomplete")
+
+        await _joined_thread(lambda: sdk._loop_thread.run(run()))
+
+    async def _finish(self, intent, records):
+        native = [i for i in records if not i.startswith(RESERVED_PREFIXES)]
+        # Hub-owned identities (originals, input snapshots) have no SDK node;
+        # the Hub suppression table alone governs them.
+        await self._suppress_sdk(await self.bridge()._get_client(), native)
+        await _joined_thread(self.store.complete, intent)
+
+    async def resume(self):
+        """Finish planned forgets, drop plans whose intent never committed."""
+        planned = await _joined_thread(self.store.operations)
+        if all(state == "completed" for state, _ in planned.values()):
+            return
+        async with self.admission.exclusive():
+            pending = {
+                intent.operation_id
+                for intent in await _joined_thread(
+                    pending_operations, self.authority.journal, self.store
+                )
+            }
+            for operation_id, (state, intent) in self.store.operations().items():
+                if state == "completed":
+                    continue
+                if operation_id not in pending:
+                    await _joined_thread(self.store.discard, operation_id)
+                    continue
+                await self._finish(intent, self.store.records(operation_id))
+
+    async def execute(self, request: ExecuteRequest, actor_id: str) -> dict:
+        request = ExecuteRequest.model_validate(request)
+        if request.operation_id is not None:
+            # A retried request after a lost response: the view has since changed
+            # (records are archived), so answer from the durable record instead.
+            known = (await _joined_thread(self.store.operations)).get(request.operation_id)
+            if known is not None:
+                state, intent = known
+                if intent.scope_id != request.scope_id:
+                    raise GovernanceError("governance_operation_conflict")
+                if state != "completed":
+                    await self.resume()
+                return {
+                    "operation_id": intent.operation_id,
+                    "scope_id": intent.scope_id,
+                    "action": "forget",
+                    "state": "completed",
+                    "suppressed_count": len(intent.targets),
+                }
+        namespace = f"cmh:{self.authority.access.instance_id}:{request.scope_id}"
+        bridge = self.bridge()
+        # Stop new SDK work and await admitted writers before recomputing scope.
+        async with self.admission.exclusive():
+            await _joined_thread(self.previews._require_scope, request.scope_id)
+            nodes = await observe_inventory(bridge, namespace, self.lineage)
+            preview = await _joined_thread(
+                lambda: self.previews._format(
+                    PreviewRequest(
+                        scope_id=request.scope_id,
+                        action="forget",
+                        record_ids=request.record_ids,
+                        limit=1,
+                    ),
+                    nodes,
+                )
+            )
+            if preview["view_digest"] != request.expected_view:
+                raise GovernanceError("governance_preview_changed")
+            plan = plan_relations(nodes, request.record_ids)
+            records = {identity: nodes[identity].kind for identity in plan["record_ids"]}
+            journal = self.authority.journal
+            intent = Intent(
+                operation_id=request.operation_id or str(uuid4()),
+                actor_id=actor_id,
+                scope_id=request.scope_id,
+                action="forget",
+                targets=tuple(
+                    journal.target(request.scope_id, kind, identity)
+                    for identity, kind in sorted(records.items())
+                ),
+            )
+            # Order: plan (IDs) -> journal intent -> SDK state -> completed.
+            await _joined_thread(self.store.plan, intent, records)
+            checkpoint = await _joined_thread(self.authority.append, intent)
+            await self._finish(intent, records)
+        return {
+            "operation_id": intent.operation_id,
+            "scope_id": request.scope_id,
+            "action": "forget",
+            "state": "completed",
+            "checkpoint": json.loads(checkpoint.model_dump_json()),
+            "suppressed_count": len(records),
+            "raw_retained_for_explicit_read": sum(kind == "raw" for kind in records.values()),
+        }

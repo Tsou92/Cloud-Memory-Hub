@@ -9,6 +9,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from cloud_memory_hub.events import EventEnvelope
+from cloud_memory_hub.governance_execution import ExecuteRequest
 from cloud_memory_hub.governance_plan import PreviewRequest
 from cloud_memory_hub.governance_preview import GovernancePreview
 from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, PrivacyError, parse_json
@@ -73,6 +74,7 @@ def create_remote_api(
     ingest: RemoteIngest,
     reads: RemoteRead,
     previews: GovernancePreview,
+    executor=None,
 ) -> Starlette:
     async def projects(request: Request):
         require_admin(request)
@@ -176,6 +178,13 @@ def create_remote_api(
         body = await read_body(request, PreviewRequest)
         return response(await previews.preview(body))
 
+    async def governance_execute(request: Request):
+        require_admin(request)
+        if executor is None:
+            raise AccessError("not_found", 404)
+        body = await read_body(request, ExecuteRequest)
+        return response(await executor.run(body))
+
     def read_endpoint(operation, model):
         async def read(request: Request):
             credential = device_credential(request)
@@ -194,6 +203,7 @@ def create_remote_api(
     return Starlette(
         routes=[
             Route("/hub/v1/governance/preview", governance_preview, methods=["POST"]),
+            Route("/hub/v1/governance/execute", governance_execute, methods=["POST"]),
             Route("/hub/v1/projects", projects, methods=["GET", "POST"]),
             Route("/hub/v1/devices", devices, methods=["GET", "POST"]),
             Route("/hub/v1/devices/{device_id:uuid}/grants", grants, methods=["PUT"]),
