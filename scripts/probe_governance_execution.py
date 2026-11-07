@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 import hy_memory.pipelines.writer as native_writer
 from cloud_memory_hub.app import create_hub
@@ -108,9 +109,7 @@ async def phase(root, mode):
                 previous = MemAgent.process_add, native_writer._RECONCILE_ENABLED
                 MemAgent.process_add, native_writer._RECONCILE_ENABLED = extract, False
                 try:
-                    from uuid import uuid4
-
-                    for index in range(2):
+                    for _ in range(2):
                         current = {
                             **event,
                             **{
