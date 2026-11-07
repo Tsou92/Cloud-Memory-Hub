@@ -16,7 +16,7 @@ SDK 已捕获 extractor 实际使用的历史请求，以及确实提交的编�
 
 已证明来源的编程链现可观察：`cmhc:r:<ID>` 是轮次，`cmhc:t:<ID>` 是完整线程存储，均为管理员 raw 记录，不新增设备历史读取权限。轮次关联实际原文和原生相邻版本，线程包含其全部轮次；线程 body 表示现有存储内容，不宣称逐字来自某条对话。选择一个来源时不会反向吞并其他轮次独立的原文。设计见 [ADR-0021](adr/0021-coding-chain-inventory.md)。
 
-每条当前项目轮次都必须有完整上下文证明，缺失时返回 503 `governance_chain_lineage_incomplete`；已保存证明指向不存在的轮次时返回 409 `governance_reference_unresolved`。unavailable 捕获状态、缺失索引、损坏序号或无归属的旧 repo_symbol 索引也明确拒绝。其他项目正文不会加入范围，未知 workspace owner 不自动映射。SDK 开启任何尚未建模来源的派生写入（意图、滚动／会话／系列摘要、主题摘要或 ultra 演化）时返回 503 `governance_derivation_unmodeled`，见 [ADR-0031](adr/0031-derived-writer-coverage.md)。完整模型输入依赖、无归属索引迁移及删除执行仍待实现，不能用本次观察作为完整忘记／彻底删除验收。
+每条当前项目轮次都必须有完整上下文证明，缺失时返回 503 `governance_chain_lineage_incomplete`；已保存证明指向不存在的轮次时返回 409 `governance_reference_unresolved`。unavailable 捕获状态、缺失索引、损坏序号或无归属的旧 repo_symbol 索引也明确拒绝。其他项目正文不会加入范围，未知 workspace owner 不自动映射。确认后可用 POST `/hub/v1/governance/execute` 执行忘记（带 `view_digest`），见 [ADR-0032](adr/0032-governance-execution.md)；彻底删除尚未开放。SDK 开启任何尚未建模来源的派生写入（意图、滚动／会话／系列摘要、主题摘要或 ultra 演化）时返回 503 `governance_derivation_unmodeled`，见 [ADR-0031](adr/0031-derived-writer-coverage.md)。完整模型输入依赖、无归属索引迁移及删除执行仍待实现，不能用本次观察作为完整忘记／彻底删除验收。
 
 合并决策输入以 `cmhi:<receipt>:<stage>` 作为管理员 raw 记录：保存当时的完整快照及实际片段，核验生产请求、正文摘要、项目／来源身份和类型化产出，再连到生产原文及其输入阶段。旧快照不经过可变记忆 ID 回溯，因此后来更新的来源不会倒灌进旧阶段。只有 used 阶段影响成功产出；fallback／skipped 的历史副本仍参与原文清理观察。新捕获 unavailable、缺生产原文／产出、来源核验失败或循环返回 503，超限返回 409；旧 unobserved 仍不表示空依赖。授权记忆读取也会补充这些已核验的间接原文 ID，沿用 32 条展示上限；缺证据时返回 read_unavailable，不输出似是而非的来源。见 [ADR-0023](adr/0023-reconcile-input-lineage.md)。
 

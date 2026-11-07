@@ -23,9 +23,16 @@ MEMBER_BUDGET = 64
 
 
 class RemoteRead:
-    def __init__(self, access: DeviceAccessStore, bridge: Callable[[], HyMemoryBridge]):
+    def __init__(
+        self,
+        access: DeviceAccessStore,
+        bridge: Callable[[], HyMemoryBridge],
+        suppressed: Callable[[str], dict] | None = None,
+    ):
         self.access = access
         self.bridge = bridge
+        # Hub forget table (ADR-0032), independent of SDK status which may change.
+        self.suppressed = suppressed or (lambda scope: {})
         self._slots = asyncio.Semaphore(2)
 
     async def read(self, credential: str, operation: str, request) -> dict:
@@ -64,6 +71,17 @@ class RemoteRead:
     async def _read(self, operation, request, privacy, device):
         namespace = f"cmh:{self.access.instance_id}:{request.scope_id}"
         bridge = self.bridge()
+        hidden = await run_in_threadpool(self.suppressed, request.scope_id)
+
+        def visible(record, *, history):
+            if record is None:
+                return False
+            identity = record.raw_id if history else record.memory_id
+            # A forgotten original stays readable on explicit history access.
+            if not history and identity in hidden:
+                return False
+            return self._visible(record, namespace, history=history)
+
         history = operation.startswith("history-")
         next_offset, limited = None, False
         if isinstance(request, SearchRequest):
@@ -80,7 +98,7 @@ class RemoteRead:
                         break
                     seen.add(memory_id)
                     record = await bridge.get_sdk_memory(memory_id)
-                    if self._visible(record, namespace, history=False):
+                    if visible(record, history=False):
                         records.append(record)
                     if len(records) >= request.limit:
                         break
@@ -105,7 +123,7 @@ class RemoteRead:
                 total = page.total
             if request.offset + request.limit < total:
                 next_offset = request.offset + request.limit
-            records = [r for r in records if self._visible(r, namespace, history=history)]
+            records = [r for r in records if visible(r, history=history)]
         else:
             assert isinstance(request, GetRequest)
             record = await (
@@ -113,7 +131,7 @@ class RemoteRead:
                 if history
                 else bridge.get_sdk_memory(request.record_id)
             )
-            if not self._visible(record, namespace, history=history):
+            if not visible(record, history=history):
                 raise AccessError("record_not_found", 404)
             records = [record]
         enrich = getattr(bridge, "enrich_memory", None)
