@@ -1,6 +1,6 @@
 # ADR-0032：忘记与彻底删除的执行
 
-日期：2026-11-07。状态：忘记与彻底删除均已实现，本地验证通过；安装镜像与 NAS 验证待完成。关联 FR-09、FR-10、FR-11、FR-12、ENG-01。沿用 [ADR-0011](0011-governance-authority-and-offline-sync.md) 的治理记录和 [ADR-0012](0012-governance-scope-and-lineage.md) 的方向性范围，不新增正文权威库。
+日期：2026-11-07。状态：忘记与彻底删除均已实现，2026-11-07 完成本地安装与 NAS 验证，见[验证记录](../reviews/2026-11-07-governance-execution.md)。关联 FR-09、FR-10、FR-11、FR-12、ENG-01。沿用 [ADR-0011](0011-governance-authority-and-offline-sync.md) 的治理记录和 [ADR-0012](0012-governance-scope-and-lineage.md) 的方向性范围，不新增正文权威库。
 
 ## 实测：内容实际落在哪里
 
