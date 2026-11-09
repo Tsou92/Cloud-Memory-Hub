@@ -7,11 +7,18 @@ name = "cloud-memory-hub"
 version = "0.1.0.dev0"
 description = "NAS deployment boundary for the reused MemHub core"
 requires-python = ">=3.12,<3.13"
-dependencies = ["one-memory", "cryptography==50.0.1", "httpx==0.28.1"]
+dependencies = [
+    "one-memory",
+    "cryptography==50.0.1",
+    "httpx==0.28.1",
+    "mcp==2.3.0",
+]
 
 [project.scripts]
 cloud-memory-hub = "cloud_memory_hub.__main__:main"
 cloud-memory-connector = "cloud_memory_hub.connector:main"
+cloud-memory-agent = "cloud_memory_hub.agent_cli:main"
+cloud-memory-mcp = "cloud_memory_hub.agent_mcp:main"
 
 [dependency-groups]
 dev = ["pytest==9.1.1"]

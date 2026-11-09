@@ -158,6 +158,22 @@ class CredentialFilter:
         except (ValueError, TypeError, UnicodeError, RecursionError):
             raise PrivacyError("invalid_content") from None
 
+    def protect_text_fragment(self, text: str) -> str:
+        """Filter a bounded page without treating an incomplete JSON prefix as a document.
+
+        The producer must filter the complete original before pagination. Consumers
+        reassembling structured data must filter that complete document again.
+        """
+        try:
+            if not isinstance(text, str) or len(text.encode()) > MAX_CONTENT_BYTES:
+                raise PrivacyError("content_too_large")
+            result = self._text(text, depth=0, budget=[MAX_NODES], structured=False)
+            if len(result.encode()) > MAX_CONTENT_BYTES:
+                raise PrivacyError("content_too_large")
+            return result
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise PrivacyError("invalid_content") from None
+
     def _walk(self, value, *, depth: int, budget: list[int]):
         budget[0] -= 1
         if depth > MAX_DEPTH or budget[0] < 0:
