@@ -1,6 +1,6 @@
 # ADR-0038：可证明未进入 SDK 的任务准入
 
-日期：2026-11-09，2026-11-10 更新。状态：持久准入、SDK 入口与治理取消／恢复已接线，本地回归和独立审查通过；安装及 NAS 验收进行中，证据见[在途执行记录](../reviews/2026-11-10-inflight-execution.md)。关联 FR-10、FR-11、ENG-01；承接 [ADR-0034](0034-inflight-ingest-and-content-reimport.md) 和[只读候选清单](../research/inflight-candidate-inventory-2026-11-09.md)。不改变已确认的产品范围或内容匹配策略。
+日期：2026-11-09，2026-11-10 更新。状态：持久准入、SDK 入口与治理取消／恢复已接线，本地回归、独立审查及本地／NAS 安装验收通过；常驻空实验实例已备份迁移至 `c0467f5`，证据见[在途执行记录](../reviews/2026-11-10-inflight-execution.md)。旧／已许可任务的完整副作用证明仍待实现，不代表全部删除恢复完成。关联 FR-10、FR-11、ENG-01；承接 [ADR-0034](0034-inflight-ingest-and-content-reimport.md) 和[只读候选清单](../research/inflight-candidate-inventory-2026-11-09.md)。不改变已确认的产品范围或内容匹配策略。
 
 ## 问题与范围审查
 
