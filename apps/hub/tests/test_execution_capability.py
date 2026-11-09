@@ -110,10 +110,21 @@ def test_legacy_service_refuses_new_capability_even_when_main_journal_is_empty(t
         create_hub(config)
 
 
-def test_empty_migration_gap_cannot_skip_existing_execution_store_validation(tmp_path):
+@pytest.mark.parametrize(
+    "damaged,expected",
+    (
+        (False, "governance_execution_migration_required"),
+        (True, "governance_execution_tampered"),
+    ),
+    ids=("verified-gap", "damaged-gap"),
+)
+def test_empty_migration_gap_cannot_skip_existing_execution_store_validation(
+    tmp_path, damaged, expected
+):
     from cloud_memory_hub.app import create_hub
     from cloud_memory_hub.governance_authority import open_authority
     from cloud_memory_hub.governance_execution_store import ExecutionStore
+    from test_governance_execution_store import database_rows
     from test_original_archive import config_for
 
     config = config_for(tmp_path)
@@ -122,5 +133,23 @@ def test_empty_migration_gap_cannot_skip_existing_execution_store_validation(tmp
     store.initialize_empty()
     assert authority.journal.execution_store_id() is None
     assert authority.verify() == {}
-    with pytest.raises(GovernanceError, match="execution_version_unsupported"):
+    if damaged:
+        with sqlite3.connect(store.path) as db:
+            db.execute("UPDATE binding SET baseline_root=?", ("a" * 64,))
+    databases = (authority.journal.path, store.path, authority.access.path)
+    before_rows = tuple(database_rows(path) for path in databases)
+    assert {"cmh_governance_binding", "cmh_governance_floors"} <= before_rows[2]["tables"].keys()
+    before_files = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(GovernanceError, match=f"^{expected}$"):
         create_hub(config)
+    assert authority.journal.execution_store_id() is None
+    assert tuple(database_rows(path) for path in databases) == before_rows
+    assert {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    } == before_files
