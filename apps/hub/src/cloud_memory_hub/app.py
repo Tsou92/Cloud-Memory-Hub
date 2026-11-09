@@ -14,6 +14,7 @@ from cloud_memory_hub.governance_execution import ExecutionStore, GovernanceExec
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_preview import GovernancePreview
 from cloud_memory_hub.governance_purge import Purger
+from cloud_memory_hub.governance_sources import SourceSuppression
 from cloud_memory_hub.output_lineage import OutputLineage
 from cloud_memory_hub.privacy import CredentialFilter
 from cloud_memory_hub.remote_api import create_remote_api
@@ -61,6 +62,9 @@ def create_hub(config: HubConfig) -> CloudBoundary:
 
     suppressions = ExecutionStore(governance.journal)
     ingest.suppressed = suppressions.suppressed
+    source_suppressions = SourceSuppression(suppressions)
+    ingest.require_source_allowed = source_suppressions.require_allowed
+    ingest.require_source_rules = source_suppressions.targets
 
     def source_write_authorizer(source_key):
         try:

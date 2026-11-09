@@ -136,7 +136,13 @@ async def phase(root, mode):
                         )
                         await lineage.observe(receipt, frozen)
                         queue.settle(receipt, state=COMPLETED)
-                        rows.append({"receipt": receipt, "memory": result["memory_ids"][0]})
+                        rows.append(
+                            {
+                                "receipt": receipt,
+                                "memory": result["memory_ids"][0],
+                                "event": current,
+                            }
+                        )
                     queue.clear_terminal_payloads()
                 finally:
                     MemAgent.process_add, native_writer._RECONCILE_ENABLED = previous
@@ -154,6 +160,17 @@ async def phase(root, mode):
             assert await get("history", "cmhe:" + first["receipt"]) == 200
             assert await get("memories", second["memory"]) == 404
             assert await get("history", "cmhe:" + second["receipt"]) == 404
+            # New revisions must not resurrect either forgotten or purged
+            # originals, including after restoring the old business volumes.
+            for row in state["rows"]:
+                revised = {**row["event"], "event_id": str(uuid4()), "revision": 2}
+                reply = await web.post("/hub/v1/events", headers=device, json=revised)
+                assert reply.status_code == 409, "source_reimport_was_accepted"
+                assert reply.json() == {"detail": "governance_source_suppressed"}
+                request_id = (
+                    f"cmh:{event['instance_id']}:{event['device_id']}:{revised['event_id']}"
+                )
+                assert queue.get(request_id) is None, "suppressed_source_was_queued"
             app.core.state.cmh_governance.require_writes_ready()
 
 
@@ -199,7 +216,10 @@ def main():
         assert leftover(root, MARK + " fact 1"), "restore_fixture_invalid"
         run(root, "read")
         assert leftover(root, MARK + " fact 1") == [], "restore_replay_residue"
-    print("Forget, purge, restart and restore replay passed across processes.")
+    print(
+        "Forget, purge, restart, restore replay and source reimport prevention "
+        "passed across processes."
+    )
 
 
 if __name__ == "__main__":
