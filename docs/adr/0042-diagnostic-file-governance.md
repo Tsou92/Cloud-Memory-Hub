@@ -1,6 +1,6 @@
 # ADR-0042：已有诊断文件的范围证明与恢复
 
-日期：2026-11-10。状态：只读前置接口已实现并通过本地全量和独立审查，尚未接通物理文件清理；证据见[验证记录](../reviews/2026-11-10-diagnostic-inventory.md)。关联 FR-10、FR-11、ENG-01；承接 [ADR-0040](0040-diagnostic-write-quiescence.md) 与 [ADR-0041](0041-strict-diagnostic-content-policy.md)。
+日期：2026-11-10。状态：只读前置接口已通过本地全量、独立审查及本地/NAS 隔离安装验收，尚未接通物理文件清理；证据见[验证记录](../reviews/2026-11-10-diagnostic-inventory.md)。关联 FR-10、FR-11、ENG-01；承接 [ADR-0040](0040-diagnostic-write-quiescence.md) 与 [ADR-0041](0041-strict-diagnostic-content-policy.md)。
 
 ## 问题与复用
 
