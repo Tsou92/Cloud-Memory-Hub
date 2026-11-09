@@ -23,6 +23,7 @@ from cloud_memory_hub.governance_inflight import InflightGovernance
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.remote_access import DeviceAccessStore
 from cloud_memory_hub.remote_ingest import RemoteIngest
+from cloud_memory_hub.source_history import PREFIX
 from cloud_memory_hub.storage_lease import StorageLease
 from cloud_memory_hub.write_admissions import WriteAdmissions
 
@@ -73,7 +74,9 @@ def _preview_locked(config, operation_id):
     if operation is None or committed is not None and operation_id not in committed:
         raise GovernanceError("governance_diagnostic_parent_unproven")
     intent = operation.intent
-    if intent.action != "purge":
+    if intent.action != "purge" or (
+        operation.cleanup is not None and operation.cleanup.authority.mode == "repair"
+    ):
         raise GovernanceError("governance_diagnostic_parent_unproven")
     # Fetch the actual chain digest, not a local serialization digest or cache flag.
     with journal._connection() as db:
@@ -82,26 +85,31 @@ def _preview_locked(config, operation_id):
         if row is None or journal._decode(row) != intent:
             raise GovernanceError("governance_diagnostic_parent_unproven")
         parent = RepairParent(operation_id, row["digest"], journal.ledger_id)
-    main_path = config.data_dir / "one-memory.sqlite3"
-    DeviceAccessStore._check_private(main_path)
-    location = _StoppedQueueLocation(main_path)
-    ingest = RemoteIngest(authority.access, lambda: location, read_only=True)
-    admissions = WriteAdmissions(authority.access, journal, read_only=True)
-    planner = InflightGovernance(ingest, admissions, journal)
-    scope = ConfirmedScope(
-        scope_id=intent.scope_id,
-        action="purge",
-        records=operation.records,
-        rule_targets=intent.targets,
-        basis="operation",
-        operation_id=operation_id,
-    )
-    preparation = planner.prepare_cleanup_selectors(
-        scope, signed=True, completed=operation.state == "completed"
-    )
+    selectors = ()
+    if any(identity.startswith(PREFIX) for identity in operation.records):
+        # Only whole accepted originals need the original request certificates.
+        # An older memory-only intent has no such selection to reconstruct;
+        # its empty selection still must pass the actual full file scan below.
+        main_path = config.data_dir / "one-memory.sqlite3"
+        DeviceAccessStore._check_private(main_path)
+        location = _StoppedQueueLocation(main_path)
+        ingest = RemoteIngest(authority.access, lambda: location, read_only=True)
+        admissions = WriteAdmissions(authority.access, journal, read_only=True)
+        planner = InflightGovernance(ingest, admissions, journal)
+        scope = ConfirmedScope(
+            scope_id=intent.scope_id,
+            action="purge",
+            records=operation.records,
+            rule_targets=intent.targets,
+            basis="operation",
+            operation_id=operation_id,
+        )
+        selectors = planner.prepare_cleanup_selectors(
+            scope, signed=True, completed=operation.state == "completed"
+        ).selectors
     requests = tuple(
         WriteRequest(selector.request_id, f"cmh:{journal.instance_id}:{intent.scope_id}")
-        for selector in preparation.selectors
+        for selector in selectors
     )
     inventory = inspect_diagnostic_files(
         data_root=config.data_dir.absolute(),
@@ -109,7 +117,7 @@ def _preview_locked(config, operation_id):
         requests=requests,
         mode="propose",
     )
-    selection = CleanupAuthority("repair", preparation.selectors, inventory.grants, parent)
+    selection = CleanupAuthority("repair", selectors, inventory.grants, parent)
     return {
         "version": 1,
         "operation_id": operation_id,

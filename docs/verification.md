@@ -89,6 +89,8 @@
 
 运行时恢复隔离新增 `test_governance_recovery_fence.py`、`test_governance_fault_boundary.py`，并扩展既有 `probe_governance_execution.py`：真实已完成删除重试失败、精确恢复原生记录、正常 worker 排空、资源退出及取消竞争、许可不消耗、Core 正文与流式输出隔离、完整恢复再开放。关联 FR-10、FR-11、ENG-01，见 [ADR-0044](adr/0044-governance-runtime-recovery-fence.md) 与[验证记录](reviews/2026-11-10-runtime-recovery-fence.md)。
 
+联合文件恢复新增 `test_diagnostic_recovery_graph.py`、`test_cleanup_contributors.py`、`test_diagnostic_recovery_files.py`、`test_diagnostic_legacy_preview.py`，扩展原 `probe_diagnostic_file_execution.py` 的多 repair、中断与跨进程重放。覆盖真实主链图、冻结授权、跨 scope 共根、全部旧 stage 先证明、旧格式与维护入口兼容；文件 verified 不等于主 purge complete。关联 FR-10、FR-11、ENG-01，见 [ADR-0045](adr/0045-diagnostic-recovery-graph.md) 和[验证记录](reviews/2026-11-10-diagnostic-recovery.md)。
+
 2026-11-07 治理执行增加 test_governance_execution.py 和 make probe-governance-execution，关联 FR-09、FR-10、FR-11、FR-12。覆盖忘记的范围、抑制、幂等、崩溃续做和篡改拒绝，彻底删除的逐字节核验、无关数据保留、中断续做与恢复旧数据后重新清理；已知 HNSW 预分配缺口单独固定。见 [ADR-0032](adr/0032-governance-execution.md) 与[验证记录](reviews/2026-11-07-governance-execution.md)。
 
 2026-11-09 稳定来源屏蔽补充：上述治理测试和跨进程探针新增原文删除后新修订被拒绝、队列未新增任务、恢复旧业务数据后规则仍有效、旧操作兼容和屏蔽行缺失拒绝。关联 FR-10、FR-11；设计与验收边界见 [ADR-0033](adr/0033-durable-source-suppression.md)。
