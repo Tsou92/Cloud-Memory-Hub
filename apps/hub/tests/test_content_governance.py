@@ -8,8 +8,13 @@ from uuid import uuid4
 import pytest
 import test_chat_graph
 from cloud_memory_hub import governance_execution
+from cloud_memory_hub.events import EventEnvelope
 from cloud_memory_hub.governance_execution import ExecutionStore
-from cloud_memory_hub.governance_sources import capture_sources, content_policy_target
+from cloud_memory_hub.governance_sources import (
+    capture_sources,
+    content_policy_target,
+    content_targets,
+)
 from test_chat_graph import produce
 from test_governance_execution import EXECUTE, PREVIEW, read
 from test_original_archive import config_for
@@ -140,7 +145,8 @@ def test_completed_governance_blocks_changed_ids_and_mixed_content_after_restart
             state, intent = ExecutionStore(journal).operations()[completed["operation_id"]]
             assert state == "completed"
             assert content_policy_target(journal, event["scope_id"]) in intent.targets
-            assert len([target for target in intent.targets if target.kind == "content"]) == 2
+            messages = content_targets(journal, EventEnvelope.model_validate(event))
+            assert len(messages) == 1 and messages <= set(intent.targets)
             source = await register_source(web, config, event)
             for mixed in (False, True):
                 await rejected_without_enqueue(
@@ -202,7 +208,10 @@ def test_legacy_forget_then_current_purge_keeps_scope_available_after_restart(
             journal = app.core.state.cmh_governance.journal
             old = ExecutionStore(journal).operations()[forgotten["operation_id"]][1]
             assert any(target.kind == "source_record" for target in old.targets)
-            assert not any(target.kind == "content" for target in old.targets)
+            assert content_policy_target(journal, event["scope_id"]) not in old.targets
+            assert not content_targets(journal, EventEnvelope.model_validate(event)) & set(
+                old.targets
+            )
             original = await read(web, headers, event["scope_id"], "history", selected)
             assert original.status_code == 200
             purged = await execute(web, config, event, selected, "purge")

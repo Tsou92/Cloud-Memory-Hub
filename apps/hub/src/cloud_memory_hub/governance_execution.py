@@ -12,18 +12,27 @@ import sqlite3
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from uuid import uuid4
 
+from hy_memory.data.vector_store_chroma import _run_in_vdb_pool
 from one_memory.hy_memory_bridge import _joined_thread
 from pydantic import ConfigDict, Field, ValidationError, field_validator
 
-from cloud_memory_hub.governance_inventory import observe_inventory
+from cloud_memory_hub.governance_inventory import observe_inventory, require_modeled_scope
 from cloud_memory_hub.governance_journal import GovernanceError, Intent
 from cloud_memory_hub.governance_plan import PreviewRequest, plan_relations
+from cloud_memory_hub.governance_requests import request_targets, require_same_request
+from cloud_memory_hub.governance_sources import MAX_TARGETS
 from cloud_memory_hub.governance_sources import capture_rules as capture_sources
 from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
 from cloud_memory_hub.sdk_reconcile import RESERVED_PREFIXES
 
 SCHEMA = 1
 SUPPRESSED_STATUS = "archived"
+
+
+def require_forget_supported(records):
+    """Independent productivity stores still need internal-input suppression."""
+    if any(identity.startswith(("cmhp:", "cmht:", "cmhc:", "cmhv:")) for identity in records):
+        raise GovernanceError("governance_forget_kind_unsupported")
 
 
 class ExecuteRequest(PreviewRequest):
@@ -262,6 +271,7 @@ class GovernanceExecutor:
                 "governance_selection_not_found": 404,
                 "governance_preview_changed": 409,
                 "governance_operation_conflict": 409,
+                "governance_operation_request_unproven": 409,
                 "governance_reference_unresolved": 409,
                 "governance_scan_limit": 409,
             }.get(code, 503)
@@ -272,25 +282,48 @@ class GovernanceExecutor:
             # The SDK may raise with stored content in the message.
             raise AccessError("governance_execution_unavailable", 503) from None
 
-    async def _suppress_sdk(self, sdk, identities):
+    async def _suppress_sdk(self, sdk, identities, *, scope_id):
         """archived/is_latest only: excluded from SDK recall and reconcile, origin intact."""
         vector = sdk._vector_store
+        namespace = f"cmh:{self.authority.access.instance_id}:{scope_id}"
 
         async def run():
             for identity in identities:
                 node = await vector.get_by_id(identity)
                 if node is None:
-                    # A concurrently removed record is already out of every read.
+                    # The SDK also returns None on read/decode errors. Prove
+                    # actual absence before treating a target as already gone.
+                    found = await _run_in_vdb_pool(
+                        vector._collection.get,
+                        ids=[vector._node_id_to_point_id(identity)],
+                        include=[],
+                    )
+                    if not isinstance(found, dict) or found.get("ids") != []:
+                        raise GovernanceError("governance_suppression_incomplete")
                     continue
+                if node.node_id != identity:
+                    raise GovernanceError("governance_record_identity_mismatch")
+                if node.user_id != namespace:
+                    raise GovernanceError("governance_scope_mismatch")
                 if node.status.value != SUPPRESSED_STATUS or node.is_latest:
                     if not await vector.update_payload(
                         identity, {"status": SUPPRESSED_STATUS, "is_latest": False}
                     ):
                         raise GovernanceError("governance_suppression_incomplete")
 
-        await _joined_thread(lambda: sdk._loop_thread.run(run()))
+        try:
+            await _joined_thread(lambda: sdk._loop_thread.run(run()))
+        except GovernanceError:
+            raise
+        except Exception:
+            raise GovernanceError("governance_suppression_incomplete") from None
 
     async def _finish(self, intent, records, contents=()):
+        if intent.action == "forget":
+            require_forget_supported(records)
+        await require_modeled_scope(
+            self.bridge(), f"cmh:{self.authority.access.instance_id}:{intent.scope_id}"
+        )
         native = [i for i in records if not i.startswith(RESERVED_PREFIXES)]
         if intent.action == "purge":
             # Suppression rows stay: they are the durable rule that blocks
@@ -301,25 +334,56 @@ class GovernanceExecutor:
         else:
             # Hub-owned identities (originals, input snapshots) have no SDK node;
             # the Hub suppression table alone governs them.
-            await self._suppress_sdk(await self.bridge()._get_client(), native)
+            await self._suppress_sdk(
+                await self.bridge()._get_client(), native, scope_id=intent.scope_id
+            )
         await _joined_thread(self.store.complete, intent)
 
     async def replay_purges(self):
-        """Restored business data must not bring purged records back (ADR-0032).
+        """Reapply completed forgets and purges after business restores (ADR-0032).
 
-        Runs once per process before writes. Each purge step is idempotent, so a
-        record that is still absent costs one lookup and nothing is rewritten.
+        Runs once per process before writes. Reuse the original idempotent
+        effects without appending intents or rebuilding partly deleted lineage.
         """
-        if self._replayed or self.purger is None:
+        if self._replayed:
             return
-        operations = await _joined_thread(self.store.operations)
-        for operation_id, (state, intent) in operations.items():
-            if state == "completed" and intent.action == "purge":
+        async with self._exclusive():
+            operations = await _joined_thread(self.store.operations)
+            # Also check completed forgets and entity-only restores before
+            # deciding whether any modeled purge target is still present.
+            for scope_id in sorted({intent.scope_id for _, intent in operations.values()}):
+                await require_modeled_scope(
+                    self.bridge(), f"cmh:{self.authority.access.instance_id}:{scope_id}"
+                )
+            # Refuse committed unsupported scopes before any recovery mutation.
+            # An uncommitted plan is disposable and must reach _resume's discard.
+            committed = set()
+            if any(state == "planned" for state, _ in operations.values()):
+                committed = {
+                    intent.operation_id
+                    for intent in await _joined_thread(
+                        pending_operations, self.authority.journal, self.store
+                    )
+                }
+            for operation_id, (state, intent) in operations.items():
+                if intent.action == "forget" and (
+                    state == "completed" or operation_id in committed
+                ):
+                    require_forget_supported(await _joined_thread(self.store.records, operation_id))
+            for operation_id, (state, intent) in operations.items():
+                if state != "completed":
+                    continue
                 records = await _joined_thread(self.store.records, operation_id)
-                if await self.purger.present(records, scope_id=intent.scope_id):
-                    async with self._exclusive():
+                if intent.action == "forget":
+                    native = [i for i in records if not i.startswith(RESERVED_PREFIXES)]
+                    await self._suppress_sdk(
+                        await self.bridge()._get_client(), native, scope_id=intent.scope_id
+                    )
+                elif self.purger is not None:
+                    if await self.purger.present(records, scope_id=intent.scope_id):
                         await self.purger.run(records, (), scope_id=intent.scope_id)
-        self._replayed = True
+            if self.purger is not None:
+                self._replayed = True
 
     async def resume(self):
         """Finish planned forgets, drop plans whose intent never committed."""
@@ -351,25 +415,39 @@ class GovernanceExecutor:
 
     async def execute(self, request: ExecuteRequest, actor_id: str) -> dict:
         request = ExecuteRequest.model_validate(request)
+        async with self._resume_lock:
+            return await self._execute(request, actor_id)
+
+    async def _execute(self, request: ExecuteRequest, actor_id: str) -> dict:
         if request.operation_id is not None:
             # A retried request after a lost response: the view has since changed
             # (records are archived), so answer from the durable record instead.
             known = (await _joined_thread(self.store.operations)).get(request.operation_id)
             if known is not None:
                 state, intent = known
-                if intent.scope_id != request.scope_id:
-                    raise GovernanceError("governance_operation_conflict")
+                require_same_request(self.authority.journal, intent, request, actor_id)
                 if state != "completed":
-                    await self.resume()
-                return {
-                    "operation_id": intent.operation_id,
-                    "scope_id": intent.scope_id,
-                    "action": intent.action,
-                    "state": "completed",
-                    "suppressed_count": len(
-                        await _joined_thread(self.store.records, intent.operation_id)
-                    ),
-                }
+                    # The governance lock is already held. Resume may discard
+                    # an orphan plan, so only its fresh durable state is truth.
+                    await self._resume()
+                    known = (await _joined_thread(self.store.operations)).get(request.operation_id)
+                if known is not None:
+                    state, intent = known
+                    require_same_request(self.authority.journal, intent, request, actor_id)
+                    if state != "completed":
+                        raise GovernanceError("governance_execution_pending")
+                    records = await _joined_thread(self.store.records, intent.operation_id)
+                    if intent.action == "forget":
+                        require_forget_supported(records)
+                    return {
+                        "operation_id": intent.operation_id,
+                        "scope_id": intent.scope_id,
+                        "action": intent.action,
+                        "state": "completed",
+                        "suppressed_count": len(records),
+                    }
+                # No committed intent existed: revalidate the confirmed view
+                # and really execute, rather than reporting the discarded plan.
         namespace = f"cmh:{self.authority.access.instance_id}:{request.scope_id}"
         bridge = self.bridge()
         # Pause claims and drain whole workers before recomputing the scope.
@@ -391,6 +469,8 @@ class GovernanceExecutor:
                 raise GovernanceError("governance_preview_changed")
             plan = plan_relations(nodes, request.record_ids)
             records = {identity: nodes[identity].kind for identity in plan["record_ids"]}
+            if request.action == "forget":
+                require_forget_supported(records)
             if request.action == "purge":
                 from cloud_memory_hub.governance_purge import partition
 
@@ -400,6 +480,9 @@ class GovernanceExecutor:
             sources = await _joined_thread(
                 capture_sources, journal, self.lineage.ingest, request.scope_id, records
             )
+            rules = sources + request_targets(journal, request, actor_id)
+            if len(records) + len(rules) > MAX_TARGETS:
+                raise GovernanceError("governance_scan_limit")
             intent = Intent(
                 operation_id=request.operation_id or str(uuid4()),
                 actor_id=actor_id,
@@ -409,7 +492,7 @@ class GovernanceExecutor:
                     journal.target(request.scope_id, kind, identity)
                     for identity, kind in sorted(records.items())
                 )
-                + sources,
+                + rules,
             )
             # Order: plan (IDs) -> journal intent -> SDK state -> completed.
             await _joined_thread(self.store.plan, intent, records)

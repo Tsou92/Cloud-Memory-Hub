@@ -1,10 +1,12 @@
 # ADR-0034：在途接纳与换 ID 同内容重导入
 
-日期：2026-11-09。状态：分步实现中；Q1/Q2 已由用户确认，内容接纳规则和完整 worker 等待已实现并定向验证，存量队列清扫及版本范围仍未完成。2026-11-09 修订一：按 T-034-1 实测（提交 c7f9ba4）更正 E3，重写决策 1 第 2、4 条与启动就绪策略，见「修订一」。2026-11-09 修订二：按 T-034-2a 实测（提交 932279a）更正方案 X 的判据，重写 Q5 选项，新增 Q7，见「修订二」。关联 FR-10、FR-11；补充 [ADR-0032](0032-governance-execution.md) 与 [ADR-0033](0033-durable-source-suppression.md)；对应[验证记录](../reviews/2026-11-09-source-suppression.md)「下一步」第 1、2 项。第 3、4 项（结果缓存清理依据、同 operation_id 冲突）不在本文范围。
+日期：2026-11-09。状态：分步实现中；Q1/Q2 已由用户确认，内容接纳规则、完整 worker 等待及来源修订范围已实现并定向验证，存量队列清扫仍未完成。2026-11-09 修订一：按 T-034-1 实测（提交 c7f9ba4）更正 E3，重写决策 1 第 2、4 条与启动就绪策略，见「修订一」。2026-11-09 修订二：按 T-034-2a 实测（提交 932279a）更正方案 X 的判据，重写 Q5 选项，新增 Q7，见「修订二」。关联 FR-10、FR-11；补充 [ADR-0032](0032-governance-execution.md) 与 [ADR-0033](0033-durable-source-suppression.md)；对应[验证记录](../reviews/2026-11-09-source-suppression.md)「下一步」第 1、2 项。第 3、4 项（结果缓存清理依据、同 operation_id 冲突）不在本文范围。
 
 ## 当前实施修订（2026-11-09）
 
 以下实施约束优先于后文保留的历史候选方案。Q1/Q2 已确认；Q3 沿用无法证明则拒绝的兼容策略。Q5–Q7 中不能证明无写入就终止 unknown 的候选不可采用：d3d3125 已实测旧 cache 与新向量库混合恢复时，结果行不存在但 raw 仍存在。因此保留无法判定任务及现场，不据错误码或空结果将其改为 dead。范围变化必须重新预览确认。
+
+后续清扫的只读候选枚举已形成[研究方案](../research/inflight-candidate-inventory-2026-11-09.md)：计划前有界观察，恢复时验证签名锚点；已确认范围与仅规则命中分开，无归属任务只审计元数据，不读取未知项目正文。该方案尚未实现，也不提供 SDK 无副作用证明或取消授权。
 
 ### 先排空完整 worker，再进入治理独占
 
@@ -14,7 +16,7 @@
 2. claim 在线程内完成；取消 await 不会停止线程。因此 shield/join 的最小单元必须包含「claim 返回到注册全部 worker」，不能仅等待 claim 后丢弃其 IDs。共享 worker 集合从注册到执行、产出观察及续租收尾完成期间持续保存。
 3. 取消 quiesce 等待者不取消 worker；主循环退出也等待共享集合。不得等待 Drain 主任务，因为其维护回调会直接调用 Hub resume，存在自锁。
 4. Core 增加默认不启用的 claim-ready 回调，与原来源 claim 授权同时检查。启动恢复成功前只关闭 claim；不改变已领取任务中途的来源授权，否则已实测会产生维护型 unknown。
-5. Hub 锁顺序固定为 resume 锁（仅恢复路径）→ quiesce → 等 worker 完成 → `SdkAdmission.exclusive` → 重算范围、记录规则、清扫和治理。execute 的历史重试若需 resume，必须在取得 quiesce 之前完成。
+5. Hub 锁顺序固定为治理串行锁 → quiesce → 等 worker 完成 → `SdkAdmission.exclusive` → 重算范围、记录规则、清扫和治理。按 [ADR-0036](0036-governance-request-identity.md)，execute 与 resume 共用该串行锁；execute 的历史重试若需恢复，调用不重复取锁的内部恢复逻辑，并在取得 quiesce 之前完成。
 6. `/hub/v1/events` 的实际接纳进入共享 `SdkAdmission.operation`，并复用 `_joined_thread(ingest.accept)`，保证断开或取消请求后仍等待接纳线程结束；治理接口不进入共享准入。先排空 worker 再独占，已接纳的线程先结束，新接纳返回明确维护 503。
 
 该补丁先验证暂停与恢复合同；它本身不证明存量 unknown、旧队列恢复或同来源修订的清扫已完成。新增测试须运行真实 Drain 生命周期，覆盖线程内 claim 取消、等待者反复取消、run_one、产出观察未结束及主循环维护回调；既有 fixture 停止 drain 后直接调用 execute 的测试不能替代这些证据。

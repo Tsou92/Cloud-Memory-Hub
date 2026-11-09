@@ -109,7 +109,7 @@ Chroma 1.5.9 的 Rust HNSW 写入器预分配 data_level0.bin，未使用的槽�
 
 执行状态行被篡改、版本未知或文件不可读时，启动和健康检查失败，不会当作空抑制集。旧镜像（c0a14af 及以前）遇到任何治理意图即整库隔离，因此回退到旧镜像不会让被忘记的内容重新可读。
 
-管理接口 POST /hub/v1/governance/execute 仅管理员，必须带预览返回的 view_digest；范围在独占区内重算并比对，变化返回 409。可带 operation_id 重试，已记录的操作直接返回结果。
+管理接口 POST /hub/v1/governance/execute 仅管理员，必须把预览返回的 view_digest 作为 expected_view；范围在独占区内重算并比对，变化返回 409。可带 operation_id 重试；后续 [ADR-0036](0036-governance-request-identity.md) 要求核对完整请求指纹并重新读取实际状态，不能仅因 ID 已记录就返回成功。
 
 ## 分段交付与边界
 
@@ -118,3 +118,23 @@ Chroma 1.5.9 的 Rust HNSW 写入器预分配 data_level0.bin，未使用的槽�
 已经发送给 Agent 的上下文无法撤回；原 Agent 文件和用户自存副本不自动修改，遵守需求边界。多进程写入者由现有身份库事务串行化；SDK 独占区只覆盖本进程，执行期间不允许第二个 Hub 进程写同一数据目录（已有存储租约保证）。
 
 顺序自审，非独立同行审查。
+
+## 2026-11-09 恢复补充：已完成的忘记也必须重放
+
+独立合成实验已复现：保留新治理目录、恢复 forget 前的业务数据后，操作仍 completed 且服务 ready；Hub 对旧记忆返回 404，但 Chroma 的 fact/raw 状态恢复成 active/shadow。通过真实 Core Drain 和 SDK add 提交一条新事件，提炼输入的 history_context 再次含有已忘记的原文。模型与 supervisor 为受控替身，不能以 Hub 读取被挡住代替 SDK 内部输入验证。
+
+启动恢复应在同一治理锁、Drain 暂停和 SDK 独占区内，先通过全部作用域的未建模副本检查，再对 completed forget 重用原 `_suppress_sdk`，按原签名物理记录恢复 archived/is_latest=False；不新增意图、不改已确认范围、不删保留原文。目标已缺失可跳过，更新失败不能开放 ready。completed purge 保持既有删除重放，重复启动幂等。
+
+恢复写入只能作用于签名范围及对应项目。重放前应核对实际节点 ID 与 user_id；错误归属或损坏身份失败关闭，不把恢复来的其他项目记录修改为 archived。该补充只修复已有普通 SDK 节点的抑制重放，不宣称生产力侧所有内部输入或 ADR-0034 的旧队列已经覆盖。
+
+验收需保留原失败复现并验证：重开后 fact/raw 已归档、Hub 原文仍可主动查阅、真实后续提炼输入不含忘记正文、无关节点不变、重复启动无新意图、更新失败不就绪，以及错误项目归属拒绝。后续安装探针增加已完成 forget 的旧业务数据恢复。
+
+## 2026-11-09 生产力忘记的内部输入缺口
+
+另一个独立真实存储实验覆盖 working 与 coding：HTTP forget 返回 completed、Hub fact 读取被拒绝，但独立 CodingMemoryStore 中的 fact 仍 active；真实 WorkingFactReconciler 的候选读取及模型提示仍包含该 fact。仅替换模型响应以截获合成输入，无需恢复旧备份即可复现。原因是现有执行器跳过所有 Hub 保留前缀，而生产力记忆与索引并不都由主 Chroma 节点状态控制。
+
+在补齐独立存储、轨迹、编程链及内部提炼输入的抑制前，不允许将含 `cmhp:`、`cmht:`、`cmhc:`、`cmhv:` 的忘记范围报告完成。新请求在落计划/意图之前明确返回 `governance_forget_kind_unsupported`；已提交旧 planned 或 completed forget 的恢复遇到这些类型则保留现场、拒绝就绪，不重签或伪造旧状态。普通原文和输入快照 `cmhe:`、`cmhi:`、`cmhj:`、`cmhm:`、`cmhb:` 不因此误判为不支持。
+
+这项保护不等于 FR-10 的生产力忘记已实现，也不取消该需求；后续必须复用上游相应存储/状态合同，使实际模型输入和自动调用都受抑制，再解除保护。测试分开记录完整能力缺口与提前拒绝合同，不能用 Hub 404 或拒绝请求替代生产力忘记成功验收。
+
+保护检查必须使用完整关联闭包，并覆盖新执行、`_finish`、启动已提交计划及 completed 操作、已完成请求重试。ExecutionStore 的计划签名不等于日志意图已提交；孤立计划保留原丢弃与重验语义，不能因其包含生产力 ID 就永久隔离。已提交操作的种类检查全部通过后才进入实际存储修改。
