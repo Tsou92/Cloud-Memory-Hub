@@ -9,7 +9,7 @@ import asyncio
 import hmac
 import json
 import sqlite3
-from contextlib import asynccontextmanager, contextmanager, nullcontext
+from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
 from uuid import uuid4
 
 from hy_memory.data.vector_store_chroma import _run_in_vdb_pool
@@ -265,6 +265,7 @@ class GovernanceExecutor:
         self._replayed = False
         self._resume_lock = asyncio.Lock()
         self.authority = authority
+        self.authority.require_runtime_recovery()
         self.bridge = bridge
         self.previews = previews
         self.admission = admission
@@ -274,20 +275,85 @@ class GovernanceExecutor:
         # does not need a journal migration.
         self.actor_id = authority.access.instance_id
 
+    def _recovery_failed(self):
+        self.authority.require_runtime_recovery()
+        self.ready = False
+        self._replayed = False
+
+    @contextmanager
+    def _effects(self):
+        """A committed recovery or persistence attempt must fail before unlock."""
+        try:
+            yield
+        except BaseException:
+            self._recovery_failed()
+            raise
+
     @asynccontextmanager
-    async def _exclusive(self):
+    async def _maintenance_resource(self, resource):
+        # Distinguish a rejected request in the body from a failed enter/exit.
+        # In particular, teardown can fail while unwinding a harmless 409.
+        try:
+            await resource.__aenter__()
+        except BaseException:
+            self._recovery_failed()
+            raise
+        try:
+            yield
+        except BaseException as error:
+            try:
+                await resource.__aexit__(type(error), error, error.__traceback__)
+            except BaseException:
+                self._recovery_failed()
+                raise
+            # A maintenance resource may clean up the body failure, but cannot
+            # turn a cancelled/failed governance attempt into successful work.
+            raise
+        else:
+            try:
+                await resource.__aexit__(None, None, None)
+            except BaseException:
+                self._recovery_failed()
+                raise
+
+    @asynccontextmanager
+    async def _workers_exclusive(self):
         # Workers need shared SDK admission through output observation. Drain
-        # their whole lifetime before closing SDK and intake admission.
-        async with self.drain().quiesce() if self.drain is not None else nullcontext():
-            async with self.admission.exclusive():
+        # their whole lifetime before closing SDK and intake admission. This
+        # boundary deliberately does not initialize a cold SDK or its stores.
+        was_ready, self.ready = self.ready, False
+        try:
+            with ExitStack() as runtime:
+                with self._effects():
+                    drain = self.drain().quiesce() if self.drain is not None else nullcontext()
+                async with self._maintenance_resource(drain):
+                    with self._effects():
+                        admission = self.admission.exclusive()
+                    async with self._maintenance_resource(admission):
+                        # Admission is empty now. Keep SDK permits closed even
+                        # if an exit releases its own lock before awaiting I/O.
+                        runtime.enter_context(self.authority.runtime_maintenance())
+                        yield
+        finally:
+            self.ready = was_ready and not self.authority.runtime_recovery_required
+
+    @asynccontextmanager
+    async def _exclusive(self, *, recovering=False):
+        async with self._workers_exclusive():
+            with self._effects():
                 bridge = self.bridge()
-                # Creating a cold SDK can itself take a native Chroma write
-                # lock. Preserve the existing read-only corruption preflight.
+                # Preserve the read-only check before cold SDK creation.
                 await require_sdk_preflight(bridge)
-                # SDK requests can return while diagnostics still own native
-                # I/O. Keep enqueue paused until maintenance has finished.
-                async with bridge.quiesce_diagnostics():
+                diagnostics = bridge.quiesce_diagnostics()
+            async with self._maintenance_resource(diagnostics):
+                if recovering:
+                    self.authority.require_runtime_recovery()
+                try:
                     yield
+                except BaseException as error:
+                    if recovering or isinstance(error, asyncio.CancelledError):
+                        self._recovery_failed()
+                    raise
 
     async def run(self, request):
         try:
@@ -449,7 +515,7 @@ class GovernanceExecutor:
             if self.purger is not None:
                 self._replayed = True
             return
-        async with self._exclusive():
+        async with self._exclusive(recovering=True):
             operations = await _joined_thread(self.store.operations)
             # Also check completed forgets and entity-only restores before
             # deciding whether any modeled purge target is still present.
@@ -485,8 +551,27 @@ class GovernanceExecutor:
         # Core starts its maintenance loop inside its lifespan. That loop can
         # reach resume before the Hub's startup resume has completed.
         async with self._resume_lock:
+            await self._resume_verified()
+
+    async def _resume_verified(self):
+        self.ready = False
+        if self.authority.runtime_recovery_required:
+            self._replayed = False
+        with self._effects():
             await self._resume()
-            self.ready = True
+            # Neither an empty execution DB nor completed rows alone prove that
+            # the actual journal has no missing or still-pending execution.
+            if self.authority.runtime_recovery_required:
+                # Keep permits closed even if the verifier clears its Event
+                # before a cancelled awaiter has joined and re-faulted.
+                async with self._workers_exclusive():
+                    with self._effects():
+                        await _joined_thread(self.authority.finish_runtime_recovery)
+            else:
+                # Routine healthy checks may overlap active workers and reads.
+                # They cannot clear a fault, so need no exclusive permit fence.
+                await _joined_thread(self.authority.require_writes_ready)
+        self.ready = True
 
     async def _resume(self):
         planned = await _joined_thread(self.store.operations)
@@ -494,7 +579,7 @@ class GovernanceExecutor:
             # Orphan plans never became deletion authority. Remove them before
             # observing SDK stores; an unsupported old scope cannot trap an
             # uncommitted plan in startup forever.
-            async with self._exclusive():
+            async with self._exclusive(recovering=True):
                 pending = {
                     intent.operation_id
                     for intent in await _joined_thread(
@@ -508,7 +593,7 @@ class GovernanceExecutor:
         planned = await _joined_thread(self.store.operations)
         if all(state == "completed" for state, _ in planned.values()):
             return
-        async with self._exclusive():
+        async with self._exclusive(recovering=True):
             pending = {
                 intent.operation_id
                 for intent in await _joined_thread(
@@ -539,22 +624,24 @@ class GovernanceExecutor:
                 if state != "completed":
                     # The governance lock is already held. Resume may discard
                     # an orphan plan, so only its fresh durable state is truth.
-                    await self._resume()
+                    await self._resume_verified()
                     known = (await _joined_thread(self.store.operations)).get(request.operation_id)
                 if known is not None:
                     state, intent = known
                     require_same_request(self.authority.journal, intent, request, actor_id)
                     if state != "completed":
                         raise GovernanceError("governance_execution_pending")
-                    records = await _joined_thread(self.store.records, intent.operation_id)
-                    if intent.action == "forget":
-                        require_forget_supported(records)
+                    with self._effects():
+                        records = await _joined_thread(self.store.records, intent.operation_id)
+                        if intent.action == "forget":
+                            require_forget_supported(records)
                     async with self._exclusive():
-                        await require_modeled_scope(
-                            self.bridge(),
-                            f"cmh:{self.authority.access.instance_id}:{intent.scope_id}",
-                        )
-                        await self._replay_completed(intent, records)
+                        with self._effects():
+                            await require_modeled_scope(
+                                self.bridge(),
+                                f"cmh:{self.authority.access.instance_id}:{intent.scope_id}",
+                            )
+                            await self._replay_completed(intent, records)
                     return {
                         "operation_id": intent.operation_id,
                         "scope_id": intent.scope_id,
@@ -622,9 +709,10 @@ class GovernanceExecutor:
                 + rules,
             )
             # Order: plan (IDs) -> journal intent -> SDK state -> completed.
-            await _joined_thread(self.store.plan, intent, records)
-            checkpoint = await _joined_thread(self.authority.append, intent)
-            await self._finish(intent, records, contents)
+            with self._effects():
+                await _joined_thread(self.store.plan, intent, records)
+                checkpoint = await _joined_thread(self.authority.append, intent)
+                await self._finish(intent, records, contents)
         purge = request.action == "purge"
         return {
             "operation_id": intent.operation_id,
