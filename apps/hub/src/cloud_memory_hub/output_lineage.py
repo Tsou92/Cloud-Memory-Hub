@@ -5,6 +5,7 @@ import json
 import logging
 from dataclasses import replace
 from importlib.metadata import version
+from itertools import pairwise
 
 from hy_memory.coding.record_origin import verified_origin
 from one_memory.hy_memory_bridge import _joined_thread
@@ -341,6 +342,7 @@ class OutputLineage:
         if not namespace.startswith(prefix):
             raise GovernanceError("governance_scope_mismatch")
         records = dict(nodes)
+        revisions = {}
         used_bytes = sum(len(node.content.encode()) for node in records.values())
         used_edges = sum(len(node.parents) + len(node.versions) for node in records.values())
         with self.ingest._database() as db:
@@ -383,6 +385,9 @@ class OutputLineage:
                     "accepted_original",
                     "retained",
                 )
+                revisions.setdefault(
+                    (event.source_id, event.conversation_id, event.record_id), []
+                ).append((event.revision, original))
                 trace = trace_id(row["request_id"])
                 if trace in records:
                     records[trace] = replace(records[trace], parents=frozenset({original}))
@@ -419,6 +424,15 @@ class OutputLineage:
                         raise GovernanceError("governance_reference_unresolved")
                     node = records[identity]
                     records[identity] = replace(node, parents=node.parents | {original} | parents)
+            # plan_relations treats versions as undirected. One edge per
+            # adjacent revision connects the entire history without a clique.
+            for versions in revisions.values():
+                for (_, earlier), (_, later) in pairwise(sorted(versions)):
+                    used_edges += 1
+                    if used_edges > MAX_EDGES:
+                        raise GovernanceError("governance_scan_limit")
+                    node = records[later]
+                    records[later] = replace(node, versions=node.versions | {earlier})
             graph = ReconcileGraph(
                 db,
                 self.ingest.access.instance_id,

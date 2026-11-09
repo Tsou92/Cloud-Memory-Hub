@@ -684,7 +684,7 @@ async def assert_inflight_is_not_extracted(app, monkeypatch, job):
 def test_inflight_pending_job_survives_completed_governance(
     tmp_path, monkeypatch, action, revision
 ):
-    """V1/G-A: exact original and a same-source, out-of-scope revision."""
+    """V1/G-A: original and its previewed revision still require queue cleanup."""
     config = config_for(tmp_path)
 
     async def scenario():
@@ -707,13 +707,13 @@ def test_inflight_pending_job_survives_completed_governance(
             view = await web.post(PREVIEW, headers=admin, json=body)
             assert view.status_code == 200, view.text
             if revision == 2:
-                assert "cmhe:" + job not in {item["record_id"] for item in view.json()["items"]}
+                assert "cmhe:" + job in {item["record_id"] for item in view.json()["items"]}
             reply = await web.post(
                 EXECUTE, headers=admin, json={**body, "expected_view": view.json()["view_digest"]}
             )
             assert reply.status_code == 200, reply.text
             assert reply.json()["state"] == "completed"
-            if action == "purge" and revision == 1:
+            if action == "purge":
                 assert (
                     await read(web, headers, event["scope_id"], "history", "cmhe:" + job)
                 ).status_code == 404
