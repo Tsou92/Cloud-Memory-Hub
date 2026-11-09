@@ -29,6 +29,8 @@ def test_physical_file_repair_survives_interruption_and_log_only_restore():
         "signed_multi_repair_recovery": True,
         "legacy_parent_authority_unchanged": True,
         "batch_interruption_and_restore": True,
+        "repair_aware_execution_binding": True,
+        "real_terminal_review_and_signed_retry": True,
         "whole_purge_completed": False,
         "external_models": False,
     }
