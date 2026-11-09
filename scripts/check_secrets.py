@@ -8,10 +8,13 @@ from pathlib import Path
 
 from scripts.check_repository import REPOSITORY, path_problem, source_files
 
-# Reviewed public Git commits, including the historical baseline in documentation.
-PUBLIC_UPSTREAM_COMMITS = (
+# Reviewed public Git commits and reproducible test-file inventory checksums.
+# The latter are the before/after filename lists in upstream patch 0019.
+PUBLIC_UPSTREAM_FINGERPRINTS = (
     "0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766",  # pragma: allowlist secret
     "b7d9f0e0f417eae30b192882f848b432484c20a6",  # pragma: allowlist secret
+    "f69d3f33df5277febb09557d5bce7adb7d8719ed47e48a71f852e3e4ecf8fd74",  # pragma: allowlist secret
+    "cc8c8282371eb13bd4e2a27be388d967e63ad7c58a0226bae3ec8a96b0c2a427",  # pragma: allowlist secret
 )
 
 
@@ -53,7 +56,7 @@ def scan_paths(root: Path, paths: list[Path]) -> list[str]:
                     "--no-verify",
                     "--all-files",
                     "--exclude-secrets",
-                    "^(?:" + "|".join(PUBLIC_UPSTREAM_COMMITS) + ")$",
+                    "^(?:" + "|".join(PUBLIC_UPSTREAM_FINGERPRINTS) + ")$",
                     "--",
                     *[str(root / path) for path in batch],
                 ],

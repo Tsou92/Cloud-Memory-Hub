@@ -94,6 +94,16 @@
       "path": "patches/0018-durable-drain-quiescence.patch",
       "scope": "optional_claim_readiness_and_complete_worker_quiescence",
       "digest": "sha256:e8f2d10816876fbcbe8e849b82c82c339a7852fda25b57ed794df0381cd66c7f"
+    },
+    {
+      "path": "patches/0019-sdk-generation-permits.patch",
+      "scope": "optional_durable_sdk_generation_gate_with_exact_input_contracts",
+      "digest": "sha256:98d080e48212a3b91a4780853c8494772f2550d77ec01b7e9a3ae76de1a5a11e"
+    },
+    {
+      "path": "patches/0020-trusted-governance-cancel.patch",
+      "scope": "internal_governance_compare_and_swap_cancel_and_targeted_reap",
+      "digest": "sha256:2be0d3fc878d082632d1f1252c0c756e27578c5b01f1182dd625b18803c6c06d"
     }
   ]
 }

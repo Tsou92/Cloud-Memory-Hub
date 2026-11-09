@@ -1,0 +1,561 @@
+diff --git a/memhub/apps/core/src/one_memory/memory_server/durable_queue.py b/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
+index da8f637..1459385 100644
+--- a/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
++++ b/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
+@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Collection
+ from dataclasses import dataclass
+ from datetime import UTC, datetime, timedelta
+ from pathlib import Path
+-from typing import Any
++from typing import Any, Literal
+ from uuid import uuid4
+
+ from one_memory.background_work import in_the_background
+@@ -381,6 +381,37 @@ def _reaped_payload(digest: str) -> str:
+     return json.dumps({REAPED_PAYLOAD_MARKER: digest}, sort_keys=True)
+
+
++def _require_governance_identity(job_id: str, request_id: str, digest: str) -> None:
++    if (
++        not isinstance(job_id, str)
++        or not job_id
++        or not isinstance(request_id, str)
++        or not request_id
++        or not isinstance(digest, str)
++        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
++    ):
++        raise ValueError("governance_queue_identity_invalid")
++
++
++def _strict_reaped_digest(payload: str) -> str | None:
++    """A sole native marker, not duplicate JSON keys or a marker embedded in input."""
++    try:
++        pairs = json.loads(payload, object_pairs_hook=lambda entries: entries)
++    except (ValueError, TypeError, RecursionError):
++        return None
++    if (
++        isinstance(pairs, list)
++        and len(pairs) == 1
++        and isinstance(pairs[0], tuple)
++        and len(pairs[0]) == 2
++        and pairs[0][0] == REAPED_PAYLOAD_MARKER
++        and isinstance(pairs[0][1], str)
++        and re.fullmatch(r"[0-9a-f]{64}", pairs[0][1]) is not None
++    ):
++        return pairs[0][1]
++    return None
++
++
+ def _matches_stored_payload(stored: str, payload: str) -> bool:
+     """Whether a stored payload matches a new submission's canonical payload.
+
+@@ -1602,6 +1633,143 @@ class DurableWriteQueue:
+             )
+         return state
+
++    def cancel_unpermitted_for_governance(
++        self,
++        job_id: str,
++        *,
++        expected_request_id: str,
++        expected_payload_digest: str,
++        expected_updated_at: str,
++        expected_state: str,
++        expected_hy_invoked: int,
++    ) -> Literal["cancelled", "already_cancelled", "terminal", "conflict", "missing"]:
++        """CAS for a trusted coordinator's independently proven unpermitted write.
++
++        The caller must hold invocation exclusion and validate a signed governance
++        intent plus durable, rollback-protected proof that this exact request never
++        received SDK permission. State, hy_invoked, or an absent SDK result cannot
++        supply that proof. This internal method adds no HTTP cancellation route.
++
++        The digest covers the exact UTF-8 payload_json string, not reserialized
++        JSON. Every supplied field must still match, even for a terminal row.
++        Ordinary settle/resolve_unknown retain their existing protections.
++        """
++        from one_memory.memory_server.contracts import WriteJobState as JobState
++        from one_memory.memory_server.job_state import JobEvent, next_state
++
++        _require_governance_identity(job_id, expected_request_id, expected_payload_digest)
++        eligible = {PENDING, RUNNING, UNKNOWN, *PARKED_STATES}
++        if (
++            not isinstance(expected_updated_at, str)
++            or not expected_updated_at
++            or not isinstance(expected_state, str)
++            or expected_state not in eligible | _TERMINAL_WRITE_STATES
++            or type(expected_hy_invoked) is not int
++            or expected_hy_invoked not in (0, 1)
++        ):
++            raise ValueError("governance_queue_snapshot_invalid")
++        with (
++            main_database(self.database_path).write(create=False, row_factory=sqlite3.Row) as db,
++            db,
++        ):
++            # Serialize the read and transition against other SQLite processes,
++            # not just against this process's writer pool.
++            db.execute("BEGIN IMMEDIATE")
++            row = db.execute(
++                "SELECT idempotency_key,payload_json,updated_at,state,hy_invoked "
++                "FROM memory_write_jobs WHERE job_id=?",
++                (job_id,),
++            ).fetchone()
++            if row is None:
++                return "missing"
++            if (
++                row["idempotency_key"] != expected_request_id
++                or not isinstance(row["payload_json"], str)
++                or _payload_digest(row["payload_json"]) != expected_payload_digest
++                or row["updated_at"] != expected_updated_at
++                or row["state"] != expected_state
++                or type(row["hy_invoked"]) is not int
++                or row["hy_invoked"] != expected_hy_invoked
++            ):
++                return "conflict"
++            if expected_state == CANCELLED:
++                return "already_cancelled"
++            if expected_state in _TERMINAL_WRITE_STATES:
++                return "terminal"
++            # Parked writes are pending intents outside hot admission; the shared
++            # state enum has no parked variants. Preserve their actual CAS state.
++            state = (
++                JobState.PENDING if expected_state in PARKED_STATES else JobState(expected_state)
++            )
++            target = next_state(state, JobEvent.GOVERNANCE_CANCEL_UNPERMITTED)
++            changed = db.execute(
++                "UPDATE memory_write_jobs SET state=?,lease_owner=NULL,lease_expires_at=NULL,"
++                "last_error='governance_source_suppressed',updated_at=? "
++                "WHERE job_id=? AND idempotency_key=? AND payload_json=? "
++                "AND updated_at=? AND state=? AND hy_invoked=?",
++                (
++                    target.value,
++                    datetime.now(UTC).isoformat(),
++                    job_id,
++                    expected_request_id,
++                    row["payload_json"],
++                    expected_updated_at,
++                    expected_state,
++                    expected_hy_invoked,
++                ),
++            ).rowcount
++            return "cancelled" if changed == 1 else "conflict"
++
++    def clear_terminal_payload_for_governance(
++        self,
++        job_id: str,
++        *,
++        expected_request_id: str,
++        expected_payload_digest: str,
++    ) -> Literal["reaped", "already_reaped", "not_terminal", "conflict", "missing"]:
++        """Reap one verified terminal input; never scan unrelated queue payloads.
++
++        The trusted coordinator must finish its output-coverage proof before this
++        call. An exact native reaped marker is idempotent for the original digest;
++        other rows must match their raw stored UTF-8 bytes before modification.
++        """
++        _require_governance_identity(job_id, expected_request_id, expected_payload_digest)
++        with (
++            main_database(self.database_path).write(create=False, row_factory=sqlite3.Row) as db,
++            db,
++        ):
++            db.execute("BEGIN IMMEDIATE")
++            row = db.execute(
++                "SELECT idempotency_key,state,payload_json FROM memory_write_jobs WHERE job_id=?",
++                (job_id,),
++            ).fetchone()
++            if row is None:
++                return "missing"
++            if row["idempotency_key"] != expected_request_id:
++                return "conflict"
++            if row["state"] not in _TERMINAL_WRITE_STATES:
++                return "not_terminal"
++            payload = row["payload_json"]
++            if not isinstance(payload, str):
++                return "conflict"
++            reaped = _strict_reaped_digest(payload)
++            if reaped is not None:
++                return "already_reaped" if reaped == expected_payload_digest else "conflict"
++            if _payload_digest(payload) != expected_payload_digest:
++                return "conflict"
++            changed = db.execute(
++                "UPDATE memory_write_jobs SET payload_json=? WHERE job_id=? "
++                "AND idempotency_key=? AND state=? AND payload_json=?",
++                (
++                    _reaped_payload(expected_payload_digest),
++                    job_id,
++                    expected_request_id,
++                    row["state"],
++                    payload,
++                ),
++            ).rowcount
++            return "reaped" if changed == 1 else "conflict"
++
+     def clear_terminal_payloads(self, *, limit: int = 512) -> int:
+         """Replace terminal raw inputs with an intent digest."""
+         if type(limit) is not int or limit < 1:
+diff --git a/memhub/apps/core/src/one_memory/memory_server/job_state.py b/memhub/apps/core/src/one_memory/memory_server/job_state.py
+index e318ee5..edf8e29 100644
+--- a/memhub/apps/core/src/one_memory/memory_server/job_state.py
++++ b/memhub/apps/core/src/one_memory/memory_server/job_state.py
+@@ -7,8 +7,10 @@ the SDK has no idempotency key, the two tempting resolutions are both wrong:
+ - retry blindly -> the user gets two copies of the same memory;
+ - drop it      -> the memory is lost silently.
+
+-So `unknown` is non-terminal and must be resolved by inquiry (A0-03 found the
+-SDK can look a result up by request_id), never by guessing.
++So `unknown` is non-terminal and normally must be resolved by inquiry (A0-03
++found the SDK can look a result up by request_id), never by guessing. The sole
++governance exception requires independent durable proof that SDK permission
++was never granted; an absent result or the queue's own flag is not that proof.
+
+ The enum itself is re-exported from `contracts` rather than redeclared. A
+ second copy of the same enum would be exactly the "three adjacent state
+@@ -33,6 +35,9 @@ class JobEvent(StrEnum):
+     RESOLVED = "resolved"
+     RETRY = "retry"
+     CANCEL = "cancel"
++    #: A trusted governance caller proved this request never had SDK permission.
++    #: Not an inquiry result, ordinary cancellation, or a public HTTP event.
++    GOVERNANCE_CANCEL_UNPERMITTED = "governance_cancel_unpermitted"
+     #: Retries exhausted, or an inquiry found the job unrecoverable.
+     GIVE_UP = "give_up"
+
+@@ -71,7 +76,10 @@ def _transitions() -> dict[tuple[JobState, JobEvent], JobState]:
+         (JobState.RUNNING, JobEvent.FAIL): JobState.FAILED,
+         (JobState.RUNNING, JobEvent.INDETERMINATE): JobState.UNKNOWN,
+         (JobState.RUNNING, JobEvent.CANCEL): JobState.CANCELLED,
+-        # An unknown may be re-attested either way, but only by an inquiry.
++        (JobState.PENDING, JobEvent.GOVERNANCE_CANCEL_UNPERMITTED): JobState.CANCELLED,
++        (JobState.RUNNING, JobEvent.GOVERNANCE_CANCEL_UNPERMITTED): JobState.CANCELLED,
++        (JobState.UNKNOWN, JobEvent.GOVERNANCE_CANCEL_UNPERMITTED): JobState.CANCELLED,
++        # Ordinary outcome resolution still requires an inquiry.
+         (JobState.UNKNOWN, JobEvent.RESOLVED): JobState.COMPLETED,
+         (JobState.UNKNOWN, JobEvent.FAIL): JobState.FAILED,
+         (JobState.UNKNOWN, JobEvent.GIVE_UP): JobState.DEAD,
+diff --git a/memhub/apps/core/tests/test_memory_server_durable_queue.py b/memhub/apps/core/tests/test_memory_server_durable_queue.py
+index 0a8f075..6042a74 100644
+--- a/memhub/apps/core/tests/test_memory_server_durable_queue.py
++++ b/memhub/apps/core/tests/test_memory_server_durable_queue.py
+@@ -14,7 +14,6 @@ from datetime import UTC, datetime, timedelta
+ from hashlib import sha256
+
+ import pytest
+-
+ from one_memory.database_access import main_database
+ from one_memory.hy_memory_bridge import HyMemoryBridgeError
+ from one_memory.memory_server.contracts import BatchIdentity, WriteRequest
+@@ -24,6 +23,7 @@ from one_memory.memory_server.durable_queue import (
+     DEAD,
+     FAILED,
+     PENDING,
++    REAPED_PAYLOAD_MARKER,
+     RUNNING,
+     UNKNOWN,
+     WAITING_FOR_MODEL,
+@@ -33,6 +33,12 @@ from one_memory.memory_server.durable_queue import (
+     evidence_for_request,
+     execute_job,
+ )
++from one_memory.memory_server.job_state import (
++    IllegalTransition,
++    JobEvent,
++    JobState,
++    next_state,
++)
+
+
+ def _request(
+@@ -5135,3 +5141,293 @@ def test_equal_event_time_uses_queue_sequence_inside_one_session(tmp_path) -> No
+         owner="equal-owner",
+     )
+     assert drain.claim(limit=10) == (second.job_id,)
++
++
++# Trusted governance APIs require independent signed SDK admission proof.
++_GOVERNANCE_LIVE_STATES = (PENDING, RUNNING, UNKNOWN, WAITING_FOR_MODEL, WAITING_FOR_PERMISSION)
++_GOVERNANCE_TERMINAL_STATES = (COMPLETED, FAILED, DEAD, CANCELLED)
++
++
++def _governance_request(key="synthetic-request"):
++    return WriteRequest(
++        internal_session_id="synthetic-session",
++        batch_identity=BatchIdentity(
++            internal_session_id="synthetic-session", first_round=1, last_round=1
++        ),
++        evidence_ids=["synthetic-evidence-中文"],
++        idempotency_key=key,
++        source_id="synthetic-source",
++    )
++
++
++def _governance_rows(queue):
++    with sqlite3.connect(queue.database_path) as db:
++        db.row_factory = sqlite3.Row
++        return {
++            row["job_id"]: dict(row)
++            for row in db.execute("SELECT * FROM memory_write_jobs ORDER BY job_id")
++        }
++
++
++def _governance_seed(tmp_path, state=PENDING, invoked=0):
++    queue = DurableWriteQueue(tmp_path / "synthetic.sqlite3")
++    job = queue.submit(_governance_request())
++    with sqlite3.connect(queue.database_path) as db:
++        db.execute(
++            "UPDATE memory_write_jobs SET state=?,hy_invoked=?,updated_at=?,"
++            "lease_owner=?,lease_expires_at=?,last_error=?,"
++            "sdk_raw_ids_json=?,sdk_memory_ids_json=? WHERE job_id=?",
++            (
++                state,
++                invoked,
++                "2020-01-01T00:00:00+00:00",
++                "synthetic-owner",
++                "2099-01-01T00:00:00+00:00",
++                "synthetic-old-error",
++                '["synthetic-raw"]',
++                '["synthetic-memory"]',
++                job.job_id,
++            ),
++        )
++    return queue, job.job_id
++
++
++def _governance_digest(payload):
++    return sha256(payload.encode("utf-8")).hexdigest()
++
++
++def _governance_snapshot(row):
++    return {
++        "expected_request_id": row["idempotency_key"],
++        "expected_payload_digest": _governance_digest(row["payload_json"]),
++        "expected_updated_at": row["updated_at"],
++        "expected_state": row["state"],
++        "expected_hy_invoked": row["hy_invoked"],
++    }
++
++
++def _governance_reap_snapshot(row):
++    return {
++        "expected_request_id": row["idempotency_key"],
++        "expected_payload_digest": _governance_digest(row["payload_json"]),
++    }
++
++
++@pytest.mark.parametrize("state", _GOVERNANCE_LIVE_STATES)
++@pytest.mark.parametrize("invoked", (0, 1))
++def test_governance_trusted_cancel_preserves_every_other_field_and_job(tmp_path, state, invoked):
++    queue, job_id = _governance_seed(tmp_path, state, invoked)
++    queue.submit(_governance_request("synthetic-unrelated"))
++    before = _governance_rows(queue)
++    assert (
++        queue.cancel_unpermitted_for_governance(job_id, **_governance_snapshot(before[job_id]))
++        == "cancelled"
++    )
++    after = _governance_rows(queue)
++    changed = after[job_id]
++    assert changed["state"] == CANCELLED
++    assert changed["lease_owner"] is None
++    assert changed["lease_expires_at"] is None
++    assert changed["last_error"] == "governance_source_suppressed"
++    assert changed["updated_at"] > before[job_id]["updated_at"]
++    assert changed["hy_invoked"] == invoked
++    for field in ("state", "lease_owner", "lease_expires_at", "last_error", "updated_at"):
++        changed[field] = before[job_id][field]
++    assert after == before
++
++
++@pytest.mark.parametrize(
++    ("field", "value"),
++    [
++        ("expected_request_id", "synthetic-other-request"),
++        ("expected_payload_digest", "0" * 64),
++        ("expected_updated_at", "2020-01-02T00:00:00+00:00"),
++        ("expected_state", RUNNING),
++        ("expected_hy_invoked", 1),
++    ],
++)
++def test_governance_cancel_snapshot_conflict_preserves_evidence(tmp_path, field, value):
++    queue, job_id = _governance_seed(tmp_path)
++    before = _governance_rows(queue)
++    expected = _governance_snapshot(before[job_id]) | {field: value}
++    assert queue.cancel_unpermitted_for_governance(job_id, **expected) == "conflict"
++    assert _governance_rows(queue) == before
++
++
++def test_governance_cancel_requires_exact_payload_bytes_not_equivalent_json(tmp_path):
++    queue, job_id = _governance_seed(tmp_path)
++    before = _governance_rows(queue)
++    expected = _governance_snapshot(before[job_id])
++    alternative = json.dumps(json.loads(before[job_id]["payload_json"]), indent=2)
++    assert alternative != before[job_id]["payload_json"]
++    expected["expected_payload_digest"] = _governance_digest(alternative)
++    assert queue.cancel_unpermitted_for_governance(job_id, **expected) == "conflict"
++    assert _governance_rows(queue) == before
++
++
++def test_governance_unknown_stays_protected_from_ordinary_settle_and_cancel(tmp_path):
++    queue, job_id = _governance_seed(tmp_path, UNKNOWN, 1)
++    before = _governance_rows(queue)
++    queue.settle(job_id, state=CANCELLED, hy_invoked=False)
++    assert _governance_rows(queue) == before
++    with pytest.raises(IllegalTransition):
++        next_state(JobState.UNKNOWN, JobEvent.CANCEL)
++    assert (
++        next_state(JobState.UNKNOWN, JobEvent.GOVERNANCE_CANCEL_UNPERMITTED) == JobState.CANCELLED
++    )
++    assert (
++        queue.cancel_unpermitted_for_governance(job_id, **_governance_snapshot(before[job_id]))
++        == "cancelled"
++    )
++    assert _governance_rows(queue)[job_id]["hy_invoked"] == 1
++
++
++@pytest.mark.parametrize("state", _GOVERNANCE_TERMINAL_STATES)
++def test_governance_cancel_never_rewrites_matching_terminal_rows(tmp_path, state):
++    queue, job_id = _governance_seed(tmp_path, state, 1)
++    before = _governance_rows(queue)
++    expected = "already_cancelled" if state == CANCELLED else "terminal"
++    assert (
++        queue.cancel_unpermitted_for_governance(job_id, **_governance_snapshot(before[job_id]))
++        == expected
++    )
++    assert _governance_rows(queue) == before
++
++
++def test_governance_cancel_retries_must_reread_and_cannot_be_readmitted(tmp_path):
++    queue, job_id = _governance_seed(tmp_path)
++    expected = _governance_snapshot(_governance_rows(queue)[job_id])
++    assert queue.cancel_unpermitted_for_governance(job_id, **expected) == "cancelled"
++    cancelled = _governance_rows(queue)
++    assert queue.cancel_unpermitted_for_governance(job_id, **expected) == "conflict"
++    assert (
++        queue.cancel_unpermitted_for_governance(job_id, **_governance_snapshot(cancelled[job_id]))
++        == "already_cancelled"
++    )
++    assert queue.readmit_cancelled_permission_confirmed(job_id, _governance_request()) == 0
++    queue.settle(job_id, state=COMPLETED, hy_invoked=True)
++    assert _governance_rows(queue) == cancelled
++
++
++def test_governance_concurrent_identical_snapshots_have_one_winner(tmp_path):
++    queue, job_id = _governance_seed(tmp_path, UNKNOWN, 1)
++    expected = _governance_snapshot(_governance_rows(queue)[job_id])
++    gate = threading.Barrier(2)
++
++    def cancel():
++        gate.wait(timeout=5)
++        return queue.cancel_unpermitted_for_governance(job_id, **expected)
++
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        outcomes = list(pool.map(lambda _: cancel(), range(2)))
++    assert sorted(outcomes) == ["cancelled", "conflict"]
++    assert _governance_rows(queue)[job_id]["hy_invoked"] == 1
++
++
++@pytest.mark.parametrize("state", _GOVERNANCE_TERMINAL_STATES)
++def test_governance_targeted_reap_preserves_other_fields_and_other_terminal_payloads(
++    tmp_path, state
++):
++    queue, job_id = _governance_seed(tmp_path, state, 1)
++    unrelated = queue.submit(_governance_request("synthetic-unrelated"))
++    queue.settle(unrelated.job_id, state=COMPLETED)
++    before = _governance_rows(queue)
++    expected = _governance_reap_snapshot(before[job_id])
++    assert queue.clear_terminal_payload_for_governance(job_id, **expected) == "reaped"
++    after = _governance_rows(queue)
++    assert json.loads(after[job_id]["payload_json"]) == {
++        REAPED_PAYLOAD_MARKER: expected["expected_payload_digest"]
++    }
++    assert queue.clear_terminal_payload_for_governance(job_id, **expected) == "already_reaped"
++    assert _governance_rows(queue) == after
++    after[job_id]["payload_json"] = before[job_id]["payload_json"]
++    assert after == before
++
++
++@pytest.mark.parametrize("state", _GOVERNANCE_LIVE_STATES)
++def test_governance_targeted_reap_refuses_live_and_unknown_jobs(tmp_path, state):
++    queue, job_id = _governance_seed(tmp_path, state, 1)
++    before = _governance_rows(queue)
++    assert (
++        queue.clear_terminal_payload_for_governance(
++            job_id, **_governance_reap_snapshot(before[job_id])
++        )
++        == "not_terminal"
++    )
++    assert _governance_rows(queue) == before
++
++
++@pytest.mark.parametrize("field", ("expected_request_id", "expected_payload_digest"))
++def test_governance_targeted_reap_cas_conflict_preserves_payload(tmp_path, field):
++    queue, job_id = _governance_seed(tmp_path, CANCELLED)
++    before = _governance_rows(queue)
++    expected = _governance_reap_snapshot(before[job_id])
++    expected[field] = "0" * 64 if field == "expected_payload_digest" else "synthetic-wrong"
++    assert queue.clear_terminal_payload_for_governance(job_id, **expected) == "conflict"
++    assert _governance_rows(queue) == before
++
++
++def test_governance_native_maintenance_marker_is_idempotent(tmp_path):
++    queue, job_id = _governance_seed(tmp_path, CANCELLED)
++    expected = _governance_reap_snapshot(_governance_rows(queue)[job_id])
++    assert queue.clear_terminal_payloads() == 1
++    before = _governance_rows(queue)
++    assert queue.clear_terminal_payload_for_governance(job_id, **expected) == "already_reaped"
++    assert _governance_rows(queue) == before
++
++
++@pytest.mark.parametrize("shape", ("extra", "duplicate", "array", "different_digest"))
++def test_governance_only_strict_matching_marker_can_claim_prior_cleanup(tmp_path, shape):
++    queue, job_id = _governance_seed(tmp_path, CANCELLED)
++    expected = _governance_reap_snapshot(_governance_rows(queue)[job_id])
++    marker = json.dumps(REAPED_PAYLOAD_MARKER)
++    value = json.dumps(expected["expected_payload_digest"])
++    payload = {
++        "extra": "{" + marker + ":" + value + ',"extra":"synthetic"}',
++        "duplicate": "{" + marker + ":" + value + "," + marker + ":" + value + "}",
++        "array": "[[" + marker + "," + value + "]]",
++        "different_digest": json.dumps({REAPED_PAYLOAD_MARKER: "0" * 64}),
++    }[shape]
++    with sqlite3.connect(queue.database_path) as db:
++        db.execute("UPDATE memory_write_jobs SET payload_json=? WHERE job_id=?", (payload, job_id))
++    before = _governance_rows(queue)
++    assert queue.clear_terminal_payload_for_governance(job_id, **expected) == "conflict"
++    assert _governance_rows(queue) == before
++
++
++def test_governance_missing_rows_are_not_created(tmp_path):
++    queue, job_id = _governance_seed(tmp_path)
++    before = _governance_rows(queue)
++    assert (
++        queue.cancel_unpermitted_for_governance(
++            "synthetic-missing", **_governance_snapshot(before[job_id])
++        )
++        == "missing"
++    )
++    assert (
++        queue.clear_terminal_payload_for_governance(
++            "synthetic-missing", **_governance_reap_snapshot(before[job_id])
++        )
++        == "missing"
++    )
++    assert _governance_rows(queue) == before
++
++
++@pytest.mark.parametrize(
++    ("field", "value", "code"),
++    [
++        ("expected_request_id", "", "identity"),
++        ("expected_payload_digest", "ABC" * 22, "identity"),
++        ("expected_updated_at", None, "snapshot"),
++        ("expected_state", "synthetic-invalid-state", "snapshot"),
++        ("expected_hy_invoked", True, "snapshot"),
++        ("expected_hy_invoked", 2, "snapshot"),
++    ],
++)
++def test_governance_malformed_cancel_parameters_fail_without_writes(tmp_path, field, value, code):
++    queue, job_id = _governance_seed(tmp_path)
++    before = _governance_rows(queue)
++    expected = _governance_snapshot(before[job_id]) | {field: value}
++    with pytest.raises(ValueError, match=f"^governance_queue_{code}_invalid$"):
++        queue.cancel_unpermitted_for_governance(job_id, **expected)
++    assert _governance_rows(queue) == before

@@ -1,0 +1,789 @@
+diff --git a/memhub/apps/core/src/one_memory/api.py b/memhub/apps/core/src/one_memory/api.py
+index 7e827db..74edac0 100644
+--- a/memhub/apps/core/src/one_memory/api.py
++++ b/memhub/apps/core/src/one_memory/api.py
+@@ -86,6 +86,7 @@ from one_memory.hy_memory_bridge import (
+     HySdkMemoryPage,
+     HySdkMemoryRecord,
+     HySdkRawRecord,
++    SdkGenerationInput,
+     builtin_retrieval_snapshot,
+ )
+ from one_memory.hy_runtime_config import (
+@@ -827,6 +828,7 @@ def create_app(
+     secret_store: SecretStore | None = None,
+     source_write_authorizer: Callable[[str], bool | None] | None = None,
+     sdk_operation_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
++    sdk_generation_permit: Callable[[SdkGenerationInput], Awaitable[None]] | None = None,
+     sdk_reconcile_unknown: Callable[[], Awaitable[None]] | None = None,
+     sdk_output_observer: Callable[[str, WriteRequest], Awaitable[None]] | None = None,
+     sdk_claim_ready: Callable[[], bool] | None = None,
+@@ -1135,6 +1137,7 @@ def create_app(
+                     api_key=api_key,
+                     data_dir=data_dir,
+                     operation_guard=sdk_operation_guard,
++                    generation_permit=sdk_generation_permit,
+                     http_transport_factory=lambda: AuditedModelTransport(
+                         app.state.model_request_audit_store,
+                         profile_id=profile.profile_id,
+@@ -1625,6 +1628,7 @@ def create_app(
+     app.state.settings = runtime_settings
+     app.state.source_write_authorizer = source_write_authorizer
+     app.state.sdk_operation_guard = sdk_operation_guard
++    app.state.sdk_generation_permit = sdk_generation_permit
+
+     @app.middleware("http")
+     async def reject_legacy_memory_authority(
+@@ -5422,6 +5426,7 @@ def _sdk_library_bridge(app: FastAPI) -> HyMemoryBridge:
+             api_key=None,
+             data_dir=cast(Settings, app.state.settings).data_dir,
+             operation_guard=getattr(app.state, "sdk_operation_guard", None),
++            generation_permit=getattr(app.state, "sdk_generation_permit", None),
+         )
+         app.state.sdk_library_bridge = bridge
+     return bridge
+diff --git a/memhub/apps/core/src/one_memory/hy_memory_bridge.py b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+index be358fa..dc3e72c 100644
+--- a/memhub/apps/core/src/one_memory/hy_memory_bridge.py
++++ b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+@@ -1,20 +1,30 @@
+ import asyncio
+ import hashlib
++import json
+ import logging
+ import os
+ import re
+ import shutil
+ import sqlite3
+ import threading
+-from collections.abc import AsyncIterator, Callable, Collection, Coroutine, Mapping, Sequence
++from collections.abc import (
++    AsyncIterator,
++    Awaitable,
++    Callable,
++    Collection,
++    Coroutine,
++    Mapping,
++    Sequence,
++)
+ from contextlib import AbstractAsyncContextManager, asynccontextmanager, closing, nullcontext
++from dataclasses import dataclass, field
+ from datetime import UTC, datetime
+ from enum import StrEnum
+ from functools import wraps
+ from importlib import import_module
+ from pathlib import Path
+ from time import monotonic
+-from typing import Any, Protocol, cast
++from typing import Any, Literal, Protocol, cast
+
+ from pydantic import BaseModel, ConfigDict, Field
+
+@@ -250,6 +260,89 @@ class HyMemoryIngestRequest(BaseModel):
+     source_context: HySourceContext | None = None
+
+
++SdkGenerationOperation = Literal["add", "add_extracted"]
++
++
++@dataclass(frozen=True)
++class SdkGenerationInput:
++    """Exact SDK invocation identity, never proof of its outputs or lack thereof."""
++
++    operation: SdkGenerationOperation
++    request_id: str
++    canonical_input: bytes = field(repr=False)
++
++
++class _SdkGenerationNotPermitted(HyMemoryBridgeError):
++    pass
++
++
++def _sdk_generation_arguments(
++    operation: SdkGenerationOperation,
++    request: HyMemoryIngestRequest,
++    contents: str | Sequence[str] | None = None,
++) -> tuple[Any, dict[str, Any]]:
++    metadata = {
++        "source_id": request.source_id,
++        "evidence_ids": list(request.evidence_ids),
++        "workspace_ids": list(request.workspace_ids),
++        "input_kind": "raw_conversation" if operation == "add" else "memory_content_without_raw",
++    }
++    kwargs = {
++        "user_id": request.user_id,
++        "agent_id": request.agent_id,
++        "session_id": request.session_id,
++        "metadata": metadata,
++        "memory_at": request.memory_at,
++        "request_id": request.request_id,
++    }
++    if operation == "add":
++        # HY routes chat or coding itself when it sees tool messages.
++        kwargs.update(source=request.source_id, scene=None)
++        return [turn.model_dump() for turn in request.turns], kwargs
++    if operation != "add_extracted" or contents is None:
++        raise HyMemoryBridgeError("hy_memory_generation_input_invalid")
++    # Snapshot caller-owned sequences before any permit await.
++    return contents if isinstance(contents, str) else tuple(contents), kwargs
++
++
++def _generation_input(
++    operation: SdkGenerationOperation,
++    request: HyMemoryIngestRequest,
++    argument: Any,
++    kwargs: Mapping[str, Any],
++) -> SdkGenerationInput:
++    canonical = json.dumps(
++        {
++            "version": 1,
++            "operation": operation,
++            "args": [argument],
++            "kwargs": {
++                **kwargs,
++                "memory_at": request.memory_at.isoformat() if request.memory_at else None,
++            },
++            # Legacy guard context is dynamic, not a new birth's frozen input.
++            # Presence alone disqualifies a None-context enrollment; do not copy
++            # its potentially unsanitized Evidence into the permission payload.
++            "legacy_source_context": request.source_context is not None,
++        },
++        sort_keys=True,
++        ensure_ascii=False,
++        separators=(",", ":"),
++        allow_nan=False,
++    ).encode("utf-8")
++    return SdkGenerationInput(operation, request.request_id, canonical)
++
++
++def sdk_generation_input(
++    operation: SdkGenerationOperation,
++    request: HyMemoryIngestRequest,
++    contents: str | Sequence[str] | None = None,
++) -> SdkGenerationInput:
++    """Pure precomputation using the same argument builder as the SDK boundary."""
++    argument, kwargs = _sdk_generation_arguments(operation, request, contents)
++    return _generation_input(operation, request, argument, kwargs)
++
++
+ class HyMemoryIngestResult(BaseModel):
+     model_config = ConfigDict(frozen=True, extra="forbid")
+
+@@ -485,6 +578,7 @@ class HyMemoryBridge:
+         client: HyMemoryClientProtocol | None = None,
+         http_transport_factory: Callable[[], Any] | None = None,
+         operation_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
++        generation_permit: Callable[[SdkGenerationInput], Awaitable[None]] | None = None,
+     ) -> None:
+         self.profile = profile
+         self.api_key = api_key
+@@ -492,12 +586,30 @@ class HyMemoryBridge:
+         self._client = client
+         self._http_transport_factory = http_transport_factory
+         self._operation_guard = operation_guard
++        self._generation_permit = generation_permit
+         self._client_lock = asyncio.Lock()
+         self._write_lock = asyncio.Lock()
+         self._last_bindings: HyWriteBindings | None = None
+         self._access_lock = asyncio.Lock()
+         self._access_owner: asyncio.Task[Any] | None = None
+
++    async def _permit_generation(
++        self,
++        operation: SdkGenerationOperation,
++        request: HyMemoryIngestRequest,
++        argument: Any,
++        kwargs: Mapping[str, Any],
++    ) -> None:
++        if self._generation_permit is None:
++            return
++        try:
++            descriptor = _generation_input(operation, request, argument, kwargs)
++            # Return only after the embedding caller's durable permission commit.
++            await self._generation_permit(descriptor)
++        except Exception:
++            # Never expose callback text, input contents or persistence details.
++            raise _SdkGenerationNotPermitted("hy_memory_generation_not_permitted") from None
++
+     @asynccontextmanager
+     async def exclusive_access(self) -> AsyncIterator[None]:
+         task = asyncio.current_task()
+@@ -579,24 +691,11 @@ class HyMemoryBridge:
+             if hasattr(type(guard), "_extract") or hasattr(type(guard), "_check_targets"):
+                 guard.bindings = bindings
+         try:
+-            raw = await _joined_thread(
+-                client.add,
+-                [turn.model_dump() for turn in request.turns],
+-                user_id=request.user_id,
+-                agent_id=request.agent_id,
+-                session_id=request.session_id,
+-                source=request.source_id,
+-                metadata={
+-                    "source_id": request.source_id,
+-                    "evidence_ids": list(request.evidence_ids),
+-                    "workspace_ids": list(request.workspace_ids),
+-                    "input_kind": "raw_conversation",
+-                },
+-                memory_at=request.memory_at,
+-                # HY routes chat or coding itself when it sees tool messages.
+-                scene=None,
+-                request_id=request.request_id,
+-            )
++            argument, kwargs = _sdk_generation_arguments("add", request)
++            await self._permit_generation("add", request, argument, kwargs)
++            raw = await _joined_thread(client.add, argument, **kwargs)
++        except _SdkGenerationNotPermitted:
++            raise
+         except Exception as error:
+             diagnostic_event(
+                 level="error",
+@@ -665,6 +764,7 @@ class HyMemoryBridge:
+         contents: Sequence[str],
+     ) -> HyMemoryIngestResult:
+         """Import source memory content when no raw conversation is available."""
++        contents = contents if isinstance(contents, str) else tuple(contents)
+         started = monotonic()
+         diagnostic_event(
+             level="info",
+@@ -686,21 +786,11 @@ class HyMemoryBridge:
+         for guard in report_guards:
+             guard.imported_contents = expected_contents
+         try:
+-            raw = await _joined_thread(
+-                client.add_extracted,
+-                contents,
+-                user_id=request.user_id,
+-                agent_id=request.agent_id,
+-                session_id=request.session_id,
+-                metadata={
+-                    "source_id": request.source_id,
+-                    "evidence_ids": list(request.evidence_ids),
+-                    "workspace_ids": list(request.workspace_ids),
+-                    "input_kind": "memory_content_without_raw",
+-                },
+-                memory_at=request.memory_at,
+-                request_id=request.request_id,
+-            )
++            argument, kwargs = _sdk_generation_arguments("add_extracted", request, contents)
++            await self._permit_generation("add_extracted", request, argument, kwargs)
++            raw = await _joined_thread(client.add_extracted, argument, **kwargs)
++        except _SdkGenerationNotPermitted:
++            raise
+         except Exception as error:
+             diagnostic_event(
+                 level="error",
+diff --git a/memhub/apps/core/src/one_memory/memory_processing.py b/memhub/apps/core/src/one_memory/memory_processing.py
+index c2f886c..14f5290 100644
+--- a/memhub/apps/core/src/one_memory/memory_processing.py
++++ b/memhub/apps/core/src/one_memory/memory_processing.py
+@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
+ from hashlib import sha256
+ from pathlib import Path
+ from time import monotonic
+-from typing import Literal, Protocol
++from typing import TYPE_CHECKING, Literal, Protocol
+ from weakref import WeakKeyDictionary
+
+ from one_memory.background_work import in_the_background
+@@ -44,11 +44,13 @@ from one_memory.hy_memory_bridge import (
+     HyMemoryIngestResult,
+     HyMemoryOutput,
+     HyMemoryTurn,
++    SdkGenerationInput,
+     builtin_retrieval_snapshot,
+     coding_tool_result_max_bytes,
+     decide_profile_graph_width,
+     hy_memory_store_exists,
+     inspect_profile_graph_width,
++    sdk_generation_input,
+ )
+ from one_memory.hy_runtime_config import hy_memory_version
+ from one_memory.hy_source_context import HySourceContext, HySupportedMemory
+@@ -274,6 +276,31 @@ class MemoryBridgeProtocol(Protocol):
+     async def close(self) -> None: ...
+
+
++if TYPE_CHECKING:
++    from one_memory.memory_server.contracts import WriteRequest
++
++
++def _sdk_content_inputs(records: tuple[EvidenceRecord, ...]) -> tuple[tuple[str, ...], bool]:
++    contents = tuple(
++        sanitize_model_input(record.verbatim) for record in records if _imported_as_said(record)
++    )
++    return contents, bool(contents) and all(_imported_as_said(record) for record in records)
++
++
++def sdk_generation_input_for(request: "WriteRequest") -> SdkGenerationInput:
++    """Precompute the SDK-authority call without stores, credentials or model work."""
++    records = tuple(request.input_records)
++    sdk_request = MemoryTaskRunner.request_for(request.request_key, records).model_copy(
++        update={"source_context": None}
++    )
++    contents, only_contents = _sdk_content_inputs(records)
++    return sdk_generation_input(
++        "add_extracted" if only_contents else "add",
++        sdk_request,
++        contents if only_contents else None,
++    )
++
++
+ class MemoryTaskRunner:
+     def __init__(
+         self,
+@@ -523,12 +550,7 @@ class MemoryTaskRunner:
+                 if uses_frozen_input
+                 else None
+             )
+-            memory_contents = tuple(
+-                sanitize_model_input(record.verbatim)
+-                for record in chunk
+-                if _imported_as_said(record)
+-            )
+-            only_contents = bool(memory_contents) and all(_imported_as_said(r) for r in chunk)
++            memory_contents, only_contents = _sdk_content_inputs(chunk)
+             step_started = monotonic()
+             if before_hy_invocation is not None:
+                 await before_hy_invocation()
+@@ -1605,10 +1627,7 @@ class MemoryProcessingSupervisor:
+         request = MemoryTaskRunner.request_for(request_id, records).model_copy(
+             update={"source_context": None}
+         )
+-        contents = tuple(
+-            sanitize_model_input(record.verbatim) for record in records if _imported_as_said(record)
+-        )
+-        only_contents = bool(contents) and all(_imported_as_said(record) for record in records)
++        contents, only_contents = _sdk_content_inputs(records)
+         await before_hy_invocation()
+         result = (
+             await bridge.ingest_extracted(request, contents)
+diff --git a/memhub/apps/core/tests/TEST_INDEX.md b/memhub/apps/core/tests/TEST_INDEX.md
+index bb96a00..78a6068 100644
+--- a/memhub/apps/core/tests/TEST_INDEX.md
++++ b/memhub/apps/core/tests/TEST_INDEX.md
+@@ -281,6 +281,7 @@
+ | `test_schema_migrations.py` | `contract` | 覆盖 evidence store adds source ordinal to previous schema、import store migrates previous job and error schema、old active job index lets a sync sit beside paused history 等 4 个场景。 |
+ | `test_schema_ownership_gate.py` | `contract` | A1-03/A1-04: schema ownership, and the hard part of telling DDL from reads. |
+ | `test_sdk_data_plane_migration.py` | `contract` | SDK-authority migration ledger, aliases and atomic cutover marker. |
++| `test_sdk_generation_permit.py` | `integration` | Optional durable generation permission, exact inputs and both composition paths. |
+ | `test_sdk_memory_qa.py` | `contract` | 覆盖 sdk ask propagates sdk search failure without legacy fallback、sdk ask revalidates memory before returning extract、sdk ask uses native sdk memory without governance fields 场景。 |
+ | `test_sdk_migration_bundle.py` | `contract` | SDK-authority cutover requires a verified management + SDK data-plane bundle. |
+ | `test_sdk_verbatim_fallback.py` | `contract` | D98: the SDK's verbatim fallback must stay off. |
+@@ -345,4 +346,4 @@
+ | `test_workspace_recall.py` | `contract` | Workspace memories were unreachable from every host; these pin the way in. |
+ | `test_write_queue_lease_renewal.py` | `contract` | Rule 8: a lease must outlive the work it covers, and be renewed while it runs. |
+
+-共 340 个测试文件。
++共 341 个测试文件。
+diff --git a/memhub/apps/core/tests/core_test_classification.py b/memhub/apps/core/tests/core_test_classification.py
+index 71a0cd4..c4e1c40 100644
+--- a/memhub/apps/core/tests/core_test_classification.py
++++ b/memhub/apps/core/tests/core_test_classification.py
+@@ -14,8 +14,8 @@ from pathlib import Path
+ import pytest
+
+ PRIMARY_MARKERS = ("unit", "contract", "integration", "performance", "live")
+-EXPECTED_TEST_FILE_COUNT = 340
+-EXPECTED_TEST_FILES_SHA256 = "f69d3f33df5277febb09557d5bce7adb7d8719ed47e48a71f852e3e4ecf8fd74"
++EXPECTED_TEST_FILE_COUNT = 341
++EXPECTED_TEST_FILES_SHA256 = "cc8c8282371eb13bd4e2a27be388d967e63ad7c58a0226bae3ec8a96b0c2a427"
+
+ # Pure transformations, validation models, parity checks and state machines.
+ # This list is intentionally small: uncertain files default to contract.
+@@ -48,6 +48,7 @@ UNIT_FILES = frozenset(
+ # live/performance markers on a file take precedence over this default.
+ INTEGRATION_FILES = frozenset(
+     {
++        "test_sdk_generation_permit.py",
+         "test_auth.py",
+         "test_backup_endpoint.py",
+         "test_backup_restore_api.py",
+diff --git a/memhub/apps/core/tests/test_sdk_generation_permit.py b/memhub/apps/core/tests/test_sdk_generation_permit.py
+new file mode 100644
+index 0000000..fedce34
+--- /dev/null
++++ b/memhub/apps/core/tests/test_sdk_generation_permit.py
+@@ -0,0 +1,382 @@
++"""Optional durable generation permission, exact inputs and both composition paths."""
++
++import asyncio
++import json
++import sqlite3
++from contextlib import asynccontextmanager
++from dataclasses import FrozenInstanceError
++from datetime import UTC, datetime
++from types import SimpleNamespace
++
++import pytest
++
++from one_memory.api import _sdk_library_bridge, create_app
++from one_memory.config import Settings
++from one_memory.hy_memory_bridge import (
++    HyMemoryBridge,
++    HyMemoryBridgeError,
++    HyMemoryIngestResult,
++    HyMemoryOutput,
++    builtin_retrieval_snapshot,
++    sdk_generation_input,
++)
++from one_memory.hy_response_guard import HyReconcileGuard
++from one_memory.imports.models import (
++    EvidenceContentKind,
++    EvidenceInput,
++    EvidenceOrigin,
++    OriginMetadata,
++    WrittenBy,
++    materialize_write_input,
++)
++from one_memory.memory_processing import MemoryTaskRunner, sdk_generation_input_for
++from one_memory.memory_server.contracts import BatchIdentity, WriteRequest, internal_session_id_for
++
++
++def frozen_request(kind=EvidenceContentKind.RAW_CONVERSATION):
++    records = tuple(
++        materialize_write_input(
++            EvidenceInput(
++                user_id="synthetic-user",
++                source_id="synthetic-source",
++                workspace="synthetic-scope",
++                conversation_id="synthetic-session",
++                message_id=f"message-{index}",
++                role="user",
++                written_by=WrittenBy.PERSON,
++                content_kind=kind,
++                verbatim=text,
++                created_at=datetime(2026, 11, 9, tzinfo=UTC),
++                origin_meta={EvidenceOrigin.PLUGIN: OriginMetadata(raw_meta={"synthetic": True})},
++            ),
++            observed_at=datetime(2026, 11, 9, tzinfo=UTC),
++        )
++        for index, text in enumerate(
++            ("keep order password=synthetic-private-value", "second input")
++        )
++    )
++    session = internal_session_id_for("synthetic-session", "synthetic-source")
++    return WriteRequest(
++        internal_session_id=session,
++        source_id="synthetic-source",
++        batch_identity=BatchIdentity(internal_session_id=session, first_round=1, last_round=2),
++        evidence_ids=[record.evidence_id for record in records],
++        input_records=records,
++        idempotency_key="cmh2:synthetic-instance:synthetic-birth:synthetic-device:synthetic-event",
++    )
++
++
++def sdk_request():
++    frozen = frozen_request()
++    return MemoryTaskRunner.request_for(frozen.request_key, frozen.input_records).model_copy(
++        update={"source_context": None}
++    )
++
++
++class Guard(HyReconcileGuard):
++    _extract = None
++
++
++class Client:
++    def __init__(self, fail=False):
++        self.calls = []
++        self.fail = fail
++        self.before_call = lambda: None
++        self.guard = Guard(SimpleNamespace())
++        self._one_memory_write_guards = (self.guard,)
++
++    def add(self, argument, **kwargs):
++        return self.record("add", argument, kwargs)
++
++    def add_extracted(self, argument, **kwargs):
++        return self.record("add_extracted", argument, kwargs)
++
++    def record(self, operation, argument, kwargs):
++        self.before_call()
++        self.calls.append((operation, argument, kwargs))
++        if self.fail:
++            if operation == "add":
++                self.guard.bindings = "synthetic-dirty-binding"
++            else:
++                self.guard.imported_contents = frozenset({"synthetic-dirty-import"})
++            raise RuntimeError("synthetic-private-sdk-error")
++        return {"success": True}
++
++    def close(self):
++        pass
++
++
++def bridge_for(tmp_path, monkeypatch, permit=None, *, fail=False, operation_guard=None):
++    client = Client(fail)
++    bridge = HyMemoryBridge(
++        profile=builtin_retrieval_snapshot(),
++        api_key=None,
++        data_dir=tmp_path,
++        client=client,
++        generation_permit=permit,
++        operation_guard=operation_guard,
++    )
++
++    async def result(*args, **kwargs):
++        return HyMemoryIngestResult(
++            success=True,
++            memories=(HyMemoryOutput(memory_id="synthetic-output", content="synthetic result"),),
++        )
++
++    monkeypatch.setattr(bridge, "_result", result)
++    return bridge, client
++
++
++async def invoke(bridge, operation, request=None, contents=None):
++    request = request or sdk_request()
++    if operation == "add":
++        return await bridge.ingest(request)
++    return await bridge.ingest_extracted(
++        request, [" first ", "second", " first "] if contents is None else contents
++    )
++
++
++def assert_exact(descriptor, client):
++    operation, argument, kwargs = client.calls[0]
++    decoded = json.loads(descriptor.canonical_input)
++    expected_kwargs = {**kwargs, "memory_at": kwargs["memory_at"].isoformat()}
++    expected_args = [list(argument) if isinstance(argument, tuple) else argument]
++    assert decoded == {
++        "version": 1,
++        "operation": operation,
++        "args": expected_args,
++        "kwargs": expected_kwargs,
++        "legacy_source_context": False,
++    }
++    assert descriptor.request_id == kwargs["request_id"]
++    assert "synthetic-private-value" not in descriptor.canonical_input.decode()
++    assert "second input" not in repr(descriptor)
++    with pytest.raises(FrozenInstanceError):
++        descriptor.request_id = "changed"
++
++
++@pytest.mark.parametrize("operation", ["add", "add_extracted"])
++def test_permission_waits_inside_both_locks_before_exact_sdk_call(tmp_path, monkeypatch, operation):
++    async def scenario():
++        entered, release = asyncio.Event(), asyncio.Event()
++        guarded, descriptors = [], []
++
++        @asynccontextmanager
++        async def operation_guard():
++            guarded.append(True)
++            try:
++                yield
++            finally:
++                guarded.pop()
++
++        async def permit(value):
++            descriptors.append(value)
++            assert guarded and bridge._write_lock.locked()
++            assert bridge._access_owner is asyncio.current_task()
++            entered.set()
++            await release.wait()
++            with sqlite3.connect(tmp_path / "permission.sqlite3") as db:
++                db.execute("CREATE TABLE permitted (input BLOB NOT NULL)")
++                db.execute("INSERT INTO permitted VALUES (?)", (value.canonical_input,))
++
++        bridge, client = bridge_for(tmp_path, monkeypatch, permit, operation_guard=operation_guard)
++
++        def require_committed():
++            with sqlite3.connect(tmp_path / "permission.sqlite3") as db:
++                assert db.execute("SELECT input FROM permitted").fetchall() == [
++                    (descriptors[0].canonical_input,)
++                ]
++
++        client.before_call = require_committed
++        task = asyncio.create_task(invoke(bridge, operation))
++        await entered.wait()
++        assert client.calls == []
++        release.set()
++        assert (await task).success
++        assert len(descriptors) == len(client.calls) == 1
++        assert_exact(descriptors[0], client)
++        assert client.guard.bindings is None and client.guard.imported_contents is None
++        assert not guarded and not bridge._write_lock.locked()
++
++    asyncio.run(scenario())
++
++
++@pytest.mark.parametrize("operation", ["add", "add_extracted"])
++@pytest.mark.parametrize("failure", ["deny", "cancel"])
++def test_unfinished_or_rejected_permission_never_calls_sdk(
++    tmp_path, monkeypatch, operation, failure
++):
++    async def scenario():
++        entered = asyncio.Event()
++
++        async def permit(value):
++            entered.set()
++            if failure == "deny":
++                raise ValueError("synthetic-private-callback-error")
++            await asyncio.Event().wait()
++
++        bridge, client = bridge_for(tmp_path, monkeypatch, permit)
++        task = asyncio.create_task(invoke(bridge, operation))
++        await entered.wait()
++        if failure == "cancel":
++            task.cancel()
++            with pytest.raises(asyncio.CancelledError):
++                await task
++        else:
++            with pytest.raises(HyMemoryBridgeError) as caught:
++                await task
++            assert str(caught.value) == "hy_memory_generation_not_permitted"
++            assert caught.value.__suppress_context__
++        assert client.calls == []
++        assert client.guard.bindings is None and client.guard.imported_contents is None
++        assert not bridge._write_lock.locked() and bridge._access_owner is None
++
++    asyncio.run(scenario())
++
++
++@pytest.mark.parametrize("operation", ["add", "add_extracted"])
++def test_default_no_permit_and_sdk_failure_keep_existing_behavior(tmp_path, monkeypatch, operation):
++    async def scenario():
++        bridge, client = bridge_for(tmp_path, monkeypatch, fail=True)
++        with pytest.raises(HyMemoryBridgeError, match="^hy_memory_runtime_failed$"):
++            await invoke(bridge, operation)
++        assert len(client.calls) == 1
++        assert client.guard.bindings is None and client.guard.imported_contents is None
++
++    asyncio.run(scenario())
++
++
++def test_awaiting_permission_cannot_change_extracted_contents(tmp_path, monkeypatch):
++    async def scenario():
++        entered, release = asyncio.Event(), asyncio.Event()
++        captured = []
++
++        async def permit(value):
++            captured.append(value)
++            entered.set()
++            await release.wait()
++
++        bridge, client = bridge_for(tmp_path, monkeypatch, permit)
++        contents = [" duplicate ", "second", " duplicate "]
++        task = asyncio.create_task(invoke(bridge, "add_extracted", contents=contents))
++        await entered.wait()
++        contents[:] = ["modified while awaiting permission"]
++        release.set()
++        await task
++        assert client.calls[0][1] == (" duplicate ", "second", " duplicate ")
++        assert_exact(captured[0], client)
++
++    asyncio.run(scenario())
++
++
++@pytest.mark.parametrize(
++    "kind", [EvidenceContentKind.RAW_CONVERSATION, EvidenceContentKind.MEMORY_CONTENT]
++)
++def test_frozen_write_precomputation_matches_actual_sdk_boundary(tmp_path, monkeypatch, kind):
++    async def scenario():
++        frozen = frozen_request(kind)
++        expected = sdk_generation_input_for(frozen)
++        captured = []
++
++        async def permit(value):
++            assert value == expected
++            captured.append(value)
++
++        bridge, client = bridge_for(tmp_path, monkeypatch, permit)
++        request = MemoryTaskRunner.request_for(frozen.request_key, frozen.input_records).model_copy(
++            update={"source_context": None}
++        )
++        # Exercise the shared production route via process_sdk_job without I/O
++        # credential lookup. Client.add/add_extracted are the only SDK doubles.
++        from one_memory.memory_processing import MemoryProcessingSupervisor
++
++        supervisor = object.__new__(MemoryProcessingSupervisor)
++        supervisor.sdk_authority = lambda: True
++        supervisor._sedimentation_stopped = lambda: False
++        supervisor.source_writes_permitted = None
++        supervisor.data_dir = tmp_path
++        supervisor._bridge = lambda *args, **kwargs: bridge
++
++        async def credentials():
++            return builtin_retrieval_snapshot(), None
++
++        async def refresh(*args):
++            return None
++
++        supervisor._active_credentials = credentials
++        supervisor._refresh_read_bridge = refresh
++        await supervisor.process_sdk_job(
++            frozen.input_records,
++            request_id=request.request_id,
++            before_hy_invocation=refresh,
++        )
++        assert captured == [expected]
++        assert_exact(expected, client)
++        assert expected.operation == (
++            "add" if kind is EvidenceContentKind.RAW_CONVERSATION else "add_extracted"
++        )
++
++    asyncio.run(scenario())
++
++
++@pytest.mark.parametrize(
++    "change", ["operation", "contents", "request_id", "turn", "source_context"]
++)
++def test_input_or_operation_change_is_rejected_before_sdk(tmp_path, monkeypatch, change):
++    async def scenario():
++        request = sdk_request()
++        contents = ("first", "second", "first")
++        operation = "add_extracted" if change == "contents" else "add"
++        expected = sdk_generation_input(operation, request, contents)
++
++        async def permit(value):
++            if value != expected:
++                raise ValueError("changed generation input")
++
++        bridge, client = bridge_for(tmp_path, monkeypatch, permit)
++        if change == "operation":
++            operation = "add_extracted"
++        elif change == "contents":
++            contents = ("first", "first", "second")
++        elif change == "request_id":
++            request = request.model_copy(update={"request_id": request.request_id + "-changed"})
++        elif change == "turn":
++            turn = request.turns[0].model_copy(update={"content": "changed turn"})
++            request = request.model_copy(update={"turns": (turn, *request.turns[1:])})
++        else:
++            frozen = frozen_request()
++            request = MemoryTaskRunner.request_for(frozen.request_key, frozen.input_records)
++            assert request.source_context is not None
++        with pytest.raises(HyMemoryBridgeError, match="^hy_memory_generation_not_permitted$"):
++            await invoke(bridge, operation, request, contents)
++        assert client.calls == []
++        assert client.guard.bindings is None and client.guard.imported_contents is None
++
++    asyncio.run(scenario())
++
++
++def test_api_injects_permission_into_processing_and_library_bridges(tmp_path):
++    async def scenario():
++        async def permit(value):
++            raise AssertionError("construction does not invoke the generation gate")
++
++        app = create_app(
++            Settings(
++                _env_file=None,
++                data_dir=tmp_path,
++                source_home=tmp_path / "sources",
++                imports_enabled=False,
++                live_sync_enabled=False,
++            ),
++            sdk_generation_permit=permit,
++        )
++        async with app.router.lifespan_context(app):
++            library = _sdk_library_bridge(app)
++            factory = app.state.memory_processing_supervisor.bridge_factory
++            processing = factory(builtin_retrieval_snapshot(), None, tmp_path)
++            assert library._generation_permit is permit
++            assert processing._generation_permit is permit
++            assert app.state.sdk_generation_permit is permit
++            await processing.close()
++
++    asyncio.run(scenario())
