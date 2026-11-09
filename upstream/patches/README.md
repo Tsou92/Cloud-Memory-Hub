@@ -61,3 +61,10 @@
 - batch 从原实现的有效节点列表观察，不提前消耗调用者迭代器；异常、取消及部分写入保留 attempted 项。`returned` 仅表示原函数正常返回，包括返回 false 的情形，不是成功落盘证明。
 - 身份、selector、条目数和实际 JSON 字节有界；上下文按请求隔离，结果返回深拷贝，旧回执重放不补造观察。仅在新请求中增加字段，不改变已有回执和数据库版本。
 - 始终标记 `observation_only=true`、`all_effects_proven=false`；图、生产力、诊断文件和未收尾后台日志显式说明缺口。缓存被恢复、硬退出或所有持久副作用的完整证明不由此补丁解决，不能据该字段放行治理。见 [ADR-0039](../../docs/adr/0039-sdk-write-effect-observation.md)。
+
+## 0022-diagnostic-write-quiescence.patch
+
+- 复用原 pipeline wrapper、JSONL writer、SQLite cache、executor 与 runtime。新增每 cache 的诊断工作组，在派发前登记，分别等待 owner loop 的实际任务、原生线程 future 和结果消费；取消等待者不等于后台 I/O 已结束。
+- 维护先暂停全部关联工作组，再严格等待实际完成；超时或取消保留未完成任务并恢复本次暂停租约。暂停期间新日志返回未接纳、不缓存正文；成功关闭后永久封闭工作组。
+- Core 两个搜索入口加入共享准入，保留读取并发；每桥关闭等待搜索。SDK/runtime 与 Core 引用链在关闭成功后释放，失败保留对象以供重试，不再先删除注册条目或吞掉关闭错误。
+- 不改数据库、删除选择器、签名或一次性许可；`write_effects` 仍是观察。未启用 Hub 准入时普通 SDK 路径保留原行为，但诊断关闭失败现在明确报告。详见 [ADR-0040](../../docs/adr/0040-diagnostic-write-quiescence.md) 和[验证记录](../../docs/reviews/2026-11-10-diagnostic-quiescence.md)。既有文件正文和其他后台域仍待后续治理。

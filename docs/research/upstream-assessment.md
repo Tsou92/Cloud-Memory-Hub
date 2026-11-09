@@ -96,3 +96,5 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 补丁 0020 复用 Core 状态机与 `main_database` 原子写事务，只新增受信治理协调器可调用的精确比较取消与单任务终态正文清理；原 `settle`／unknown 查询规则不放宽，不增加 HTTP 接口。独立证据、签名范围与调用互斥由 Hub 提供，API 本身不宣称具备这些证明。2026-11-10 已接入治理 execute/resume，复用有界候选校验和原文验证，以签名 job/request/正文摘要限定调用；旧请求定位与终态恢复也共享这些预算工具，未另建队列或无副作用推断。真实成功和保护性拒绝的边界见[在途执行记录](../reviews/2026-11-10-inflight-execution.md)。
 
 2026-11-10 副作用调查确认成功结果不覆盖 shadow-only UPDATE、链折叠、画像旁路及生产力 SQLite 先写后向量失败的残留。补丁 0021 首先复用 Chroma 五个变更入口、history 共同插入、SQLite 请求日志/episode 和原 SDK 生命周期，增加请求级有界观察。无需复制每个 writer 分支或引入第二个存储；上游没有完整持久覆盖证书，因此这一观察不直接授权删除。诊断缓存清理复用原 `Purger` 的精确请求定位，补齐原生两张日志表；没有重建日志后端。具体合同和剩余持久证据见 [ADR-0039](../adr/0039-sdk-write-effect-observation.md)。
+
+同日后台生命周期调查实际复现：原 `drain_pipeline_log_tasks` 只扫描当前 loop 的任务，超时仅告警，外层任务取消后实际 JSONL/SQLite 线程仍可能落盘。0022 继续使用原日志后端和线程池，仅补充每 cache 的真实完成登记、暂停租约、严格排空和关闭重试；不重建日志队列。两个原生搜索入口复用已有共享 SDK 准入，保持并发。Hub 复用原 Chroma 只读预检并将其放到初始化前，保留无执行记录时的按需启动；设计、负对照及已验证边界见 [ADR-0040](../adr/0040-diagnostic-write-quiescence.md) 和[本轮记录](../reviews/2026-11-10-diagnostic-quiescence.md)。
