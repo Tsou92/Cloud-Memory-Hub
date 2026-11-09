@@ -127,3 +127,7 @@ probe-chroma-delete-replay: prepare-upstream
 .PHONY: probe-inflight-governance
 probe-inflight-governance: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_inflight_governance.py
+
+.PHONY: probe-write-effects
+probe-write-effects: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_write_effects.py
