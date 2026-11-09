@@ -88,3 +88,5 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 画像 Hub 接线继续使用补丁 0015、原生 MemoryNode/from_dict、profile 来源摘要、画像清洗/链头/完整 KV 纯函数和向量库读取；抽取已有普通记忆证据校验与图遍历作为共享模块。只新增 Hub 作用域相关归档/索引及关系，不改变上游算法或旧产出摘要。对应 [ADR-0029](../adr/0029-basic-profile-lineage.md) 和[记录](../reviews/2026-11-03-profile-lineage.md)。
 
 补丁 0016 复用 writer 的会话滚动摘要、图投影请求句柄和 SDK 终态回执流程。原会话摘要未保存任务句柄，可能在写入回执完成后继续写入；新增请求级句柄与共同收尾，保留并发并在取消后等待实际完成。不引入新任务队列、存储或摘要算法。上游 episode、写入结果、executor、图投影和并发门控回归，以及 Hub 准入和真实 SDK 重开探针见 [ADR-0030](../adr/0030-derived-task-lifecycle.md) 与[验证记录](../reviews/2026-11-04-derived-lifecycle.md)。
+
+补丁 0018 复用 Core DurableWriteDrain 的领取、续租、执行及输出观察，扩展原锁和共享 worker 集合以支持暂停领取并等待完整任务结束。原 SDK 准入只覆盖分段调用，无法识别领取后尚未进入 SDK 或等待产出观察的任务；直接停止并等待主循环又会与维护回调中的 resume 自锁，故需最小生命周期适配。新增默认不启用的 claim-ready 回调，不改变来源权限或未知任务判定，也不新增队列。上游持久队列 187 项通过，补丁及真实并发测试范围见 [ADR-0034](../adr/0034-inflight-ingest-and-content-reimport.md)。

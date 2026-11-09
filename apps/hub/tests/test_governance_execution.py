@@ -732,10 +732,9 @@ def test_inflight_pending_job_survives_completed_governance(
     asyncio.run(scenario())
 
 
-@pytest.mark.xfail(strict=True, raises=InflightResurrection, reason="ADR-0034 G-B: admission race")
 @pytest.mark.parametrize("action", ["forget", "purge"])
 def test_inflight_acceptance_between_source_capture_and_plan(tmp_path, monkeypatch, action):
-    """V2/G-B: actual HTTP admission while execution owns the SDK barrier."""
+    """V2/G-B: new HTTP intake cannot race through governance's shared barrier."""
     from cloud_memory_hub import governance_execution
 
     config = config_for(tmp_path)
@@ -753,16 +752,21 @@ def test_inflight_acceptance_between_source_capture_and_plan(tmp_path, monkeypat
             assert view.status_code == 200, view.text
             loop = asyncio.get_running_loop()
             capture = governance_execution.capture_sources
-            admitted = []
+            attempted = []
+            queue_path = config.data_dir / "one-memory.sqlite3"
+            with sqlite3.connect(queue_path) as db:
+                before = db.execute(
+                    "SELECT job_id FROM memory_write_jobs ORDER BY job_id"
+                ).fetchall()
 
             def capture_then_accept(*args):
                 targets = capture(*args)
                 revised = {**event, "event_id": str(uuid4()), "revision": 2}
                 # capture_sources runs in a thread; HTTP runs on the owning loop.
-                admitted.append(
-                    asyncio.run_coroutine_threadsafe(accepted(web, headers, revised), loop).result(
-                        10
-                    )
+                attempted.append(
+                    asyncio.run_coroutine_threadsafe(
+                        web.post("/hub/v1/events", headers=headers, json=revised), loop
+                    ).result(10)
                 )
                 return targets
 
@@ -771,7 +775,16 @@ def test_inflight_acceptance_between_source_capture_and_plan(tmp_path, monkeypat
                 EXECUTE, headers=admin, json={**body, "expected_view": view.json()["view_digest"]}
             )
             assert reply.status_code == 200, reply.text
-            assert reply.json()["state"] == "completed" and len(admitted) == 1
+            assert reply.json()["state"] == "completed" and len(attempted) == 1
+            assert (attempted[0].status_code, attempted[0].json()["detail"]) == (
+                503,
+                "governance_maintenance_in_progress",
+            )
+            with sqlite3.connect(queue_path) as db:
+                assert (
+                    db.execute("SELECT job_id FROM memory_write_jobs ORDER BY job_id").fetchall()
+                    == before
+                )
             # Control: an admission after the plan is rejected, not queued.
             denied = await web.post(
                 "/hub/v1/events",
@@ -782,7 +795,6 @@ def test_inflight_acceptance_between_source_capture_and_plan(tmp_path, monkeypat
                 409,
                 "governance_source_suppressed",
             )
-            await assert_inflight_is_not_extracted(app, monkeypatch, admitted[0])
 
     asyncio.run(scenario())
 
