@@ -124,6 +124,11 @@
       "path": "patches/0024-diagnostic-file-handlers.patch",
       "scope": "synchronous_owned_file_handler_maintenance_and_retryable_rebind",
       "digest": "sha256:cb492f4b599302dd99d07c31ab31165689a99a7d165f478d1fcd9348d72671ac"
+    },
+    {
+      "path": "patches/0025-core-diagnostic-maintenance.patch",
+      "scope": "core_diagnostic_writer_pause_join_and_owned_rotating_handler_maintenance",
+      "digest": "sha256:6a5cf07b03a654f4847508c353da3e93569c30d6349777167dddc8c78bebf8fe"
     }
   ]
 }
