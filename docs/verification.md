@@ -77,6 +77,8 @@
 
 ## 当前工程检查
 
+2026-11-10 副作用观察增加 `test_sdk_write_effect_observation.py` 与 `make probe-write-effects`：原生非空写入、业务结果遗漏的旧节点/画像、批量部分写、异常/取消、结果重开/重放、请求隔离、旧结果及字节预算。它只验证观察记录，不作为完整副作用证书。`test_purge_diagnostic_recovery.py`、`test_purge_history_recovery.py` 和治理安装探针补齐同请求诊断表首次/重试/仅缓存恢复、独立 history 恢复及无关行保留，关联 FR-10、FR-11、ENG-01。设计边界见 [ADR-0039](adr/0039-sdk-write-effect-observation.md) 和 [ADR-0035 补充](adr/0035-purge-cache-recovery.md)。
+
 2026-11-07 治理执行增加 test_governance_execution.py 和 make probe-governance-execution，关联 FR-09、FR-10、FR-11、FR-12。覆盖忘记的范围、抑制、幂等、崩溃续做和篡改拒绝，彻底删除的逐字节核验、无关数据保留、中断续做与恢复旧数据后重新清理；已知 HNSW 预分配缺口单独固定。见 [ADR-0032](adr/0032-governance-execution.md) 与[验证记录](reviews/2026-11-07-governance-execution.md)。
 
 2026-11-09 稳定来源屏蔽补充：上述治理测试和跨进程探针新增原文删除后新修订被拒绝、队列未新增任务、恢复旧业务数据后规则仍有效、旧操作兼容和屏蔽行缺失拒绝。关联 FR-10、FR-11；设计与验收边界见 [ADR-0033](adr/0033-durable-source-suppression.md)。

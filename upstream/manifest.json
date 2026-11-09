@@ -104,6 +104,11 @@
       "path": "patches/0020-trusted-governance-cancel.patch",
       "scope": "internal_governance_compare_and_swap_cancel_and_targeted_reap",
       "digest": "sha256:2be0d3fc878d082632d1f1252c0c756e27578c5b01f1182dd625b18803c6c06d"
+    },
+    {
+      "path": "patches/0021-sdk-write-effect-observation.patch",
+      "scope": "bounded_native_write_observation_without_governance_authority",
+      "digest": "sha256:ac1e75c0c3d44aefe2496e27f21ebd082ebd093c3ef6749dbf38a5e11fe3144a"
     }
   ]
 }

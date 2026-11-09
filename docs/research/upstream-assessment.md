@@ -94,3 +94,5 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 补丁 0019 复用 `MemoryTaskRunner.request_for`、原输入清洗和 imported-content 判路由，并在 `HyMemoryBridge` 两个既有生成入口及两个构造点增加可选的调用前许可。固定上游只有调用标记与事后结果，无法证明任务从未进入 SDK；因此需要 Hub 独立出生登记与持久见证。最终 SDK 实参由同一构造器产生，登记指纹与实际调用共用；未启用回调时保留原行为。独立入口 `import_sdk_*_exact`、update/delete 不属于这两个生成门，不能因此宣称所有变更都被覆盖。设计与兼容边界见 [ADR-0038](../adr/0038-durable-sdk-admission.md)。
 
 补丁 0020 复用 Core 状态机与 `main_database` 原子写事务，只新增受信治理协调器可调用的精确比较取消与单任务终态正文清理；原 `settle`／unknown 查询规则不放宽，不增加 HTTP 接口。独立证据、签名范围与调用互斥由 Hub 提供，API 本身不宣称具备这些证明。2026-11-10 已接入治理 execute/resume，复用有界候选校验和原文验证，以签名 job/request/正文摘要限定调用；旧请求定位与终态恢复也共享这些预算工具，未另建队列或无副作用推断。真实成功和保护性拒绝的边界见[在途执行记录](../reviews/2026-11-10-inflight-execution.md)。
+
+2026-11-10 副作用调查确认成功结果不覆盖 shadow-only UPDATE、链折叠、画像旁路及生产力 SQLite 先写后向量失败的残留。补丁 0021 首先复用 Chroma 五个变更入口、history 共同插入、SQLite 请求日志/episode 和原 SDK 生命周期，增加请求级有界观察。无需复制每个 writer 分支或引入第二个存储；上游没有完整持久覆盖证书，因此这一观察不直接授权删除。诊断缓存清理复用原 `Purger` 的精确请求定位，补齐原生两张日志表；没有重建日志后端。具体合同和剩余持久证据见 [ADR-0039](../adr/0039-sdk-write-effect-observation.md)。

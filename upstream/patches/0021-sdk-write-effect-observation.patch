@@ -1,0 +1,627 @@
+diff --git a/hy_memory/client.py b/hy_memory/client.py
+index 4f676b2..ebcd180 100644
+--- a/hy_memory/client.py
++++ b/hy_memory/client.py
+@@ -88,6 +88,8 @@ _WORKING_EXPERIENCE_MIN_SCORE_DELTA = 0.10
+ _CODING_GET_MANY_MAX_IDS = 500
+
+
++from .core.write_effects import WriteEffectObservation, unsupported as _unobserved_effect_domain
++
+ _WRITE_DIAGNOSTIC_KEYS = (
+     "agent_status",
+     "agent_error_code",
+@@ -2490,7 +2492,7 @@ class HyMemoryClient:
+         if not await self._cache.finish_write_outcome(request_id, status, result):
+             raise RuntimeError("write outcome disappeared before completion")
+
+-    async def _mark_write_outcome_unknown(self, request_id: str) -> None:
++    async def _mark_write_outcome_unknown(self, request_id: str, observation=None) -> None:
+         await self._finish_write_outcome(
+             request_id,
+             "unknown",
+@@ -2499,6 +2501,7 @@ class HyMemoryClient:
+                 "request_id": request_id,
+                 "outcome_status": "unknown",
+                 "error_code": "write_outcome_unknown",
++                **({"write_effects": observation.seal()} if observation is not None else {}),
+             },
+         )
+
+@@ -2536,14 +2539,28 @@ class HyMemoryClient:
+         )
+         if replay is not None:
+             return replay
++        observation = WriteEffectObservation.for_client(
++            self, request_id=request_id, user_id=user_id, agent_id=agent_id,
++            session_id=session_id, operation="add",
++        )
++        token = observation.activate()
+         try:
+-            if embed_override:
+-                with embed_endpoint_override(
+-                    base_url=embed_override.get("base_url"),
+-                    api_key=embed_override.get("api_key"),
+-                    extra_headers=embed_override.get("extra_headers"),
+-                    timeout=embed_override.get("timeout"),
+-                ):
++            try:
++                if embed_override:
++                    with embed_endpoint_override(
++                        base_url=embed_override.get("base_url"),
++                        api_key=embed_override.get("api_key"),
++                        extra_headers=embed_override.get("extra_headers"),
++                        timeout=embed_override.get("timeout"),
++                    ):
++                        result = await self._async_add_impl(
++                            data, user_id=user_id, agent_id=agent_id, session_id=session_id,
++                            source=source,
++                            metadata=metadata, memory_at=memory_at,
++                            scene=scene, workspace_id=workspace_id, branch=branch,
++                            request_id=request_id, meta=meta,
++                        )
++                else:
+                     result = await self._async_add_impl(
+                         data, user_id=user_id, agent_id=agent_id, session_id=session_id,
+                         source=source,
+@@ -2551,17 +2568,12 @@ class HyMemoryClient:
+                         scene=scene, workspace_id=workspace_id, branch=branch,
+                         request_id=request_id, meta=meta,
+                     )
+-            else:
+-                result = await self._async_add_impl(
+-                    data, user_id=user_id, agent_id=agent_id, session_id=session_id,
+-                    source=source,
+-                    metadata=metadata, memory_at=memory_at,
+-                    scene=scene, workspace_id=workspace_id, branch=branch,
+-                    request_id=request_id, meta=meta,
+-                )
+-        except BaseException:
+-            await self._mark_write_outcome_unknown(request_id)
+-            raise
++            except BaseException:
++                await self._mark_write_outcome_unknown(request_id, observation)
++                raise
++            result["write_effects"] = observation.seal()
++        finally:
++            observation.reset(token)
+         await self._finish_write_outcome(
+             request_id,
+             "succeeded" if result.get("success") is True else "failed",
+@@ -2736,6 +2748,7 @@ class HyMemoryClient:
+                     is_coding = False
+
+             if is_coding:
++                _unobserved_effect_domain("productivity_unobserved")
+                 logger.info(
+                     f"[add] routing to PRODUCTIVITY path variant={scene_variant}: "
+                     f"user={uid} agent_id={agent_id} "
+@@ -3059,20 +3072,29 @@ class HyMemoryClient:
+         )
+         if replay is not None:
+             return replay
++        observation = WriteEffectObservation.for_client(
++            self, request_id=request_id, user_id=user_id, agent_id=agent_id,
++            session_id=session_id, operation="add_extracted",
++        )
++        token = observation.activate()
+         try:
+-            result = await self._async_add_extracted_impl(
+-                contents,
+-                user_id=user_id,
+-                agent_id=agent_id,
+-                session_id=session_id,
+-                source=source,
+-                metadata=metadata,
+-                memory_at=memory_at,
+-                request_id=request_id,
+-            )
+-        except BaseException:
+-            await self._mark_write_outcome_unknown(request_id)
+-            raise
++            try:
++                result = await self._async_add_extracted_impl(
++                    contents,
++                    user_id=user_id,
++                    agent_id=agent_id,
++                    session_id=session_id,
++                    source=source,
++                    metadata=metadata,
++                    memory_at=memory_at,
++                    request_id=request_id,
++                )
++            except BaseException:
++                await self._mark_write_outcome_unknown(request_id, observation)
++                raise
++            result["write_effects"] = observation.seal()
++        finally:
++            observation.reset(token)
+         await self._finish_write_outcome(
+             request_id,
+             "succeeded" if result.get("success") is True else "failed",
+diff --git a/hy_memory/core/write_effects.py b/hy_memory/core/write_effects.py
+new file mode 100644
+index 0000000..bd4204e
+--- /dev/null
++++ b/hy_memory/core/write_effects.py
+@@ -0,0 +1,316 @@
++"""Bounded observations of native mutations, never a governance certificate.
++
++The snapshot is only call-local evidence. It is not durable before a mutation,
++not rollback resistant, and does not prove that all persistent domains are covered.
++"""
++
++import copy
++import inspect
++import json
++import threading
++from contextlib import contextmanager
++from contextvars import ContextVar
++from functools import wraps
++
++_CURRENT = ContextVar("hy_write_effect_observation", default=None)
++_DOMAINS = frozenset({"chroma", "history", "cache_request_rows", "cache_episode_state"})
++_DOMAIN_STATES = {
++    "write_outcome": {"known_preexisting_claim_and_terminal_envelope"},
++    "chroma": {"observed", "not_observed"},
++    "history": {"observed", "disabled", "not_observed"},
++    "cache_request_rows": {"observed", "not_observed"},
++    "cache_episode_state": {"observed", "not_observed"},
++    "graph": {"disabled", "not_observed"},
++    "productivity": {"not_used", "not_observed"},
++    "diagnostic_files": {"not_observed"},
++    "entity_index": {"disabled", "not_observed"},
++    "tag_index": {"unsupported_by_backend", "not_observed"},
++    "retrieval_clause_index": {"unsupported_by_backend", "not_observed"},
++}
++_REASONS = frozenset(
++    {
++        "identity_limit",
++        "selector_invalid",
++        "attempt_limit",
++        "byte_limit",
++        "late_mutation",
++        "pending_mutation",
++        "vector_backend_unobserved",
++        "history_backend_unobserved",
++        "cache_backend_unobserved",
++        "graph_unobserved",
++        "productivity_unobserved",
++        "derived_writer_unobserved",
++        "entity_index_unobserved",
++        "background_pipeline_logs_unjoined",
++        "unknown_domain",
++    }
++)
++
++
++class WriteEffectObservation:
++    MAX_ATTEMPTS = 1024
++    MAX_STRING_BYTES = 512
++    MAX_BYTES = 256 * 1024
++
++    def __init__(
++        self, *, request_id, user_id, agent_id, session_id, operation, domains=None
++    ):
++        self._lock = threading.RLock()
++        self._sealed = False
++        self._reasons = set()
++        self._attempts = []
++        self._pending = set()
++        self._bytes = 0
++        self._examined = 0
++        self._unsupported = False
++        self._request = {}
++        for key, value in dict(
++            request_id=request_id,
++            user_id=user_id,
++            agent_id=agent_id,
++            session_id=session_id,
++            operation=operation,
++        ).items():
++            if (
++                not isinstance(value, str)
++                or len(value.encode("utf-8")) > self.MAX_STRING_BYTES
++            ):
++                self._request[key] = None
++                self._reasons.add("identity_limit")
++            else:
++                self._request[key] = value
++        self._domains = {}
++        if isinstance(domains, dict):
++            for name in _DOMAIN_STATES:
++                state = domains.get(name)
++                if isinstance(state, str) and state in _DOMAIN_STATES[name]:
++                    self._domains[name] = state
++                elif name in domains:
++                    self.partial("unknown_domain")
++            if domains.keys() - _DOMAIN_STATES.keys():
++                self.partial("unknown_domain")
++        elif domains is not None:
++            self.partial("unknown_domain")
++        # JSON escaping can expand even ASCII identity bytes sixfold. Reserve
++        # the actual encoded header, with every bounded reason already present.
++        header = self.snapshot()
++        header.update(status="unsupported", reasons=sorted(_REASONS))
++        header["domains"] = {
++            name: max(states, key=len) for name, states in _DOMAIN_STATES.items()
++        }
++        self._header_bytes = len(json.dumps(header, ensure_ascii=False).encode())
++
++    @classmethod
++    def for_client(cls, client, **identity):
++        from ..data.cache_sqlite import SqliteCache
++        from ..data.history_store import HistoryStore
++        from ..data.vector_store_chroma import ChromaVectorStore
++
++        vector = getattr(client, "_vector_store", None)
++        cache = getattr(client, "_cache", None)
++        history = getattr(client, "_history_store", None)
++        graph = getattr(client, "_graph_store", None)
++        recall = getattr(getattr(client, "_config", None), "recall", None)
++        entity_disabled = getattr(recall, "entity_store_enabled", None) is False
++        chroma = type(vector) is ChromaVectorStore
++        sqlite = type(cache) is SqliteCache
++        domains = {
++            "write_outcome": "known_preexisting_claim_and_terminal_envelope",
++            "chroma": "observed" if chroma else "not_observed",
++            "history": "disabled"
++            if history is None
++            else ("observed" if type(history) is HistoryStore else "not_observed"),
++            "cache_request_rows": "observed" if sqlite else "not_observed",
++            "cache_episode_state": "observed" if sqlite else "not_observed",
++            "graph": "disabled" if graph is None else "not_observed",
++            "productivity": "not_used",
++            "diagnostic_files": "not_observed",
++            "entity_index": "disabled" if entity_disabled else "not_observed",
++            "tag_index": "unsupported_by_backend" if chroma else "not_observed",
++            "retrieval_clause_index": "unsupported_by_backend"
++            if chroma
++            else "not_observed",
++        }
++        observation = cls(domains=domains, **identity)
++        for unavailable, reason in (
++            (not chroma, "vector_backend_unobserved"),
++            (not sqlite, "cache_backend_unobserved"),
++            (
++                history is not None and type(history) is not HistoryStore,
++                "history_backend_unobserved",
++            ),
++            (graph is not None, "graph_unobserved"),
++            (not entity_disabled, "entity_index_unobserved"),
++            (getattr(client, "_mode", None) == "ultra", "derived_writer_unobserved"),
++        ):
++            if unavailable:
++                observation.unsupported(reason)
++        return observation
++
++    def activate(self):
++        return _CURRENT.set(self)
++
++    @staticmethod
++    def reset(token):
++        _CURRENT.reset(token)
++
++    def partial(self, reason):
++        with self._lock:
++            self._reasons.add(reason if reason in _REASONS else "unknown_domain")
++
++    def unsupported(self, reason):
++        with self._lock:
++            self._unsupported = True
++            self.partial(reason)
++            if reason == "productivity_unobserved":
++                self._domains["productivity"] = "not_observed"
++
++    def begin(self, domain, operation, selectors):
++        """Record the bounded batch before any backend I/O; never copy bodies."""
++        with self._lock:
++            if self._sealed:
++                self.partial("late_mutation")
++                return ()
++            if domain not in _DOMAINS:
++                self.partial("unknown_domain")
++                return ()
++            tokens = []
++            try:
++                for selector in selectors:
++                    if self._examined >= self.MAX_ATTEMPTS:
++                        self.partial("attempt_limit")
++                        break
++                    self._examined += 1
++                    if (
++                        not isinstance(operation, str)
++                        or len(operation.encode()) > self.MAX_STRING_BYTES
++                        or not isinstance(selector, dict)
++                        or not 1 <= len(selector) <= 3
++                        or any(
++                            key
++                            not in {
++                                "collection",
++                                "node_id",
++                                "memory_id",
++                                "table",
++                                "request_id",
++                                "episode_key",
++                            }
++                            or not isinstance(value, str)
++                            or len(value.encode("utf-8")) > self.MAX_STRING_BYTES
++                            for key, value in selector.items()
++                        )
++                    ):
++                        self.partial("selector_invalid")
++                        continue
++                    entry = {
++                        "domain": domain,
++                        "operation": operation,
++                        "selector": dict(selector),
++                        "state": "uncertain",
++                    }
++                    size = len(json.dumps(entry, ensure_ascii=False).encode()) + 2
++                    # Reserve bounded request/domain/reason/header space.
++                    if self._bytes + size + self._header_bytes > self.MAX_BYTES:
++                        self.partial("byte_limit")
++                        break
++                    index = len(self._attempts)
++                    self._attempts.append(entry)
++                    self._pending.add(index)
++                    self._bytes += size
++                    tokens.append(index)
++            except Exception:
++                self.partial("selector_invalid")
++            return tuple(tokens)
++
++    def finish(self, tokens, *, returned):
++        with self._lock:
++            if self._sealed:
++                self.partial("late_mutation")
++                return
++            for index in tokens:
++                self._pending.discard(index)
++                if returned:
++                    self._attempts[index]["state"] = "returned"
++
++    def seal(self):
++        with self._lock:
++            if self._pending:
++                self.partial("pending_mutation")
++            self._sealed = True
++            return self.snapshot()
++
++    def snapshot(self):
++        """Return a detached snapshot. A sealed snapshot is not a no-late-writes claim."""
++        with self._lock:
++            status = (
++                "unsupported"
++                if self._unsupported
++                else ("partial" if self._reasons else "recorded")
++            )
++            return copy.deepcopy(
++                {
++                    "schema_version": 1,
++                    "observation_only": True,
++                    "all_effects_proven": False,
++                    "status": status,
++                    "snapshot_sealed": self._sealed,
++                    "request": self._request,
++                    "domains": self._domains,
++                    "attempts": self._attempts,
++                    "reasons": sorted(self._reasons),
++                }
++            )
++
++
++def unsupported(reason):
++    observation = _CURRENT.get()
++    if observation is not None:
++        observation.unsupported(reason)
++
++
++@contextmanager
++def observe_mutation(domain, operation, selectors):
++    """Observe an already prepared batch without consuming native inputs twice."""
++    observation = _CURRENT.get()
++    tokens = (
++        observation.begin(domain, operation, selectors)
++        if observation is not None
++        else ()
++    )
++    returned = False
++    try:
++        yield
++        returned = True
++    finally:
++        if observation is not None:
++            observation.finish(tokens, returned=returned)
++
++
++def observe_async(domain, operation, selectors, *, partial_reason=None):
++    """Observe an async facade. 'returned' means normal Python return, not success."""
++
++    def decorate(function):
++        signature = inspect.signature(function)
++
++        @wraps(function)
++        async def observed(*args, **kwargs):
++            observation = _CURRENT.get()
++            if observation is None:
++                return await function(*args, **kwargs)
++            if partial_reason:
++                observation.partial(partial_reason)
++            selected = ()
++            try:
++                arguments = signature.bind(*args, **kwargs)
++                arguments.apply_defaults()
++                selected = selectors(arguments.arguments)
++            except Exception:
++                observation.partial("selector_invalid")
++            with observe_mutation(domain, operation, selected):
++                return await function(*args, **kwargs)
++
++        return observed
++
++    return decorate
+diff --git a/hy_memory/data/cache_sqlite.py b/hy_memory/data/cache_sqlite.py
+index 3cca357..0f989a3 100644
+--- a/hy_memory/data/cache_sqlite.py
++++ b/hy_memory/data/cache_sqlite.py
+@@ -24,6 +24,7 @@ from datetime import datetime
+ from typing import Optional, List, Dict, Any
+
+ from .cache_base import CacheBase
++from ..core.write_effects import observe_async
+ from ..config import MemoryConfig
+ from ..utils.async_executor import run_in_executor_guarded
+
+@@ -125,6 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_episode_user ON episode_state(user_id);
+ """
+
+
++
+ class SqliteCache(CacheBase):
+     """
+     SQLite 审计/观测落库后端（memory_operations / pipeline_logs / system_metrics）。
+@@ -218,6 +220,7 @@ class SqliteCache(CacheBase):
+     # Memory Operations Log
+     # ================================================================
+
++    @observe_async("cache_request_rows", "store_memory_operation", lambda a: ({"table": "memory_operations_v2", "request_id": a["request_id"]},))
+     async def store_memory_operation(
+         self,
+         request_id: str,
+@@ -319,6 +322,7 @@ class SqliteCache(CacheBase):
+     # Pipeline Logs (LLM 调用链中间结果)
+     # ================================================================
+
++    @observe_async("cache_request_rows", "store_pipeline_log", lambda a: ({"table": "pipeline_logs_v2", "request_id": a["request_id"]},))
+     async def store_pipeline_log(
+         self,
+         request_id: str,
+@@ -608,6 +612,7 @@ class SqliteCache(CacheBase):
+             logger.warning(f"get_episode_state failed: {e}")
+             return None
+
++    @observe_async("cache_episode_state", "upsert_episode_state", lambda a: ({"table": "episode_state", "episode_key": a["episode_key"]},))
+     async def upsert_episode_state(
+         self,
+         episode_key: str,
+diff --git a/hy_memory/data/history_store.py b/hy_memory/data/history_store.py
+index a547a69..8faf9cc 100644
+--- a/hy_memory/data/history_store.py
++++ b/hy_memory/data/history_store.py
+@@ -21,6 +21,7 @@ from datetime import datetime, timezone
+ from typing import Dict, List, Any, Optional
+
+ from .cache_sqlite import _sqlite_executor
++from ..core.write_effects import observe_async
+ from ..utils.async_executor import run_in_executor_guarded
+
+ logger = logging.getLogger(__name__)
+@@ -71,6 +72,7 @@ def _escape_like(value: str) -> str:
+     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
++
+ class HistoryStore:
+     """
+     SQLite 历史存储 - 记录所有内存操作的审计日志。
+@@ -335,6 +337,7 @@ class HistoryStore:
+     # 内部
+     # ================================================================
+
++    @observe_async("history", "insert", lambda a: ({"memory_id": a["memory_id"]},))
+     async def _insert(
+         self,
+         memory_id: str,
+diff --git a/hy_memory/data/vector_store_chroma.py b/hy_memory/data/vector_store_chroma.py
+index b662c77..a64e576 100644
+--- a/hy_memory/data/vector_store_chroma.py
++++ b/hy_memory/data/vector_store_chroma.py
+@@ -20,6 +20,7 @@ from ..models.memory import (
+ from ..config import MemoryConfig
+ from ..utils.async_executor import run_in_executor_guarded
+ from ..coding.record_origin import invalidate_memory_origin
++from ..core.write_effects import observe_async, observe_mutation
+ from .vector_store_base import VectorStoreBase, passes_created_after
+
+ # created_after 走 post-filter，先按倍数扩池再过滤，避免过滤后不够 limit
+@@ -40,6 +41,7 @@ async def _run_in_vdb_pool(func, *args, **kwargs):
+     return await run_in_executor_guarded(_vdb_executor, call)
+
+
++
+ class ChromaVectorStore(VectorStoreBase):
+     """
+     Chroma 向量存储实现
+@@ -95,6 +97,7 @@ class ChromaVectorStore(VectorStoreBase):
+     # 写入
+     # ================================================================
+
++    @observe_async("chroma", "upsert", lambda a: ({"collection": a["self"]._collection_name, "node_id": a["node"].node_id},))
+     async def upsert(self, node: MemoryNode) -> str:
+         """写入或更新一个 MemoryNode"""
+         if node.embedding is None:
+@@ -149,9 +152,14 @@ class ChromaVectorStore(VectorStoreBase):
+                 documents=documents,
+             )
+
+-        await _run_in_vdb_pool(_upsert_batch)
++        with observe_mutation(
++            "chroma", "upsert_batch",
++            ({"collection": self._collection_name, "node_id": node.node_id} for node in valid_nodes),
++        ):
++            await _run_in_vdb_pool(_upsert_batch)
+         return [n.node_id for n in valid_nodes]
+
++    @observe_async("chroma", "update_embedding", lambda a: ({"collection": a["self"]._collection_name, "node_id": a["node_id"]},))
+     async def update_embedding(self, node_id: str, embedding: List[float]) -> bool:
+         """仅更新向量（payload 不变）"""
+         point_id = self._node_id_to_point_id(node_id)
+@@ -168,6 +176,7 @@ class ChromaVectorStore(VectorStoreBase):
+             logger.warning(f"Failed to update embedding for {node_id}: {e}")
+             return False
+
++    @observe_async("chroma", "update_payload", lambda a: ({"collection": a["self"]._collection_name, "node_id": a["node_id"]},))
+     async def update_payload(self, node_id: str, updates: Dict[str, Any]) -> bool:
+         """更新 payload 字段；若 updates 含 'embedding'，同时更新向量与 documents。"""
+         if not updates:
+@@ -362,6 +371,7 @@ class ChromaVectorStore(VectorStoreBase):
+     # 删除
+     # ================================================================
+
++    @observe_async("chroma", "delete", lambda a: ({"collection": a["self"]._collection_name, "node_id": a["node_id"]},))
+     async def delete(self, node_id: str) -> bool:
+         """删除单个向量点"""
+         point_id = self._node_id_to_point_id(node_id)
+diff --git a/hy_memory/utils/pipeline_observability.py b/hy_memory/utils/pipeline_observability.py
+index b196e6d..ec8bb03 100644
+--- a/hy_memory/utils/pipeline_observability.py
++++ b/hy_memory/utils/pipeline_observability.py
+@@ -40,6 +40,7 @@ from pathlib import Path
+ from typing import Any, Callable, Set
+
+ from .async_executor import run_in_executor_guarded
++from ..core.write_effects import observe_async
+
+ logger = logging.getLogger(__name__)
+
+@@ -256,6 +257,7 @@ async def drain_pipeline_log_tasks(timeout: float = 5.0) -> None:
+         )
+
+
++
+ def wrap_store_pipeline_log(
+     original_store: Callable[..., Any],
+     *,
+@@ -331,6 +333,11 @@ def wrap_store_pipeline_log(
+             state["released"] = True
+             _trace_pending = max(0, _trace_pending - 1)
+
++    @observe_async(
++        "cache_request_rows", "enqueue_pipeline_log",
++        lambda a: ({"table": "pipeline_logs_v2", "request_id": a["request_id"]},),
++        partial_reason="background_pipeline_logs_unjoined",
++    )
+     async def _store_pipeline_observability(
+         *,
+         request_id: str = "",
