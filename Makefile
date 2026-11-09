@@ -107,3 +107,15 @@ check-web:
 .PHONY: probe-governance-execution
 probe-governance-execution: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_governance_execution.py
+
+.PHONY: probe-drain-quiescence
+probe-drain-quiescence: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_drain_quiescence.py
+
+.PHONY: probe-entity-inventory
+probe-entity-inventory: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_entity_inventory.py
+
+.PHONY: probe-productivity-forget-guard
+probe-productivity-forget-guard: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_productivity_forget_guard.py

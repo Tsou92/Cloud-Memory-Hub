@@ -9,8 +9,10 @@ from dataclasses import replace
 from importlib.metadata import version
 from pathlib import Path
 
+from chromadb.errors import NotFoundError
 from hy_memory.data.vector_store_chroma import ChromaVectorStore, _run_in_vdb_pool
 from hy_memory.models.memory import MemoryLayer, MemoryStatus
+from hy_memory.pipelines._retrieval.config import entity_collection_name
 from one_memory.hy_memory_bridge import _joined_thread
 
 from cloud_memory_hub.chain_inventory import require_chain_origins
@@ -109,10 +111,58 @@ async def _check_ownership(vector, graph, records, vector_ids, namespace):
             raise GovernanceError("governance_backend_conflict")
 
 
-async def _observe(sdk, namespace, profile_origins=None):
+async def _require_no_entity_copies(vector, namespace):
+    def check():
+        try:
+            collection = vector._client.get_collection(
+                name=entity_collection_name(vector._collection_name)
+            )
+        except NotFoundError:
+            return
+        # list_entities creates a collection and decodes its content. Only
+        # inspect one authoritative scoped ID, including after disabling writes.
+        found = collection.get(where={"user_id": {"$eq": namespace}}, include=[], limit=1)
+        if (
+            not isinstance(found, dict)
+            or not isinstance(found.get("ids"), list)
+            or len(found["ids"]) > 1
+            or any(not isinstance(value, str) or not value for value in found["ids"])
+        ):
+            raise GovernanceError("governance_store_shape_unknown")
+        if found["ids"]:
+            raise GovernanceError("governance_derivation_unmodeled")
+
+    await _run_in_vdb_pool(check)
+
+
+async def _require_modeled_scope(sdk, namespace):
+    require_modeled_derivations(sdk._config)
     vector = sdk._vector_store
     if not isinstance(vector, ChromaVectorStore):
         raise GovernanceError("governance_backend_unsupported")
+    await _require_no_entity_copies(vector, namespace)
+
+
+async def require_modeled_scope(bridge, namespace):
+    """Bounded recovery preflight; the caller already holds exclusive admission.
+
+    Recovery may have removed part of the lineage, so it cannot rebuild the full
+    inventory. Check only writer configuration and one scoped companion ID.
+    """
+    try:
+        if version("hy-memory") != "2.0.5.dev3":
+            raise GovernanceError("governance_sdk_version_unsupported")
+        sdk = await bridge._get_client()
+        await _joined_thread(lambda: sdk._loop_thread.run(_require_modeled_scope(sdk, namespace)))
+    except GovernanceError:
+        raise
+    except Exception:
+        raise GovernanceError("governance_inventory_unavailable") from None
+
+
+async def _observe(sdk, namespace, profile_origins=None):
+    await _require_modeled_scope(sdk, namespace)
+    vector = sdk._vector_store
     # Inspect authoritative IDs before decoding; MemoryNode.from_dict otherwise
     # invents a new UUID for a damaged/missing ID, which is unsafe for a plan.
     raw = await _run_in_vdb_pool(
@@ -264,6 +314,7 @@ def require_modeled_derivations(config):
         or recall.episode_summary_enabled
         or recall.session_episode_enabled
         or recall.series_episode_enabled
+        or recall.entity_store_enabled
         or graph.topic_summary_enabled
     ):
         raise GovernanceError("governance_derivation_unmodeled")
@@ -284,7 +335,6 @@ async def observe_inventory(bridge, namespace, lineage=None):
             raise GovernanceError("governance_sdk_version_unsupported")
         async with bridge.exclusive_access():
             sdk = await bridge._get_client()
-            require_modeled_derivations(sdk._config)
             profile_origins = {} if lineage is not None else None
             nodes = await _joined_thread(
                 lambda: sdk._loop_thread.run(_observe(sdk, namespace, profile_origins))

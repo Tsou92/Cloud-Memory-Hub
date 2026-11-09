@@ -85,6 +85,10 @@
 
 同日后续 [内容及任务协调验证](reviews/2026-11-09-content-quiescence.md) 新增内容规则/真实治理、底层 Drain 和 Hub 生命周期测试；G-B 两项已验证修复，预期失败减为 6 项。跨进程治理探针增加换来源与全部 ID、混合消息整事件拒绝，另有独立安装队列合同探针；各自的模拟范围和未完成清扫边界单列。
 
+同日治理请求重试与实体恢复增加 `test_governance_request_identity.py`、`test_entity_inventory_guard.py`，并扩展安装治理探针的来源修订和同 UUID 重试验证。关联 FR-10、FR-11、ENG-01；请求冲突、日志前后中断、旧操作兼容、实体开关关闭后残留以及旧 planned/completed 操作恢复边界见[本轮记录](reviews/2026-11-09-governance-retry-and-entities.md)。
+
+同轮补充 `test_forget_recovery.py` 9 项与 `test_productivity_forget_guard.py` 20 项：真实旧业务恢复后的下一轮 SDK 提炼输入不再使用已忘记普通原文；生产力范围暂不能停止内部合并输入，须在新执行、重试及旧操作恢复时明确拒绝。安装探针分别覆盖实体副本、生产力拒绝和跨进程组合恢复；保护性拒绝不计作 FR-10 完整能力通过。
+
 2026-11-03 基础画像增加 test_profile_evidence.py 和 make probe-profile-evidence，关联 FR-08、FR-09、FR-10、FR-11、FR-12。覆盖原生差异/迁移、实际旧输入冻结、部分副作用、取消/故障/预算、结构化 KV 摘要、Chroma 空身份格式，以及只有画像产出的 SDK 跨进程持久结果与禁止写入重放。见 [ADR-0028](adr/0028-basic-profile-evidence.md) 和[验证记录](reviews/2026-11-03-profile-evidence.md)；尚不等于 Hub 画像来源图或删除闭环。
 
 后续 Hub 接线新增 test_profile_archive.py、test_profile_graph.py 和 make probe-profile-graph，验证同作用域跨 Agent 的独立产出索引、原始来源、当前画像来源校验、事务中断/无重写补档与隔离；普通合并快照同时补齐本次聊天历史父边，避免遗漏快照中的派生内容。见 [ADR-0029](adr/0029-basic-profile-lineage.md) 和[记录](reviews/2026-11-03-profile-lineage.md)。不据此宣称完整输入时序、安全删除或恢复已完成。
