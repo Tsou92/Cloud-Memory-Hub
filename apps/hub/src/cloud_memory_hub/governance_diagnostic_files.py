@@ -14,17 +14,23 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import uuid4
 
+from cloud_memory_hub.governance_diagnostic_confirmation import cleanup_digest
 from cloud_memory_hub.governance_diagnostic_inventory import (
     FileObservation,
     InventoryBudget,
     _inspection,
     _snapshot,
 )
+from cloud_memory_hub.governance_diagnostic_profiles import CORE_PROFILE, SDK_PROFILE
 from cloud_memory_hub.governance_diagnostic_records import WriteRequest
-from cloud_memory_hub.governance_diagnostic_recovery import build_recovery_graph
+from cloud_memory_hub.governance_diagnostic_recovery import (
+    build_recovery_graph,
+    resolve_cleanup_authority,
+)
 from cloud_memory_hub.governance_execution_store import (
     ArtifactAbsence,
     ArtifactEntry,
+    CleanupContributor,
     CleanupManifest,
     CleanupVerification,
     manifest_digest,
@@ -234,7 +240,7 @@ def _retire_previous(store, receipt, capture, scan):
     return receipt, _absence(scan, receipt)
 
 
-def _new_manifest(operation_id, capture, *, contributors=None):
+def _new_manifest(operation_id, capture, *, contributors=None, profile=SDK_PROFILE):
     pass_id = str(uuid4())
     entries = []
     for _key, file in sorted(capture.files.items()):
@@ -247,7 +253,9 @@ def _new_manifest(operation_id, capture, *, contributors=None):
                     stage_name(operation_id, pass_id, len(entries)),
                 )
             )
-    return CleanupManifest(operation_id, pass_id, tuple(entries), contributors=contributors)
+    return CleanupManifest(
+        operation_id, pass_id, tuple(entries), contributors=contributors, profile=profile
+    )
 
 
 def _checkpoint(store, receipt, index, state):
@@ -324,10 +332,16 @@ def _execute(
     sdk_log_root,
     gate,
     budget,
+    profile,
     recovery_receipts=None,
     resolved=None,
 ):
     roots = {"pipeline": data_root / "hy-memory/governed-v2/logs", "sdk": sdk_log_root}
+    if profile == CORE_PROFILE:
+        from cloud_memory_hub.diagnostics import require_diagnostic_file_maintenance
+
+        roots.update({"core-log": data_root / "logs", "core-diagnostic": data_root / "logs"})
+        require_diagnostic_file_maintenance(gate, roots=tuple(roots.values()))
     requests = tuple(
         WriteRequest(item.request_id, f"cmh:{store.journal.instance_id}:{receipt.scope_id}")
         for item in receipt.authority.selectors
@@ -339,6 +353,7 @@ def _execute(
         grants=receipt.authority.grants if resolved is None else resolved.grants,
         mode="authorized",
         budget=budget,
+        profile=profile,
     )
     capture = (
         _Capture(receipt, budget)
@@ -378,6 +393,7 @@ def _execute(
             receipt.operation_id,
             capture,
             contributors=None if resolved is None else resolved.contributors,
+            profile=profile,
         )
         receipt = store.begin_pass(
             receipt.operation_id, expected=receipt, manifest=manifest, artifact_absence=absent
@@ -438,7 +454,9 @@ def _execute(
             gate.verify_bound(_bindings(roots, after.files))
             for index in range(len(manifest.artifacts)):
                 receipt = _checkpoint(store, receipt, index, "verified")
-            verification = CleanupVerification(after, _absence(final_scan, receipt))
+            verification = CleanupVerification(
+                after, _absence(final_scan, receipt), profile=profile
+            )
             verified = store.verify_pass(receipt, verification=verification)
             if recovery_receipts is None:
                 return verified
@@ -450,7 +468,7 @@ def _execute(
                 # domain. Each authority keeps its own CAS/absence evidence;
                 # no repair grant is written back into its legacy parent.
                 empty = CleanupManifest(
-                    previous.operation_id, str(uuid4()), (), resolved.contributors
+                    previous.operation_id, str(uuid4()), (), resolved.contributors, profile
                 )
                 current = store.begin_pass(
                     previous.operation_id,
@@ -460,7 +478,9 @@ def _execute(
                 )
                 results[current.operation_id] = store.verify_pass(
                     current,
-                    verification=CleanupVerification(after, _absence(final_scan, current)),
+                    verification=CleanupVerification(
+                        after, _absence(final_scan, current), profile=profile
+                    ),
                 )
             return tuple(results[key] for key in sorted(results))
 
@@ -474,7 +494,7 @@ def execute_diagnostic_files(
     gate,
     budget: InventoryBudget | None = None,
 ):
-    """Return verified two-domain progress, never completion of the whole purge.
+    """Return progress for the actual required domains, never whole-purge completion.
 
     `gate` is the native synchronous maintenance lease already held by the caller.
     All mutations and reopening must execute on that same thread, without await.
@@ -489,9 +509,31 @@ def execute_diagnostic_files(
     budget = InventoryBudget() if budget is None else budget
     if not isinstance(budget, InventoryBudget):
         raise GovernanceError("diagnostic_inventory_budget_invalid")
+    resolved = None
+    if recovery.required_profile == CORE_PROFILE:
+        if recovery.unplanned:
+            raise GovernanceError("governance_execution_pending")
+        resolved = resolve_cleanup_authority(
+            recovery,
+            (
+                CleanupContributor(
+                    operation_id,
+                    recovery.committed_digests[operation_id],
+                    cleanup_digest(receipt.authority),
+                ),
+            ),
+            owner_operation_id=operation_id,
+        )
     try:
         return _execute(
-            store, receipt, data_root=data_root, sdk_log_root=sdk_log_root, gate=gate, budget=budget
+            store,
+            receipt,
+            data_root=data_root,
+            sdk_log_root=sdk_log_root,
+            gate=gate,
+            budget=budget,
+            profile=recovery.required_profile,
+            resolved=resolved,
         )
     except OSError:
         raise GovernanceError("diagnostic_file_io_failed") from None
@@ -535,6 +577,7 @@ def recover_diagnostic_files(
             sdk_log_root=sdk_log_root,
             gate=gate,
             budget=budget,
+            profile=recovery.required_profile,
             recovery_receipts=receipts,
             resolved=resolved,
         )

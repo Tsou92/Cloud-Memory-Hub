@@ -1,7 +1,7 @@
-"""ADR-0042: bounded, read-only observations of two explicit diagnostic domains.
+"""Bounded, read-only observations of explicit SDK and optional Core domains.
 
 Callers establish request selection and writer exclusion. This scan neither
-authorizes deletion nor covers Core, Docker, or arbitrary external log copies.
+authorizes deletion nor covers Docker or arbitrary external log copies.
 Every absolute path component is opened without following symbolic links.
 """
 
@@ -16,6 +16,12 @@ from datetime import date
 from pathlib import Path
 from typing import Literal
 
+from cloud_memory_hub.governance_core_records import CoreFramer, CoreRecordError
+from cloud_memory_hub.governance_diagnostic_profiles import (
+    CORE_PROFILE,
+    SDK_PROFILE,
+    required_domains,
+)
 from cloud_memory_hub.governance_diagnostic_records import (
     RecordGrant,
     RecordInspector,
@@ -26,6 +32,13 @@ from cloud_memory_hub.governance_journal import GovernanceError
 _PIPELINE = ("hy-memory", "governed-v2", "logs")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 _LIMITS = (256, 32 * 1024 * 1024, 128 * 1024 * 1024, 2 * 1024 * 1024, 100_000, 10_000)
+_CORE_NAMES = {
+    "core-log": frozenset(("core.log", *(f"core.log.{index}" for index in range(1, 4)))),
+    "core-diagnostic": frozenset(
+        ("diagnostic-core.jsonl", *(f"diagnostic-core.jsonl.{index}" for index in range(1, 4)))
+    ),
+}
+DiagnosticDomain = Literal["pipeline", "sdk", "core-log", "core-diagnostic"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +49,7 @@ class InventoryBudget:
     max_record_bytes: int = _LIMITS[3]
     max_records: int = _LIMITS[4]
     max_grants: int = _LIMITS[5]
+    max_core_block_bytes: int = _LIMITS[1]
 
     def __post_init__(self):
         values = (
@@ -52,13 +66,15 @@ class InventoryBudget:
                 for value, limit in zip(values, _LIMITS, strict=True)
             )
             or not self.max_record_bytes
+            or type(self.max_core_block_bytes) is not int
+            or not 0 < self.max_core_block_bytes <= _LIMITS[1]
         ):
             raise GovernanceError("diagnostic_inventory_budget_invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class FileObservation:
-    domain: Literal["pipeline", "sdk"]
+    domain: DiagnosticDomain
     key: str
     device: int
     inode: int
@@ -74,7 +90,7 @@ class FileObservation:
 
 @dataclass(frozen=True, slots=True)
 class DomainObservation:
-    domain: Literal["pipeline", "sdk"]
+    domain: DiagnosticDomain
     path: Path
     exists: bool
     device: int | None = None
@@ -88,6 +104,7 @@ class DiagnosticInventory:
     grants: tuple[RecordGrant, ...]
     byte_length: int
     record_count: int
+    profile: str = SDK_PROFILE
 
 
 def _identity(info):
@@ -129,14 +146,17 @@ class _Scan:
         on_file=None,
         artifact=None,
         artifact_limit=0,
+        mode="propose",
     ):
         self.stack, self.inspector, self.budget = stack, inspector, budget
         self.on_record, self.on_file, self.artifact = on_record, on_file, artifact
         self.locations = {}
         self.artifact_limit = artifact_limit
+        self.mode = mode
         self.links = []
         self.missing = []
         self.directories = []
+        self._remembered = {}
         self.files = []
         self.grants = set()
         self.bytes = self.records = 0
@@ -178,53 +198,86 @@ class _Scan:
 
     def remember_directory(self, descriptor):
         before = _snapshot(os.fstat(descriptor))
+        identity = before[:2]
+        if identity in self._remembered:
+            return self._remembered[identity]
         entries = self.entries(descriptor)
         if _snapshot(os.fstat(descriptor)) != before:
             raise GovernanceError("diagnostic_inventory_changed")
         self.directories.append((descriptor, before, entries))
+        self._remembered[identity] = entries
         return entries
 
-    def scan_domain(self, domain, path, descriptor, *, shared=False):
-        if descriptor is None:
-            return DomainObservation(domain, path, False)
+    def _artifact(self, domains, directory, name, identity, device):
+        if not name.startswith(".cmh-cleanup-") or self.artifact is None:
+            return False
+        matches = sum(
+            bool(self.artifact(domain, directory, name, identity, device))
+            for domain in sorted(domains)
+        )
+        if matches > 1:
+            raise GovernanceError("diagnostic_file_artifact_unproven")
+        return matches == 1
+
+    def scan_domains(self, domains, descriptor):
+        """Enumerate a physical root once using all its verified domain labels."""
         info = os.fstat(descriptor)
-        if domain == "sdk" or shared:
-            self.locations[("sdk", "")] = descriptor
+        direct = set(domains) - {"pipeline"}
+        for domain in direct:
+            self.locations[(domain, "")] = descriptor
         entries = self.remember_directory(descriptor)
         for name, identity in sorted(entries.items()):
-            if (
-                (domain == "sdk" or shared)
-                and name.startswith(".cmh-cleanup-")
-                and self.artifact is not None
-                and self.artifact("sdk", descriptor, name, identity, info.st_dev)
-            ):
+            if self._artifact(direct, descriptor, name, identity, info.st_dev):
                 continue
-            if domain == "pipeline" and name == "default":
+            if "pipeline" in domains and name == "default":
                 if not stat.S_ISDIR(identity[2]) or identity[0] != info.st_dev:
                     raise GovernanceError("diagnostic_inventory_path_unsafe")
                 child = self.open_directory(name, parent=descriptor)
                 self.locations[("pipeline", "default")] = child
                 for filename, file_identity in sorted(self.remember_directory(child).items()):
-                    if (
-                        filename.startswith(".cmh-cleanup-")
-                        and self.artifact is not None
-                        and self.artifact("pipeline", child, filename, file_identity, info.st_dev)
-                    ):
+                    if self._artifact(("pipeline",), child, filename, file_identity, info.st_dev):
                         continue
                     if not filename.endswith(".log") or not _valid_date(filename[:-4]):
                         raise GovernanceError("diagnostic_inventory_unsupported")
                     self.scan_file(
-                        domain, child, filename, "default/" + filename, file_identity, info.st_dev
+                        "pipeline",
+                        child,
+                        filename,
+                        "default/" + filename,
+                        file_identity,
+                        info.st_dev,
                     )
-            elif (domain == "sdk" or shared) and (
+            elif "sdk" in domains and (
                 name == "hy_memory.log"
                 or name.startswith("hy_memory.log.")
                 and _valid_date(name[len("hy_memory.log.") :])
             ):
                 self.scan_file("sdk", descriptor, name, name, identity, info.st_dev)
             else:
-                raise GovernanceError("diagnostic_inventory_unsupported")
-        return DomainObservation(domain, path, True, info.st_dev, info.st_ino)
+                selected = [domain for domain in direct if name in _CORE_NAMES.get(domain, ())]
+                if len(selected) != 1:
+                    raise GovernanceError("diagnostic_inventory_unsupported")
+                self.scan_file(selected[0], descriptor, name, name, identity, info.st_dev)
+
+    def _core_frames(self, source, domain):
+        framer = CoreFramer(
+            domain,
+            max_line_bytes=self.budget.max_record_bytes,
+            max_raw_block_bytes=self.budget.max_core_block_bytes,
+        )
+        try:
+            size = 0
+            while chunk := source.read(64 * 1024):
+                size += len(chunk)
+                self.bytes += len(chunk)
+                if size > self.budget.max_file_bytes or self.bytes > self.budget.max_total_bytes:
+                    raise GovernanceError("diagnostic_inventory_budget_exceeded")
+                yield from framer.feed(chunk)
+            yield from framer.finish()
+        except CoreRecordError as error:
+            if str(error) == "diagnostic_core_budget_exceeded":
+                raise GovernanceError("diagnostic_inventory_budget_exceeded") from None
+            raise GovernanceError("diagnostic_inventory_unavailable") from None
 
     def scan_file(self, domain, directory, name, key, expected, device):
         if not stat.S_ISREG(expected[2]) or expected[3] != 1 or expected[0] != device:
@@ -244,30 +297,22 @@ class _Scan:
             counts = {"keep": 0, "candidate": 0, "remove": 0}
             size = 0
             with os.fdopen(descriptor, "rb", closefd=False) as source:
-                while raw := source.readline(self.budget.max_record_bytes + 1):
-                    size += len(raw)
-                    self.bytes += len(raw)
-                    self.records += 1
-                    if (
-                        size > self.budget.max_file_bytes
-                        or self.bytes > self.budget.max_total_bytes
-                        or self.records > self.budget.max_records
-                        or len(raw) > self.budget.max_record_bytes
-                    ):
-                        raise GovernanceError("diagnostic_inventory_budget_exceeded")
-                    digest.update(raw)
-                    decision = self.inspector.inspect(raw, kind=domain)
-                    if decision.action == "blocked":
-                        raise GovernanceError(decision.reason)
-                    if decision.action not in counts:
-                        raise GovernanceError("diagnostic_inventory_unavailable")
-                    counts[decision.action] += 1
-                    if self.on_record is not None:
-                        self.on_record(domain, key, raw, decision.action)
-                    if decision.grant is not None:
-                        self.grants.add(decision.grant)
-                        if len(self.grants) > self.budget.max_grants:
+                if domain in _CORE_NAMES:
+                    for frame in self._core_frames(source, domain):
+                        raw = frame.raw
+                        size += len(raw)
+                        self.records += 1
+                        if self.records > self.budget.max_records:
                             raise GovernanceError("diagnostic_inventory_budget_exceeded")
+                        digest.update(raw)
+                        action = "keep" if frame.kind == "strict" else "candidate"
+                        if action == "candidate" and self.mode == "authorized":
+                            raise GovernanceError("diagnostic_core_authorization_required")
+                        counts[action] += 1
+                        if self.on_record is not None:
+                            self.on_record(domain, key, raw, action)
+                else:
+                    size = self._sdk_records(source, domain, key, digest, counts)
             if _snapshot(os.fstat(descriptor)) != expected or size != before.st_size:
                 raise GovernanceError("diagnostic_inventory_changed")
             observation = FileObservation(
@@ -289,6 +334,34 @@ class _Scan:
                 self.on_file(observation, directory, name, expected)
         finally:
             os.close(descriptor)
+
+    def _sdk_records(self, source, domain, key, digest, counts):
+        size = 0
+        while raw := source.readline(self.budget.max_record_bytes + 1):
+            size += len(raw)
+            self.bytes += len(raw)
+            self.records += 1
+            if (
+                size > self.budget.max_file_bytes
+                or self.bytes > self.budget.max_total_bytes
+                or self.records > self.budget.max_records
+                or len(raw) > self.budget.max_record_bytes
+            ):
+                raise GovernanceError("diagnostic_inventory_budget_exceeded")
+            digest.update(raw)
+            decision = self.inspector.inspect(raw, kind=domain)
+            if decision.action == "blocked":
+                raise GovernanceError(decision.reason)
+            if decision.action not in counts:
+                raise GovernanceError("diagnostic_inventory_unavailable")
+            counts[decision.action] += 1
+            if self.on_record is not None:
+                self.on_record(domain, key, raw, decision.action)
+            if decision.grant is not None:
+                self.grants.add(decision.grant)
+                if len(self.grants) > self.budget.max_grants:
+                    raise GovernanceError("diagnostic_inventory_budget_exceeded")
+        return size
 
     def verify_unchanged(self):
         for descriptor, before, entries in self.directories:
@@ -343,9 +416,15 @@ def _inspection(
     on_file=None,
     artifact=None,
     artifact_limit=0,
+    profile: str = SDK_PROFILE,
 ):
-    """Private shared scan session; callbacks do not weaken the public inventory."""
+    """Private shared scan session; callbacks do not weaken the public inventory.
+
+    Artifact callbacks must return False without effects for unmatched domains.
+    A shared physical directory admits a stage only for exactly one domain.
+    """
     data_root, sdk_log_root = _path(data_root), _path(sdk_log_root)
+    domains = required_domains(profile)
     budget = InventoryBudget() if budget is None else budget
     if not isinstance(budget, InventoryBudget):
         raise GovernanceError("diagnostic_inventory_budget_invalid")
@@ -367,6 +446,7 @@ def _inspection(
                 on_file=on_file,
                 artifact=artifact,
                 artifact_limit=artifact_limit,
+                mode=mode,
             )
             pipeline = data_root.joinpath(*_PIPELINE)
             data_fd = scan.open_path(data_root)
@@ -383,24 +463,39 @@ def _inspection(
                     if os.fstat(pipeline_fd).st_dev != device:
                         raise GovernanceError("diagnostic_inventory_path_unsafe")
             sdk_fd = scan.open_path(sdk_log_root)
-            shared = (
-                pipeline_fd is not None
-                and sdk_fd is not None
-                and _identity(os.fstat(pipeline_fd))[:2] == _identity(os.fstat(sdk_fd))[:2]
-            )
-            first = scan.scan_domain("pipeline", pipeline, pipeline_fd, shared=shared)
-            second = (
-                DomainObservation("sdk", sdk_log_root, True, first.device, first.inode)
-                if shared
-                else scan.scan_domain("sdk", sdk_log_root, sdk_fd)
-            )
+            roots = [("pipeline", pipeline, pipeline_fd), ("sdk", sdk_log_root, sdk_fd)]
+            if profile == CORE_PROFILE:
+                core_fd = None
+                if data_fd is not None:
+                    try:
+                        core_fd = scan.open_directory("logs", parent=data_fd)
+                    except FileNotFoundError:
+                        scan.missing.append((data_fd, "logs"))
+                    if core_fd is not None and os.fstat(core_fd).st_dev != device:
+                        raise GovernanceError("diagnostic_inventory_path_unsafe")
+                roots.extend(
+                    (domain, data_root / "logs", core_fd)
+                    for domain in ("core-log", "core-diagnostic")
+                )
+            observed, groups = {}, {}
+            for domain, path, descriptor in roots:
+                if descriptor is None:
+                    observed[domain] = DomainObservation(domain, path, False)
+                    continue
+                info = os.fstat(descriptor)
+                observed[domain] = DomainObservation(domain, path, True, info.st_dev, info.st_ino)
+                group = groups.setdefault((info.st_dev, info.st_ino), (descriptor, []))
+                group[1].append(domain)
+            for descriptor, labels in groups.values():
+                scan.scan_domains(labels, descriptor)
             scan.verify_unchanged()
             result = DiagnosticInventory(
-                (first, second),
+                tuple(observed[domain] for domain in domains),
                 tuple(scan.files),
                 tuple(sorted(scan.grants)),
                 scan.bytes,
                 scan.records,
+                profile,
             )
         yield result, scan
 
@@ -413,6 +508,7 @@ def inspect_diagnostic_files(
     mode: Literal["propose", "authorized"],
     grants: tuple[RecordGrant, ...] = (),
     budget: InventoryBudget | None = None,
+    profile: str = SDK_PROFILE,
 ) -> DiagnosticInventory:
     """Inspect current files only; absent domains do not prove absent global copies."""
     with (
@@ -424,6 +520,7 @@ def inspect_diagnostic_files(
             mode=mode,
             grants=grants,
             budget=budget,
+            profile=profile,
         ) as (result, _),
     ):
         return result

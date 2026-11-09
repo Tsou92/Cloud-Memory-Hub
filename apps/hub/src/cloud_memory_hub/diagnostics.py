@@ -8,6 +8,7 @@ import logging
 import sys
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 
 _LOCK = threading.RLock()
 _OWNED = ("_hy_memory_diagnostic_handler", "_one_memory_diagnostic_handler")
@@ -15,6 +16,8 @@ _OWNED = ("_hy_memory_diagnostic_handler", "_one_memory_diagnostic_handler")
 # removing their last logger owner cannot indirectly close a caller's stream.
 _detached_handlers = set()
 _maintenance_thread = None
+_maintenance_lease = None
+_maintenance_roots = ()
 
 
 class _BootstrapFormatter(logging.Formatter):
@@ -104,16 +107,47 @@ def diagnostic_file_maintenance(*, roots):
     from hy_memory.utils.diagnostic_policy import DiagnosticPolicyError
     from one_memory.diagnostic_log import core_diagnostic_maintenance as native_gate
 
-    global _maintenance_thread
+    global _maintenance_thread, _maintenance_lease, _maintenance_roots
     if _LOCK._is_owned() or not _LOCK.acquire(blocking=False):
         raise DiagnosticPolicyError("diagnostic_file_logging_busy")
     try:
         _maintenance_thread = threading.get_ident()
         with native_gate(roots=roots, detached_handlers=tuple(_detached_handlers)) as lease:
-            yield lease
+            _maintenance_lease = lease
+            _maintenance_roots = tuple(Path(root).absolute() for root in roots)
+            try:
+                yield lease
+            finally:
+                # The Core gate may resume writers during its own exit. No
+                # callback in that window may reuse the earlier file lease.
+                _maintenance_lease = None
+                _maintenance_roots = ()
     finally:
+        _maintenance_lease = None
+        _maintenance_roots = ()
         _maintenance_thread = None
         _LOCK.release()
+
+
+def require_diagnostic_file_maintenance(lease, *, roots):
+    """Require this thread's actual Core/native gate for every requested root."""
+    if (
+        not _LOCK._is_owned()
+        or _maintenance_thread != threading.get_ident()
+        or _maintenance_lease is not lease
+        or type(roots) is not tuple
+        or not roots
+        or any(
+            not isinstance(root, Path)
+            or not root.is_absolute()
+            or ".." in root.parts
+            or not any(root.is_relative_to(held) for held in _maintenance_roots)
+            for root in roots
+        )
+    ):
+        from cloud_memory_hub.governance_journal import GovernanceError
+
+        raise GovernanceError("diagnostic_core_maintenance_required")
 
 
 def install_process_exception_hooks():
