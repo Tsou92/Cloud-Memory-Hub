@@ -12,6 +12,8 @@
 
 NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、启动与重启验证通过。本地和 NAS 的六套安装探针、完整 Compose 验证及实际双镜像迁移／拒绝均通过；未启用外部模型、导入真实历史或修改日常 Agent 配置。这仍是 G1 实验验证，详细证据见上述记录。
 
+后续 `c7a8d27` 增加原生写入观察并修复请求诊断缓存遗漏：本地与 NAS 各七项隔离安装验证通过，常驻实例仍保持 `c0467f5`。观察字段不等于完整副作用证明，见[本轮记录](docs/reviews/2026-11-10-write-effects.md)。
+
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
 本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。Claude 每轮在线召回已在隔离的实际 CLI 中验证；日常客户端安装、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md)、[授权读取接口](docs/remote-read.md) 和 [Claude 召回](docs/agent-recall.md)。
@@ -69,7 +71,7 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 | 治理请求重试与实体副本 | [请求一致性设计](docs/adr/0036-governance-request-identity.md) · [恢复检查与验证](docs/reviews/2026-11-09-governance-retry-and-entities.md) |
 | 删除后继续写入 | [Chroma 序号与删除重放设计](docs/adr/0037-chroma-purge-sequence.md) · [验证记录](docs/reviews/2026-11-09-chroma-purge-sequence.md) |
 | 持久准入与在途任务取消 | [准入证明与恢复设计](docs/adr/0038-durable-sdk-admission.md) · [执行、安装与验证边界](docs/reviews/2026-11-10-inflight-execution.md) |
-| 原生写入副作用 | [请求级观察与后续持久证书](docs/adr/0039-sdk-write-effect-observation.md)；观察字段不授予删除权限 |
+| 原生写入副作用 | [请求级观察与后续持久证书](docs/adr/0039-sdk-write-effect-observation.md) · [诊断副本恢复与验证](docs/reviews/2026-11-10-write-effects.md)；观察字段不授予删除权限 |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
