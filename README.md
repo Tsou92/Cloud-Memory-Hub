@@ -28,6 +28,8 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 
 后续已统一业务与恢复状态读取，并接入真实终端审阅/签名组件及 Core 写者维护。`e537cba` 完整 Hub 1585 项通过、5 项跳过，同一镜像本地/NAS 各 12 项安装验收通过，102 个生产代码文件逐项核对一致，常驻服务未升级。Core 历史正文、Docker 日志覆盖和完整运行协调仍待接通，普通服务继续拒绝新执行格式；见 [ADR-0046](docs/adr/0046-governance-runtime-and-output-coverage.md) 和[验证记录](docs/reviews/2026-11-10-runtime-binding-and-core-maintenance.md)。
 
+最新增量已接入 Core 四域文件分类、签名覆盖要求及停服激活：提高要求后，旧 SDK 回执重新待验证；全严格元数据文件可恢复验证，无授权 Core 正文保留现场并拒绝执行。`913f746` 完整 Hub 1759 项通过、5 项跳过，同镜像本地/NAS 各 12 套安装探针及两端真实旧镜像拒绝验证通过，104 个生产文件核对一致，常驻服务保持健康且未变。Core 正文许可、Docker 宿主覆盖与普通运行协调仍待完成；见 [ADR-0047](docs/adr/0047-core-file-coverage-and-physical-authority.md) 和[本步记录](docs/reviews/2026-11-10-core-file-coverage.md)。
+
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
 本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。Claude 每轮在线召回已在隔离的实际 CLI 中验证；日常客户端安装、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md)、[授权读取接口](docs/remote-read.md) 和 [Claude 召回](docs/agent-recall.md)。
@@ -93,6 +95,7 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 | 恢复故障隔离 | [SDK 许可与 Core 输出屏障](docs/adr/0044-governance-runtime-recovery-fence.md) · [验证记录](docs/reviews/2026-11-10-runtime-recovery-fence.md) |
 | 联合文件恢复 | [真实父子图与冻结贡献者](docs/adr/0045-diagnostic-recovery-graph.md) · [验证记录](docs/reviews/2026-11-10-diagnostic-recovery.md) |
 | 执行视图、终端审阅与 Core 维护 | [完整接线设计](docs/adr/0046-governance-runtime-and-output-coverage.md) · [同镜像安装与 NAS 验证](docs/reviews/2026-11-10-runtime-binding-and-core-maintenance.md)；完整输出覆盖与正式入口仍待接通 |
+| Core 文件覆盖与停服激活 | [覆盖版本与授权边界](docs/adr/0047-core-file-coverage-and-physical-authority.md) · [本步验证](docs/reviews/2026-11-10-core-file-coverage.md)；无来源正文和 Docker 输出仍待治理 |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 

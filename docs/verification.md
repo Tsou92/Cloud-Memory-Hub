@@ -1,5 +1,7 @@
 # 验证计划与需求追踪
 
+2026-11-10 四域覆盖增加 `test_core_records.py`、`test_core_file_inventory.py`、`test_core_file_execution.py` 及 `test_core_coverage_capability.py`、`test_core_coverage_store.py`、`test_core_coverage_binding.py`、`test_core_coverage_activation.py`；原文件安装探针增加真实停服激活、Core 原生严格输出、跨进程四域恢复及无授权正文拒绝。实际旧镜像还需对激活前对照可读、对新能力精确拒绝并保持文件/数据库不变。关联 FR-10、FR-11、ENG-01，当前实测与未完成范围见[记录](reviews/2026-11-10-core-file-coverage.md)及[ADR-0047](adr/0047-core-file-coverage-and-physical-authority.md)。
+
 2026-11-10 正式恢复接线继续增加 `test_execution_binding.py`、`test_repair_source_rules.py`、`test_authority_execution_binding.py`、`test_diagnostic_requests.py`、`test_diagnostic_review.py`、`test_core_diagnostic_maintenance.py` 及 `make probe-core-diagnostic-maintenance`；原文件安装探针增加真实 PTY 签署与新进程重试。关联 FR-10、FR-11、ENG-01，当前边界和证据见[记录](reviews/2026-11-10-runtime-binding-and-core-maintenance.md)与[ADR-0046](adr/0046-governance-runtime-and-output-coverage.md)。完整运行门槛和输出域仍须继续接通。
 
 状态：完整产品用例尚未通过。工程工具、认证边界、凭证存储、Core 集成和容器验证结果单独记入[运行时记录](reviews/2026-10-22-runtime.md)，不能代替六入口与 NAS 真机验收。
