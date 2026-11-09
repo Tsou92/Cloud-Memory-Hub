@@ -37,7 +37,7 @@ Skill 规定会话开始和下一轮读取、关键进度保存及切换前交�
 /path/to/runtime/bin/python /path/to/probes/probe_agent_access.py
 ```
 
-它建立独立合成测试状态，不使用日常 Agent 配置。成功报告包含 `checks_passed`、`synthetic_update_seconds`，并明确 `external_model_used=false`、`two_physical_macs_verified=false`、`automatic_extraction_verified=false`。正式 Git 提交号待提交后补记，当前不把工作区镜像标成已发布版本。
+它建立独立合成测试状态，不使用日常 Agent 配置。成功报告包含 `checks_passed`、`synthetic_update_seconds`，并明确 `external_model_used=false`、`two_physical_macs_verified=false`、`automatic_extraction_verified=false`。产品与相关测试已提交为 `3ffd0d2`；已验证镜像增加 `mvp-3ffd0d2` 标签，内容未重新构建，构建标签仍为 `mvp-preflight`。这是本地 Git 开发制品，尚未发布 GitHub 或正式发行。
 
 ## NAS 实例与真实接入
 
