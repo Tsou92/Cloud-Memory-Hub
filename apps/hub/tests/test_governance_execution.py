@@ -915,6 +915,226 @@ def test_inflight_worker_during_sdk_exclusive_records_actual_outcome(tmp_path, m
     asyncio.run(scenario())
 
 
+@pytest.fixture
+def t0342a_config():
+    """This card owns and cleans all its synthetic instance files."""
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory(prefix="memory-hub-t0342a-") as root:
+        yield config_for(Path(root))
+
+
+@pytest.mark.parametrize("step", [3, 4])
+def test_t0342a_native_supervisor_prewrite_refusals(t0342a_config, monkeypatch, step):
+    config = t0342a_config
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            queue = app.core.state.memory_write_queue
+            request_id = queue.payload_for(job).idempotency_key
+            supervisor = app.core.state.memory_processing_supervisor
+            bridge = _sdk_library_bridge(app.core)
+            sdk = await bridge._get_client()
+            calls = []
+
+            def no_write(*args, **kwargs):
+                calls.append(True)
+                pytest.fail("prewrite refusal must not invoke SDK add")
+
+            async def credentials():
+                return (None, None)
+
+            monkeypatch.setattr(sdk, "add", no_write)
+            monkeypatch.setattr(supervisor, "_active_credentials", credentials)
+            monkeypatch.setattr(supervisor, "_bridge", lambda *a, **k: bridge)
+            if step == 3:
+                # A job has already passed claim when readiness changes.
+                monkeypatch.setattr(supervisor, "source_writes_permitted", lambda source: False)
+            queue.settle(job, state=RUNNING, hy_invoked=False)
+            if step == 4:
+                async with app.core.state.cmh_sdk_admission.exclusive():
+                    await asyncio.create_task(app.core.state.memory_write_drain.execute(job))
+            else:
+                await app.core.state.memory_write_drain.execute(job)
+            actual = queue.get(request_id)
+            with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
+                marker = db.execute(
+                    "SELECT hy_invoked FROM memory_write_jobs WHERE job_id=?", (job,)
+                ).fetchone()[0]
+            expected = (
+                "hy_memory_source_disabled" if step == 3 else "hy_memory_maintenance_in_progress"
+            )
+            assert (actual.state, actual.detail, marker, calls) == ("unknown", expected, 1, [])
+            assert await bridge.get_sdk_write_outcome(request_id) is None
+            print(
+                f"T-034-2a step={step}: state={actual.state}, hy_invoked={marker}, "
+                f"error={actual.detail}, sdk_written=False"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_t0342a_postwrite_observer_maintenance(t0342a_config, monkeypatch):
+    from one_memory.memory_server.durable_queue import execute_job
+
+    config = t0342a_config
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            queue = app.core.state.memory_write_queue
+            frozen = queue.payload_for(job)
+            outputs = await inflight_writer(app, monkeypatch)
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def hold_maintenance():
+                async with app.core.state.cmh_sdk_admission.exclusive():
+                    entered.set()
+                    await release.wait()
+
+            async def observe_after_write(identity, request):
+                assert outputs
+                holder = asyncio.create_task(hold_maintenance())
+                await entered.wait()
+                try:
+                    # Real observer, not an injected exception: its bridge guard refuses.
+                    await app.core.state.cmh_lineage.observe(identity, request)
+                finally:
+                    release.set()
+                    await holder
+
+            queue.settle(job, state=RUNNING, hy_invoked=False)
+            await execute_job(
+                job,
+                queue=queue,
+                supervisor=app.core.state.memory_processing_supervisor,
+                evidence=app.core.state.memory_write_evidence_store,
+                source_writes_permitted=app.core.state.cmh_ingest.source_write_authorizer,
+                observe_sdk_outputs=observe_after_write,
+            )
+            actual = queue.get(frozen.idempotency_key)
+            assert (actual.state, actual.detail) == ("unknown", "hy_memory_maintenance_in_progress")
+            assert len(outputs) == 1 and await sdk_status(app, outputs[0]) == ("active", True)
+            bridge = _sdk_library_bridge(app.core)
+            outcome = await bridge.get_sdk_write_outcome(frozen.idempotency_key)
+            assert outcome["status"] == "succeeded"
+            raw = await bridge.get_sdk_raw(outcome["result"]["memory_id"])
+            assert raw is not None and event["content"]["messages"][0]["text"] in raw.content
+            with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
+                assert db.execute(
+                    "SELECT hy_invoked FROM memory_write_jobs WHERE job_id=?", (job,)
+                ).fetchone() == (1,)
+            print(
+                "T-034-2a step=7: state=unknown, hy_invoked=1, "
+                "error=hy_memory_maintenance_in_progress, sdk_written=True, raw_text=True"
+            )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("interrupt_finish", [False, True])
+def test_t0342a_cache_persistence_and_random_raw_identity(
+    t0342a_config, monkeypatch, interrupt_finish
+):
+    """Separate SQLite reader sees commits; simulate stop after nodes, before outcome finish."""
+    from uuid import UUID
+
+    from hy_memory.models.memory import MemoryNode
+
+    config = t0342a_config
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            frozen = app.core.state.memory_write_queue.payload_for(job)
+            request = sdk_request(frozen)
+            sdk = await _sdk_library_bridge(app.core)._get_client()
+            original_post_init = MemoryNode.__post_init__
+            generated = []
+
+            def capture_random_id(self):
+                before = self.node_id
+                original_post_init(self)
+                if self.layer.value == "l1_raw":
+                    generated.append((before, self.node_id))
+
+            async def agent(self, **kwargs):
+                return AgentResult(
+                    success=True,
+                    extracted_info={"memory": [{"content": "Synthetic cache durability fact"}]},
+                )
+
+            monkeypatch.setattr(MemoryNode, "__post_init__", capture_random_id)
+            monkeypatch.setattr(MemAgent, "process_add", agent)
+            monkeypatch.setattr("hy_memory.pipelines.writer._RECONCILE_ENABLED", False)
+            finish = sdk._finish_write_outcome
+            seen = []
+
+            def disk_row():
+                with sqlite3.connect(sdk._cache._db_path) as db:
+                    return db.execute(
+                        "SELECT status,result_json FROM write_outcomes WHERE request_id=?",
+                        (request.request_id,),
+                    ).fetchone()
+
+            async def inspect_before_finish(request_id, status, result):
+                assert status == "succeeded"
+                raw_id = result["memory_id"]
+                node = await sdk._vector_store.get_by_id(raw_id)
+                assert node is not None and event["content"]["messages"][0]["text"] in node.content
+                assert disk_row() == ("running", "{}")
+                seen.append(raw_id)
+                if interrupt_finish:
+                    raise RuntimeError("synthetic_stop_before_outcome_finish")
+                await finish(request_id, status, result)
+
+            monkeypatch.setattr(sdk, "_finish_write_outcome", inspect_before_finish)
+
+            async def write():
+                return await _joined_thread(
+                    sdk.add,
+                    [turn.model_dump() for turn in request.turns],
+                    user_id=request.user_id,
+                    agent_id=request.agent_id,
+                    session_id=request.session_id,
+                    source=request.source_id,
+                    request_id=request.request_id,
+                    scene="chat",
+                )
+
+            if interrupt_finish:
+                with pytest.raises(RuntimeError, match="synthetic_stop_before_outcome_finish"):
+                    await write()
+            else:
+                assert (await write())["success"]
+            assert len(seen) == 1
+            raw_id = seen[0]
+            assert ("", raw_id) in generated
+            assert UUID(raw_id).version == 4
+            assert raw_id not in frozen.evidence_ids
+            status, serialized = disk_row()
+            assert status == ("running" if interrupt_finish else "succeeded")
+            if not interrupt_finish:
+                assert json.loads(serialized)["memory_id"] == raw_id
+            # Independent reader after SDK shutdown verifies this is not just in-memory cache.
+            cache_path = sdk._cache._db_path
+        with sqlite3.connect(cache_path) as db:
+            assert db.execute(
+                "SELECT status FROM write_outcomes WHERE request_id=?", (request.request_id,)
+            ).fetchone() == (status,)
+        print(
+            f"T-034-2a cache: interrupt_finish={interrupt_finish}, disk_status={status}, "
+            "raw_already_stored=True, raw_id_random_uuid4=True, evidence_derivable=False"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_hnsw_slack_is_the_only_residue_and_is_not_a_stored_record(tmp_path, monkeypatch):
     """Pin the known gap: residue, if any, is only in HNSW slack, never in a slot
     the index counts as an element; everything else is clean."""
