@@ -39,6 +39,20 @@ Skill 规定会话开始和下一轮读取、关键进度保存及切换前交�
 
 它建立独立合成测试状态，不使用日常 Agent 配置。成功报告包含 `checks_passed`、`synthetic_update_seconds`，并明确 `external_model_used=false`、`two_physical_macs_verified=false`、`automatic_extraction_verified=false`。产品与相关测试已提交为 `3ffd0d2`；已验证镜像增加 `mvp-3ffd0d2` 标签，内容未重新构建，构建标签仍为 `mvp-preflight`。这是本地 Git 开发制品，尚未发布 GitHub 或正式发行。
 
+## Mac 安装与实际 Claude MCP 调用
+
+在独立的干净源码副本（`e324ab7`）中，使用本机 Python 3.12.9／macOS ARM64，按[安装说明](../agent-access.md#mac-客户端安装)建立工具环境、安装 uv 0.12.5、准备固定上游及全部审核补丁、执行 `uv sync --locked --no-dev --python 3.12 --directory apps/hub`。两个产品命令的 `--help` 均成功；再以合成私有配置初始化队列，通过该新环境的实际 MCP 进程完成初始化、列出七个工具并调用 `memory_status`，确认队列为空且未尝试远程连接。此项证明安装命令和本机客户端可用，不代表 NAS 网络已连通或第二台 Mac 已安装。
+
+[真实 Claude MCP 探针](../../scripts/probe_claude_mcp.py)使用本机 Claude Code **2.1.321**、独立配置和合成项目，以及只在回环地址提供服务的脚本模型替身。实测 MCP 为 connected，第一轮实际执行 `memory_remember`、`memory_recent`、`handoff_save`、`handoff_load`；另一设备身份通过 MCP 写入 V2 后，**同一进程、同一 session 的第二轮**再次调用 `memory_recent` 并读到 V2。共五次工具调用、两轮成功结果，权限拒绝为零；总耗时 2.986 秒，第二轮 0.252 秒。
+
+完成标记依赖对应新工具调用 ID 的实际返回值：第一轮仅含 V1，第二轮包含 V2，交接内容也逐字段核对。独立只读复核检查了源码与实际 stdout/report。脚本可用已配置的开发运行环境执行：
+
+```sh
+apps/hub/.venv/bin/python scripts/probe_claude_mcp.py
+```
+
+本项证明实际 Claude 宿主到 MCP／Hub 的接线和会话连续性。工具选择由本地模型替身固定驱动，未验证真实模型自主遵循 Skill、自动提炼、NAS 网络或两台实体 Mac；未修改日常 Agent 配置。
+
 ## NAS 实例与真实接入
 
 新独立 MVP 实例 `cmh-mvp-hub-1` 已部署并处于 healthy；重启后健康检查、项目及设备读取均返回 200，部署配置已持久保存。旧 `cmh-nas-validation-hub-1`／`c0467f5` 保持不变；本轮没有用新实例替换旧验证实例，也未启用外部模型。
@@ -53,13 +67,15 @@ Codex 桌面隔离启动失败，未取得真实桌面 MCP 调用或已有对话
 
 本轮 `make check` 已通过。首次全量 Hub 回归结果为 **1787 通过、5 跳过、1 失败**。连续启动真实 Hub 的新增测试改变了 pytest 共享日志捕获器，导致后续 SDK 测试日志断言失败；最小组合可复现。修复仅在新增测试 fixture 中恢复捕获器状态，不改变产品日志策略或旧断言。
 
-修复后，新增两文件加原失败单测 **30 通过**；随后覆盖通用 Agent、MCP、读取传输、本地投递、发送及 SDK 接纳恢复的定向回归 **154 通过**，`make check` 再次通过。未重复全量运行，不把定向结果写成全量全绿，5 项跳过也不计为通过。
+修复后，新增两文件加原失败单测 **30 通过**；随后覆盖通用 Agent、MCP、读取传输、本地投递、发送及 SDK 接纳恢复的定向回归 **154 通过**，`make check` 再次通过。最终重新执行完整 Hub 测试，结果为 **1788 通过、5 跳过**，耗时 305.90 秒；5 项跳过不计为通过。新增真实 Claude MCP 探针和安装说明完成后，工程检查也再次通过。
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 apps/hub/.venv/bin/python -m pytest -q \
   apps/hub/tests/test_agent_access.py apps/hub/tests/test_agent_mcp.py \
   apps/hub/tests/test_read_transport.py apps/hub/tests/test_local_delivery.py \
   apps/hub/tests/test_transport.py apps/hub/tests/test_sdk_reconcile.py
+# 最终完整回归
+PYTHONDONTWRITEBYTECODE=1 apps/hub/.venv/bin/python -m pytest -q apps/hub/tests
 ```
 
 ## 下一步
