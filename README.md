@@ -22,7 +22,7 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 
 后续已实现独立的 SDK 两域文件执行与恢复组件，以及停服只读预览命令；新增签名执行格式、精确记录授权、逐文件替换和原日志处理器重绑定。最终 Hub 1397 通过／5 跳过，原生 192 项、Core 39 项通过；`cb2c9ca` 同一镜像在本地/NAS 各 11 套隔离安装探针通过，98 个安装生产文件与源码一致，常驻 `c0467f5` 未变。产品物理确认与完整恢复路由仍未启用。范围和证据见 [ADR-0043](docs/adr/0043-diagnostic-physical-execution.md) 和[本步记录](docs/reviews/2026-11-10-diagnostic-file-execution.md)。
 
-后续修复现有普通服务的恢复故障隔离：已完成删除的重试失败后，禁止新 SDK 调用及原生 Core 正文输出，完整恢复成功后才重新开放；保留正常 worker 收尾和管理员维护。针对回归及独立审查见 [ADR-0044](docs/adr/0044-governance-runtime-recovery-fence.md) 与[验证记录](docs/reviews/2026-11-10-runtime-recovery-fence.md)，完整安装验收仍在进行。
+后续修复现有普通服务的恢复故障隔离：已完成删除的重试失败后，禁止新 SDK 调用及原生 Core 正文输出，完整恢复成功后才重新开放；保留正常 worker、读取和管理员维护。`913f343` 完整 Hub 1424 项通过、5 项可选后端跳过，同一镜像本地/NAS 各 11 项安装探针通过，常驻服务未升级；见 [ADR-0044](docs/adr/0044-governance-runtime-recovery-fence.md) 与[验证记录](docs/reviews/2026-11-10-runtime-recovery-fence.md)。
 
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
