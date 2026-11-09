@@ -1,0 +1,455 @@
+diff --git a/hy_memory/utils/file_log_lifecycle.py b/hy_memory/utils/file_log_lifecycle.py
+--- a/hy_memory/utils/file_log_lifecycle.py
++++ b/hy_memory/utils/file_log_lifecycle.py
+@@ -12,6 +12,7 @@
+ import logging
+ import os
+ import stat
++import sys
+ import threading
+ import weakref
+ from contextlib import contextmanager
+@@ -108,6 +109,22 @@
+         lock.release()
+
+
++def _core_sinks():
++    # Core stays usable without importing the heavy optional SDK. Its factory
++    # owns this registry; once loaded, the same lease can coordinate both types.
++    module = sys.modules.get("one_memory.log_file")
++    return getattr(module, "_core_file_sinks", {})
++
++
++def _state(handler):
++    if type(handler) is _ManagedTimedRotatingFileHandler:
++        return _SINKS.get(handler)
++    module = sys.modules.get("one_memory.log_file")
++    if type(handler) is getattr(module, "_ManagedRotatingFileHandler", None):
++        return _core_sinks().get(handler)
++    return None
++
++
+ def _handlers(detached):
+     # Called with the registry lock. Retain strong references until exit.
+     result = {h for ref in logging._handlerList if (h := ref()) is not None}
+@@ -117,6 +134,7 @@
+             result.update(logger.handlers)
+     result.update(detached)
+     result.update(_SINKS)
++    result.update(_core_sinks())
+     return tuple(result)
+
+
+@@ -184,8 +202,7 @@
+             if (
+                 handler in self._detached
+                 or not _inside(path, self._roots)
+-                or type(handler) is not _ManagedTimedRotatingFileHandler
+-                or handler not in _SINKS
++                or _state(handler) is None
+             ):
+                 _fail(_UNSUPPORTED)
+             targets.append(handler)
+@@ -230,7 +247,7 @@
+                 if handler.stream is not None and not handler.stream.closed:
+                     _stream_identity(handler.stream)
+             for handler in self._handlers:
+-                state = _SINKS[handler]
++                state = _state(handler)
+                 self._initial[handler] = state.sealed
+                 state.sealed = True
+
+@@ -268,7 +285,7 @@
+         for handler in self._handlers:
+             stream = handler.stream
+             if stream is None or stream.closed:
+-                if _SINKS[handler].needs_rebind:
++                if _state(handler).needs_rebind:
+                     continue  # A previous failed maintenance can be repaired.
+                 if handler._closed:
+                     continue  # Dormant; future emit will open the current name.
+@@ -289,12 +306,12 @@
+             h
+             for h in self._handlers
+             if _filename(h) == path
+-            and (not h._closed or h.stream is not None or _SINKS[h].needs_rebind)
++            and (not h._closed or h.stream is not None or _state(h).needs_rebind)
+         )
+         self._suspended[path] = handlers
+         self._verified = False
+         for handler in handlers:
+-            _SINKS[handler].needs_rebind = True
++            _state(handler).needs_rebind = True
+         try:
+             for handler in handlers:
+                 stream = handler.stream
+@@ -357,7 +374,7 @@
+         if set(self._suspended) != self._adopted:
+             _fail(_REOPEN)
+         repaired = {h for handlers in self._suspended.values() for h in handlers}
+-        if any(_SINKS[h].needs_rebind and h not in repaired for h in self._handlers):
++        if any(_state(h).needs_rebind and h not in repaired for h in self._handlers):
+             _fail(_REOPEN)
+         expected = self._files(files)
+         if any(len(values) != 1 for values in expected.values()):
+@@ -376,7 +393,7 @@
+     def _leave(self, successful):
+         incomplete = bool(self._suspended) and not self._verified
+         for handler, initially_sealed in self._initial.items():
+-            state = _SINKS[handler]
++            state = _state(handler)
+             touched = any(handler in hs for hs in self._suspended.values())
+             if touched:
+                 if successful and self._verified:
+diff --git a/memhub/apps/core/src/one_memory/diagnostic_log.py b/memhub/apps/core/src/one_memory/diagnostic_log.py
+--- a/memhub/apps/core/src/one_memory/diagnostic_log.py
++++ b/memhub/apps/core/src/one_memory/diagnostic_log.py
+@@ -29,7 +29,7 @@
+ import weakref
+ from collections import Counter, deque
+ from collections.abc import Mapping
+-from contextlib import suppress
++from contextlib import contextmanager, suppress
+ from contextvars import ContextVar, Token
+ from dataclasses import dataclass
+ from datetime import UTC, datetime, timedelta
+@@ -151,6 +151,21 @@
+ _active: DiagnosticLog | None = None
+ _live_diagnostic_logs: weakref.WeakSet = weakref.WeakSet()
+ _diagnostic_resource_lock = threading.RLock()
++_configuration_lock = threading.RLock()
++_maintenance_owner: int | None = None
++# A failed domain remains fenced even if its old writer is closed or collected.
++_pending_maintenance_roots: set[Path] = set()
++
++
++class DiagnosticMaintenanceError(RuntimeError):
++    """Fixed metadata-only error; a failed maintenance keeps its writers paused."""
++
++
++def _require_core_setup_available():
++    if (_maintenance_owner is not None or _pending_maintenance_roots
++            or any(log._paused for log in _live_diagnostic_logs)):
++        raise DiagnosticMaintenanceError("diagnostic_core_maintenance_busy")
++
+
+
+ def _diagnostic_policy():
+@@ -168,6 +183,11 @@
+     policy = _diagnostic_policy()
+     lock = policy._LOCK if policy else _diagnostic_resource_lock
+     with lock, _diagnostic_resource_lock:
++        _require_core_setup_available()
++        if policy:
++            policy.require_diagnostic_setup_available()
++            if policy.strict_diagnostics_enabled():
++                log.service = "core"
+         _live_diagnostic_logs.add(log)
+         if policy:
+             policy.register_diagnostic_resource(log)
+@@ -199,9 +219,8 @@
+         service: Literal["core"] = "core",
+         session_id: str | None = None,
+     ) -> None:
+-        _register_diagnostic_log(self)
+         self.data_dir = data_dir.resolve()
+-        self.service = "core" if _strict_policy() else service
++        self.service = service
+         self.session_id = _uuid(session_id) or str(uuid4())
+         # Held only around the queue, never across a syscall. That is the whole
+         # difference from the version that stalled the loop: a caller can always
+@@ -210,6 +229,8 @@
+         self._queue: deque[str] = deque()
+         self._writer: threading.Thread | None = None
+         self._closed = False
++        self._paused = False
++        self._paused_dropped = 0
+         self._dropped = 0
+         self._attempts = 0
+         self._degraded = False
+@@ -224,6 +245,8 @@
+         self._pruned_at: float | None = None
+         self._sample_lock = threading.Lock()
+         self._sampled: dict[tuple[object, ...], tuple[float, int, int]] = {}
++        # Publish only a fully initialized object, atomically with strict/setup checks.
++        _register_diagnostic_log(self)
+
+     @property
+     def path(self) -> Path:
+@@ -347,6 +370,9 @@
+         with self._ready:
+             if self._closed:
+                 return
++            if self._paused:
++                self._paused_dropped = min(self._paused_dropped + 1, 10**15)
++                return
+             if len(self._queue) >= MAX_QUEUED_EVENTS:
+                 # Dropping is the only honest option left. Blocking here would
+                 # reintroduce exactly the stall this queue exists to remove,
+@@ -412,6 +438,13 @@
+         """
+         with self._ready:
+             self._closed = True
++            # A maintenance notice may be deferred if restarting a thread failed.
++            # Keep its resource reachable until a real writer can flush it.
++            if self._writer is None and (self._queue or self._dropped):
++                try:
++                    self._start_writer()
++                except RuntimeError:
++                    return False
+             writer = self._writer
+             self._ready.notify_all()
+         if writer is None:
+@@ -433,7 +466,7 @@
+     def _drain_forever(self) -> None:
+         while True:
+             with self._ready:
+-                while not self._queue and not self._closed:
++                while not self._queue and not self._closed and not self._paused:
+                     self._drained.set()
+                     self._ready.wait(PRUNE_INTERVAL_SECONDS)
+                 batch = list(self._queue)
+@@ -442,7 +475,7 @@
+                 dropped_since = self._dropped_since
+                 self._dropped = 0
+                 self._dropped_since = None
+-                closing = self._closed
++                closing = self._closed or self._paused
+             if dropped:
+                 # After the batch, where the gap actually is. Written with both
+                 # the count and the window it spans: someone reading this file
+@@ -535,7 +568,8 @@
+         )
+         value["duration_ms"] = 0 if since is None else elapsed_ms(since)
+         value["details"] = {"count": dropped}
+-        return _serialize(value)
++        policy = _strict_policy()
++        return _serialize(policy.project_core_diagnostic(value) if policy else value)
+
+     def _write_batch(self, lines: list[str]) -> None:
+         parent = self.path.parent
+@@ -649,33 +683,137 @@
+     return raw in ("1", "true", "yes", "on", "debug")
+
+
++@contextmanager
++def core_diagnostic_maintenance(*, roots: tuple[Path, ...], detached_handlers=(), timeout: float = SHUTDOWN_DRAIN_SECONDS):
++    """Pause/join Core writers, then reuse the synchronous SDK file-handler gate.
++
++    The configuration lock is never acquired by the writer. Policy/registry
++    locks are released BEFORE joining; handler locks are acquired only AFTER
++    all writers stop. Keep the entire context on one thread, without await.
++    Failure retains paused resources; a subsequent context can retry them.
++    This is I/O coordination, not deletion authority or disk-content coverage.
++    """
++    from hy_memory.utils import diagnostic_policy as policy
++    from hy_memory.utils.file_log_lifecycle import diagnostic_file_maintenance
++
++    global _maintenance_owner
++    if (type(roots) is not tuple or not roots or len(roots) > 16
++            or any(not isinstance(root, Path) or not root.is_absolute() for root in roots)
++            or type(timeout) not in (int, float) or not 0 <= timeout <= 3600):
++        raise DiagnosticMaintenanceError("diagnostic_core_maintenance_invalid")
++    roots = tuple(Path(os.path.abspath(root)) for root in roots)
++    # Resource construction canonicalizes data_dir. Include aliases when pausing;
++    # the native gate/file inventory still validate the caller's original paths.
++    matching_roots = tuple(root.resolve() for root in roots)
++    if _configuration_lock._is_owned() or not _configuration_lock.acquire(False):
++        raise DiagnosticMaintenanceError("diagnostic_core_maintenance_busy")
++    logs = ()
++    owned = False
++    try:
++        with policy._LOCK, _diagnostic_resource_lock:
++            policy.require_diagnostic_setup_available()
++            if _maintenance_owner is not None:
++                raise DiagnosticMaintenanceError("diagnostic_core_maintenance_busy")
++            logs = tuple(log for log in _live_diagnostic_logs
++                         if any(log.path == root or root in log.path.parents for root in matching_roots))
++            if len(logs) > 4096 or len(_pending_maintenance_roots | set(matching_roots)) > 4096:
++                raise DiagnosticMaintenanceError("diagnostic_core_maintenance_invalid")
++            _maintenance_owner = threading.get_ident()
++            _pending_maintenance_roots.update(matching_roots)
++            owned = True
++            for log in logs:
++                with log._ready:
++                    log._paused = True
++                    log._ready.notify_all()
++        # All matching writers must be fenced before any fallible thread start.
++        for log in logs:
++            with log._ready:
++                if log._writer is None and (log._queue or log._dropped):
++                    try:
++                        log._start_writer()
++                    except RuntimeError:
++                        raise DiagnosticMaintenanceError("diagnostic_core_maintenance_failed") from None
++        deadline = monotonic() + timeout
++        for log in logs:
++            writer = log._writer
++            if writer is threading.current_thread():
++                raise DiagnosticMaintenanceError("diagnostic_core_maintenance_busy")
++            if writer is not None:
++                writer.join(max(0, deadline - monotonic()))
++                if writer.is_alive():
++                    raise DiagnosticMaintenanceError("diagnostic_core_maintenance_timeout")
++            with log._ready:
++                if log._queue or log._dropped or log._degraded:
++                    raise DiagnosticMaintenanceError("diagnostic_core_maintenance_failed")
++        with diagnostic_file_maintenance(roots=roots, detached_handlers=detached_handlers) as lease:
++            yield lease
++        # Only a successful native gate exit can resume writers after file I/O.
++        for log in logs:
++            with log._ready:
++                log._size = None
++                log._pruned_at = None
++                log._writer = None
++                log._paused = False
++                if not log._closed and log._paused_dropped:
++                    log._dropped += log._paused_dropped
++                    log._paused_dropped = 0
++                    log._drained.clear()
++                    try:
++                        log._start_writer()
++                    except RuntimeError:
++                        pass  # Retain the count; the next write/close retries it.
++                    log._ready.notify_all()
++        with _diagnostic_resource_lock:
++            _pending_maintenance_roots.difference_update(
++                pending for pending in tuple(_pending_maintenance_roots)
++                if any(pending == root or root in pending.parents for root in matching_roots)
++            )
++    finally:
++        if owned:
++            with _diagnostic_resource_lock:
++                _maintenance_owner = None
++        _configuration_lock.release()
++
++
++@contextmanager
++def _configuration_access():
++    # Never wait for a config lock while a caller might own a file-handler gate.
++    if not _configuration_lock.acquire(False):
++        raise DiagnosticMaintenanceError("diagnostic_core_maintenance_busy")
++    try:
++        policy = _diagnostic_policy()
++        lock = policy._LOCK if policy else _diagnostic_resource_lock
++        with lock, _diagnostic_resource_lock:
++            _require_core_setup_available()
++            if policy:
++                policy.require_diagnostic_setup_available()
++        yield
++    finally:
++        _configuration_lock.release()
++
++
+ def configure_diagnostics(data_dir: Path, *, session_id: str | None = None) -> DiagnosticReceipt:
+-    # Decided once, at startup: switching it mid-run would leave a session
+-    # half-recorded, which is worse than either extreme.
+-    if not diagnostics_requested():
+-        reset_diagnostics()
+-        # Points at the directory rather than a file that was never made:
+-        # callers only ever report this path, and naming something that does
+-        # not exist sends anyone looking for the log on a dead end.
+-        return DiagnosticReceipt(
+-            session_id=_uuid(session_id) or str(uuid4()),
+-            path=data_dir,
+-        )
++    # Replacement commits only after the previous writer actually closes.
+     global _active
+-    previous = _active
+-    _active = DiagnosticLog(data_dir, session_id=session_id)
+-    if previous is not None:
+-        previous.close()
+-    return DiagnosticReceipt(session_id=_active.session_id, path=_active.path)
++    with _configuration_access():
++        if not diagnostics_requested():
++            reset_diagnostics()
++            return DiagnosticReceipt(session_id=_uuid(session_id) or str(uuid4()), path=data_dir)
++        previous = _active
++        if previous is not None and not previous.close():
++            raise DiagnosticMaintenanceError("diagnostic_core_close_incomplete")
++        _active = DiagnosticLog(data_dir, session_id=session_id)
++        return DiagnosticReceipt(session_id=_active.session_id, path=_active.path)
+
+
+ def reset_diagnostics() -> None:
+-    """Stop diagnostics, and do not return until what was queued is on disk."""
++    """Stop diagnostics; failed close preserves the active resource for retry."""
+     global _active
+-    previous = _active
+-    _active = None
+-    if previous is not None:
+-        previous.close()
++    with _configuration_access():
++        previous = _active
++        if previous is not None and not previous.close():
++            raise DiagnosticMaintenanceError("diagnostic_core_close_incomplete")
++        _active = None
+
+
+ def flush_diagnostics(timeout: float = SHUTDOWN_DRAIN_SECONDS) -> bool:
+diff --git a/memhub/apps/core/src/one_memory/log_file.py b/memhub/apps/core/src/one_memory/log_file.py
+--- a/memhub/apps/core/src/one_memory/log_file.py
++++ b/memhub/apps/core/src/one_memory/log_file.py
+@@ -1,14 +1,35 @@
+ import logging
++import weakref
++from dataclasses import dataclass
+ from functools import wraps
+ from logging.handlers import RotatingFileHandler
+ from pathlib import Path
+
+-from one_memory.diagnostic_log import _diagnostic_policy, _diagnostic_resource_lock, _strict_policy
++from one_memory.diagnostic_log import _diagnostic_policy, _diagnostic_resource_lock, _strict_policy, _require_core_setup_available
+
+ # Enough history to cover the run before the one being complained about,
+ # capped so that a machine left running for months does not fill up.
+ MAX_BYTES = 4 * 1024 * 1024
+ KEEP = 3
++
++
++@dataclass
++class _CoreSinkState:
++    sealed: bool = False
++    needs_rebind: bool = False
++
++
++# Factory membership, never the public ownership marker, authorizes native I/O coordination.
++_core_file_sinks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
++
++
++class _ManagedRotatingFileHandler(RotatingFileHandler):
++    def emit(self, record):
++        state = _core_file_sinks.get(self)
++        if state is not None and state.sealed:
++            return
++        super().emit(record)
++
+
+
+ def log_path(data_dir: Path) -> Path:
+@@ -21,6 +42,7 @@
+         policy = _diagnostic_policy()
+         lock = policy._LOCK if policy else _diagnostic_resource_lock
+         with lock, _diagnostic_resource_lock:
++            _require_core_setup_available()
+             if policy:
+                 policy.require_diagnostic_setup_available()
+             return method(*args, **kwargs)
+@@ -53,12 +75,16 @@
+             if policy:
+                 policy.protect_diagnostic_handler(existing)
+             return destination
+-    handler = RotatingFileHandler(
++    if any(state.needs_rebind and Path(handler.baseFilename) == destination.resolve()
++           for handler, state in _core_file_sinks.items()):
++        raise RuntimeError("diagnostic_file_logging_reopen_required")
++    handler = _ManagedRotatingFileHandler(
+         destination,
+         maxBytes=MAX_BYTES,
+         backupCount=KEEP,
+         encoding="utf-8",
+     )
++    _core_file_sinks[handler] = _CoreSinkState()
+     handler.setFormatter(
+         logging.Formatter(
+             "%(asctime)s %(levelname)s %(name)s %(message)s",

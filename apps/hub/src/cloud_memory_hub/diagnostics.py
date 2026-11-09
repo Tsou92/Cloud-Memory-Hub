@@ -102,7 +102,7 @@ def diagnostic_file_maintenance(*, roots):
     detection only, including descriptors detached during strict initialization.
     """
     from hy_memory.utils.diagnostic_policy import DiagnosticPolicyError
-    from hy_memory.utils.file_log_lifecycle import diagnostic_file_maintenance as native_gate
+    from one_memory.diagnostic_log import core_diagnostic_maintenance as native_gate
 
     global _maintenance_thread
     if _LOCK._is_owned() or not _LOCK.acquire(blocking=False):
