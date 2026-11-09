@@ -1,5 +1,8 @@
 """Versioned device control plane; never proxy a device into the Core admin API."""
 
+from contextlib import nullcontext
+
+from one_memory.hy_memory_bridge import HyMemoryBridgeError, _joined_thread
 from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
@@ -75,6 +78,8 @@ def create_remote_api(
     reads: RemoteRead,
     previews: GovernancePreview,
     executor=None,
+    *,
+    admission=None,
 ) -> Starlette:
     async def projects(request: Request):
         require_admin(request)
@@ -159,7 +164,13 @@ def create_remote_api(
         credential = device_credential(request)
         await run_in_threadpool(store.authenticate, credential)
         event = await read_body(request, EventEnvelope, max_bytes=MAX_CONTENT_BYTES + 4096)
-        return response(await run_in_threadpool(ingest.accept, credential, event), 202)
+        try:
+            async with admission.operation() if admission is not None else nullcontext():
+                return response(await _joined_thread(ingest.accept, credential, event), 202)
+        except HyMemoryBridgeError as error:
+            if str(error) == "hy_memory_maintenance_in_progress":
+                raise AccessError("governance_maintenance_in_progress", 503) from None
+            raise
 
     async def event_status(request: Request):
         return response(

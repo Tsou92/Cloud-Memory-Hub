@@ -117,6 +117,16 @@ async def phase(root, mode):
                                 k: str(uuid4())
                                 for k in ("event_id", "record_id", "conversation_id")
                             },
+                            "content": {
+                                "messages": [
+                                    {
+                                        "role": "user",
+                                        "text": f"Synthetic governed original {len(rows)} has "
+                                        "distinct long content for reimport checks.",
+                                    }
+                                ],
+                                "metadata": {"synthetic": True},
+                            },
                         }
                         reply = await web.post("/hub/v1/events", headers=device, json=current)
                         assert reply.status_code == 202
@@ -179,6 +189,46 @@ async def phase(root, mode):
                     f"cmh:{event['instance_id']}:{event['device_id']}:{revised['event_id']}"
                 )
                 assert queue.get(request_id) is None, "suppressed_source_was_queued"
+                with app.core.state.cmh_ingest._database() as db:
+                    assert not db.execute(
+                        "SELECT 1 FROM cmh_event_receipts WHERE event_id=?",
+                        (revised["event_id"],),
+                    ).fetchone(), "suppressed_source_received_receipt"
+            # Each action has a distinct protected text. Re-registering the
+            # source and changing every client record identity must not bypass
+            # either rule, even when the event also contains new content.
+            for action, row in zip(("forget", "purge"), state["rows"], strict=True):
+                registered = await web.post(
+                    "/hub/v1/sources",
+                    headers=admin,
+                    json={
+                        "display_name": "Synthetic reimport " + action,
+                        "adapter_id": "synthetic.reimport",
+                        "device_id": event["device_id"],
+                        "scope_id": scope,
+                    },
+                )
+                assert registered.status_code == 201, "reimport_source_registration_failed"
+                mixed = {
+                    **row["event"],
+                    **{key: str(uuid4()) for key in ("event_id", "conversation_id", "record_id")},
+                    "source_id": registered.json()["source_id"],
+                    "content": {
+                        "messages": [
+                            {"role": "user", "text": "New synthetic work accompanies old content."},
+                            *row["event"]["content"]["messages"],
+                        ]
+                    },
+                }
+                reply = await web.post("/hub/v1/events", headers=device, json=mixed)
+                assert reply.status_code == 409, "content_reimport_was_accepted_" + action
+                assert reply.json() == {"detail": "governance_content_suppressed"}
+                request_id = f"cmh:{mixed['instance_id']}:{mixed['device_id']}:{mixed['event_id']}"
+                assert queue.get(request_id) is None, "suppressed_content_was_queued_" + action
+                with app.core.state.cmh_ingest._database() as db:
+                    assert not db.execute(
+                        "SELECT 1 FROM cmh_event_receipts WHERE event_id=?", (mixed["event_id"],)
+                    ).fetchone(), "suppressed_content_received_receipt_" + action
             app.core.state.cmh_governance.require_writes_ready()
 
 
@@ -240,8 +290,8 @@ def main():
         run(root, "read")
         assert leftover(root, MARK + " fact 1") == [], "restore_replay_residue"
     print(
-        "Forget, purge, restart, full/cache-only restore and source reimport prevention "
-        "passed across processes."
+        "Forget, purge, restart, full/cache-only restore, source reimport and mixed-content "
+        "reimport prevention passed across processes (synthetic extraction only)."
     )
 
 

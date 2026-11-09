@@ -47,6 +47,10 @@
 
 错误为固定 `{detail: code}`，不会回显正文。401 身份无效，403 来源／项目未授权，404 回执不存在，409 实例／事件／记录修订冲突，413 超限，422 合同或过滤复核失败，503 持久库／回执／运行时不可用。请求与响应均不得记录认证凭证或原始正文，响应标记 `Cache-Control: no-store`。
 
+忘记或删除规则在入队前检查。稳定来源记录命中返回 409 `governance_source_suppressed`；任一消息经 NFC 和空白规范化后至少 16 个字符且内容命中，返回 409 `governance_content_suppressed`，整条事件均不接纳。内容规则按项目隔离，换来源、会话或记录 ID 不能绕过。旧治理操作无法证明规则时返回 503 `governance_source_rules_unavailable` 或 `governance_content_rules_unavailable`，不会静默放行。设计与兼容细节见 [ADR-0034](adr/0034-inflight-ingest-and-content-reimport.md)。
+
+治理进入独占阶段时，新上传返回可重试的 503 `governance_maintenance_in_progress`；已经进入接纳的线程先完成。客户端取消请求不撤销已持久接纳的事件，应继续使用同一事件 ID 查询或重放，不另生成事件。
+
 原文存于接纳扩展 schema 2；旧 schema 1 必须按[运行指南](development-runtime.md)停服备份并显式迁移。无法从旧冻结输入逐项证明原文时整次拒绝迁移。`original_archive_invalid` 表示原文完整性核验失败，重放、状态和历史读取均拒绝成功响应；不能用重放覆盖损坏归档。原文可通过带 `history:read` 授权的[历史读取](remote-read.md)查阅，任务清理和来源停止写入不会删除它。
 
 ## 当前边界

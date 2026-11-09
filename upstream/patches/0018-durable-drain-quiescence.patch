@@ -1,0 +1,190 @@
+--- a/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
++++ b/memhub/apps/core/src/one_memory/memory_server/durable_queue.py
+@@ -20,7 +20,7 @@
+ import shutil
+ import sqlite3
+ import time as _time
+-from collections.abc import Awaitable, Callable
++from collections.abc import AsyncIterator, Awaitable, Callable, Collection
+ from dataclasses import dataclass
+ from datetime import UTC, datetime, timedelta
+ from pathlib import Path
+@@ -2554,7 +2554,11 @@
+         self.lease = lease
+         self.renew_every = renew_every or timedelta(seconds=max(0.1, lease.total_seconds() / 4))
+         self.running = False
++        # Claim and registration are one admission boundary. Quiescence holds
++        # this lock while existing handles finish, without stopping the loop
++        # (whose maintenance callback may itself request quiescence).
+         self._run_lock = asyncio.Lock()
++        self._active: set[asyncio.Task[None]] = set()
+         #: Reaping is a write; it runs at most once per this interval on the
+         #: idle path so an empty queue does not issue one write per poll.
+         self._reap_interval = reap_interval
+@@ -2881,20 +2885,83 @@
+     async def run_one(self, *, limit: int = 1) -> int:
+         """Claim and execute one bounded batch; return the number executed."""
+         async with self._run_lock:
+-            # Claim is a blocking SQLite write on the single writer connection.
+-            # Run it off the loop, like every other DB call in this chain; a
+-            # busy writer would otherwise stall the whole event loop.
+-            ids = await in_the_background(
+-                self.claim,
+-                limit=limit,
+-                budget_ms=self.claim_budget_ms,
+-            )
+-            await self._run_claimed(ids)
+-            return len(ids)
++            previous = self._active.copy()
++            try:
++                tasks = await self._claim_and_start(limit=limit)
++                await self._join_tasks(tasks)
++                return len(tasks)
++            finally:
++                # A cancelled claim can have committed and registered handles
++                # before it propagates cancellation, without returning tasks.
++                tasks = self._active - previous
++                try:
++                    await self._join_tasks(tasks, return_exceptions=True)
++                finally:
++                    self._active.difference_update(tasks)
++
++    @contextlib.asynccontextmanager
++    async def quiesce(self) -> AsyncIterator[None]:
++        """Pause admission and await complete handles, never the drain task.
++
++        The loop's maintenance callback runs outside the admission lock and
++        can safely enter here. This non-reentrant context is for lifecycle or
++        maintenance callers, never for an executing worker to wait on itself.
++        Cancelling this waiter leaves all admitted work running normally.
++        """
++        async with self._run_lock:
++            if self._active:
++                await asyncio.wait(tuple(self._active))
++            yield
++
++    def _start_claimed(self, ids: tuple[str, ...]) -> tuple[asyncio.Task[None], ...]:
++        tasks = tuple(asyncio.create_task(self._run_claimed_job(job_id)) for job_id in ids)
++        self._active.update(tasks)
++        return tasks
++
++    async def _claim_and_start(self, *, limit: int) -> tuple[asyncio.Task[None], ...]:
++        """Called under _run_lock; cancellation must not lose committed claims."""
++
++        async def claim_and_register() -> tuple[asyncio.Task[None], ...]:
++            ids = await in_the_background(self.claim, limit=limit, budget_ms=self.claim_budget_ms)
++            return self._start_claimed(ids)
++
++        pending = asyncio.create_task(claim_and_register())
++        return await self._join_on_cancel(pending)
++
++    @staticmethod
++    async def _join_on_cancel[T](pending: asyncio.Future[T]) -> T:
++        """Join the protected work even after repeated cancellation requests."""
++        try:
++            return await asyncio.shield(pending)
++        except asyncio.CancelledError:
++            while not pending.done():
++                try:
++                    await asyncio.shield(pending)
++                except asyncio.CancelledError:
++                    continue
++                except Exception:
++                    break
++            if pending.done() and not pending.cancelled():
++                pending.exception()
++            raise
++
++    async def _join_tasks(
++        self, tasks: Collection[asyncio.Task[None]], *, return_exceptions: bool = False
++    ) -> None:
++        if tasks:
++            await self._join_on_cancel(asyncio.gather(*tasks, return_exceptions=return_exceptions))
+
+     async def _run_claimed(self, ids: tuple[str, ...]) -> None:
+         """Execute already-claimed jobs with per-job lease renewal."""
+-        await asyncio.gather(*(self._run_claimed_job(job_id) for job_id in ids))
++        async with self._run_lock:
++            tasks = self._start_claimed(ids)
++            try:
++                await self._join_tasks(tasks)
++            finally:
++                try:
++                    await self._join_tasks(tasks, return_exceptions=True)
++                finally:
++                    self._active.difference_update(tasks)
+
+     async def _run_claimed_job(self, job_id: str) -> None:
+         if not await in_the_background(self.still_owns, job_id):
+@@ -2973,7 +3040,7 @@
+
+     async def run_forever(self, *, idle_pause: float = 0.05) -> None:
+         self.running = True
+-        active: set[asyncio.Task[None]] = set()
++        active = self._active
+         # The composition root starts this worker once and stops it at
+         # shutdown, so `drain_budget` bounds one drain *cycle*, not the
+         # worker's lifetime. When the current window can no longer admit a
+@@ -3004,19 +3071,12 @@
+                         work_deadline = self.budget.work_deadline(cycle_begin)
+                         admitted_this_cycle = False
+                 try:
+-                    available = self.max_concurrent_sources - len(active)
+-                    ids = (
+-                        await in_the_background(
+-                            self.claim,
+-                            limit=available,
+-                            budget_ms=self.claim_budget_ms,
++                    async with self._run_lock:
++                        available = self.max_concurrent_sources - len(active)
++                        tasks = (
++                            await self._claim_and_start(limit=available) if available > 0 else ()
+                         )
+-                        if available > 0
+-                        else ()
+-                    )
+-                    for job_id in ids:
+-                        active.add(asyncio.create_task(self._run_claimed_job(job_id)))
+-                    executed = len(ids)
++                    executed = len(tasks)
+                     self._database_failure_streaks.pop("claim", None)
+                 except asyncio.CancelledError:
+                     raise
+@@ -3100,8 +3160,11 @@
+                     self._idle_streak = 0
+         finally:
+             self.running = False
+-            if active:
+-                await asyncio.gather(*active, return_exceptions=True)
++            tasks = tuple(active)
++            try:
++                await self._join_tasks(tasks, return_exceptions=True)
++            finally:
++                active.difference_update(tasks)
+
+     def stop(self) -> None:
+         self.running = False
+--- a/memhub/apps/core/src/one_memory/api.py
++++ b/memhub/apps/core/src/one_memory/api.py
+@@ -829,6 +829,7 @@
+     sdk_operation_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
+     sdk_reconcile_unknown: Callable[[], Awaitable[None]] | None = None,
+     sdk_output_observer: Callable[[str, WriteRequest], Awaitable[None]] | None = None,
++    sdk_claim_ready: Callable[[], bool] | None = None,
+ ) -> FastAPI:
+     runtime_settings = settings or load_settings()
+     if runtime_settings.retrieval_index_enabled and not manage_runtime:
+@@ -1259,7 +1260,12 @@
+                 # write gate admits it by its grant. Every manual note's job was
+                 # therefore skipped on every drain tick — the note stayed
+                 # "saved, waiting" with no task behind it, forever.
+-                source_claim_enabled=lambda source_id: _sedimentation_claim_enabled(app, source_id),
++                # Readiness pauses claim only. Reusing source authorization
++                # would also reject an already-claimed job before its SDK call.
++                source_claim_enabled=lambda source_id: (
++                    (sdk_claim_ready is None or sdk_claim_ready())
++                    and _sedimentation_claim_enabled(app, source_id)
++                ),
+             )
+             app.state.memory_write_drain = memory_write_drain
+             app.state.memory_write_drain_task = watched_task(

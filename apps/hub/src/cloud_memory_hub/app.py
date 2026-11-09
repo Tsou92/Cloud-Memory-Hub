@@ -62,11 +62,23 @@ def create_hub(config: HubConfig) -> CloudBoundary:
 
     suppressions = ExecutionStore(governance.journal)
     ingest.suppressed = suppressions.suppressed
-    source_suppressions = SourceSuppression(suppressions)
+    source_suppressions = SourceSuppression(suppressions, ingest)
     ingest.require_source_allowed = source_suppressions.require_allowed
     ingest.require_source_rules = source_suppressions.targets
 
+    def claims_ready():
+        if not core.state.cmh_executor.ready:
+            return False
+        try:
+            governance.require_writes_ready()
+        except GovernanceError:
+            return False
+        return True
+
     def source_write_authorizer(source_key):
+        # Preserve the established runtime-fault fence at every invocation.
+        # Only the separate claim hook observes startup readiness; quiescence
+        # never changes a worker's source permission while it is finishing.
         try:
             governance.require_writes_ready()
         except GovernanceError:
@@ -78,6 +90,7 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         secret_store=store,
         manage_runtime=True,
         source_write_authorizer=source_write_authorizer,
+        sdk_claim_ready=claims_ready,
         sdk_operation_guard=sdk_admission.operation,
         sdk_reconcile_unknown=reconcile_unknown,
         sdk_output_observer=lineage.observe,
@@ -108,6 +121,7 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         sdk_admission,
         lineage,
         Purger(ingest, lambda: _sdk_library_bridge(core), config.data_dir),
+        drain=lambda: core.state.memory_write_drain,
     )
     core.state.cmh_executor = executor
     # Before serving or draining: finish interrupted executions and re-apply
@@ -125,6 +139,8 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         core,
         config,
         internal_token,
-        remote_api=create_remote_api(devices, ingest, reads, previews, executor),
+        remote_api=create_remote_api(
+            devices, ingest, reads, previews, executor, admission=sdk_admission
+        ),
         governance=governance,
     )

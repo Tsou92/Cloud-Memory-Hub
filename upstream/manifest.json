@@ -89,6 +89,11 @@
       "path": "patches/0017-content-free-logs.patch",
       "scope": "redact_message_query_and_parsed_content_in_sdk_logs_unless_content_logging",
       "digest": "sha256:18c34df6f233f0c5ed13adf9ef37735758beaffc623da5a3aae35bd6493a6cf3"
+    },
+    {
+      "path": "patches/0018-durable-drain-quiescence.patch",
+      "scope": "optional_claim_readiness_and_complete_worker_quiescence",
+      "digest": "sha256:e8f2d10816876fbcbe8e849b82c82c339a7852fda25b57ed794df0381cd66c7f"
     }
   ]
 }

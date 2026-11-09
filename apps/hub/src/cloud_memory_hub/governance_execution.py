@@ -9,7 +9,7 @@ import asyncio
 import hmac
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from uuid import uuid4
 
 from one_memory.hy_memory_bridge import _joined_thread
@@ -18,7 +18,7 @@ from pydantic import ConfigDict, Field, ValidationError, field_validator
 from cloud_memory_hub.governance_inventory import observe_inventory
 from cloud_memory_hub.governance_journal import GovernanceError, Intent
 from cloud_memory_hub.governance_plan import PreviewRequest, plan_relations
-from cloud_memory_hub.governance_sources import capture_sources
+from cloud_memory_hub.governance_sources import capture_rules as capture_sources
 from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
 from cloud_memory_hub.sdk_reconcile import RESERVED_PREFIXES
 
@@ -223,8 +223,12 @@ def pending_operations(journal, store):
 
 
 class GovernanceExecutor:
-    def __init__(self, authority, bridge, previews, admission, lineage=None, purger=None):
+    def __init__(
+        self, authority, bridge, previews, admission, lineage=None, purger=None, drain=None
+    ):
         self.purger = purger
+        self.drain = drain
+        self.ready = False
         self._replayed = False
         self._resume_lock = asyncio.Lock()
         self.authority = authority
@@ -236,6 +240,14 @@ class GovernanceExecutor:
         # One administrator identity today; recorded so later multi-admin audit
         # does not need a journal migration.
         self.actor_id = authority.access.instance_id
+
+    @asynccontextmanager
+    async def _exclusive(self):
+        # Workers need shared SDK admission through output observation. Drain
+        # their whole lifetime before closing SDK and intake admission.
+        async with self.drain().quiesce() if self.drain is not None else nullcontext():
+            async with self.admission.exclusive():
+                yield
 
     async def run(self, request):
         try:
@@ -305,7 +317,7 @@ class GovernanceExecutor:
             if state == "completed" and intent.action == "purge":
                 records = await _joined_thread(self.store.records, operation_id)
                 if await self.purger.present(records, scope_id=intent.scope_id):
-                    async with self.admission.exclusive():
+                    async with self._exclusive():
                         await self.purger.run(records, (), scope_id=intent.scope_id)
         self._replayed = True
 
@@ -315,13 +327,14 @@ class GovernanceExecutor:
         # reach resume before the Hub's startup resume has completed.
         async with self._resume_lock:
             await self._resume()
+            self.ready = True
 
     async def _resume(self):
         await self.replay_purges()
         planned = await _joined_thread(self.store.operations)
         if all(state == "completed" for state, _ in planned.values()):
             return
-        async with self.admission.exclusive():
+        async with self._exclusive():
             pending = {
                 intent.operation_id
                 for intent in await _joined_thread(
@@ -359,8 +372,8 @@ class GovernanceExecutor:
                 }
         namespace = f"cmh:{self.authority.access.instance_id}:{request.scope_id}"
         bridge = self.bridge()
-        # Stop new SDK work and await admitted writers before recomputing scope.
-        async with self.admission.exclusive():
+        # Pause claims and drain whole workers before recomputing the scope.
+        async with self._exclusive():
             await _joined_thread(self.previews._require_scope, request.scope_id)
             nodes = await observe_inventory(bridge, namespace, self.lineage)
             preview = await _joined_thread(
