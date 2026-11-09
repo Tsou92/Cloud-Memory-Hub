@@ -1135,6 +1135,236 @@ def test_t0342a_cache_persistence_and_random_raw_identity(
     asyncio.run(scenario())
 
 
+async def t0342b_write(sdk, request, monkeypatch, operation="add"):
+    """Native SDK write/cache, synthetic extraction, never a paid model."""
+
+    async def agent(self, **kwargs):
+        return AgentResult(
+            success=True, extracted_info={"memory": [{"content": "Synthetic split restore fact"}]}
+        )
+
+    monkeypatch.setattr(MemAgent, "process_add", agent)
+    monkeypatch.setattr("hy_memory.pipelines.writer._RECONCILE_ENABLED", False)
+    data = (
+        [turn.model_dump() for turn in request.turns]
+        if operation == "add"
+        else ["Synthetic extracted content for ordering test"]
+    )
+    return await _joined_thread(
+        getattr(sdk, operation),
+        data,
+        user_id=request.user_id,
+        agent_id=request.agent_id,
+        session_id=request.session_id,
+        source=request.source_id,
+        request_id=request.request_id,
+        **({"scene": "chat"} if operation == "add" else {}),
+    )
+
+
+async def t0342b_nodes(sdk, namespace, *, raw_only=False):
+    from hy_memory.models.memory import MemoryLayer
+
+    return await _joined_thread(
+        lambda: sdk._loop_thread.run(
+            sdk._vector_store.list_by_user(
+                user_id=namespace,
+                limit=10001,
+                with_vectors=False,
+                allow_raw_layer=True,
+                **({"layers": [MemoryLayer.L1_RAW]} if raw_only else {}),
+            )
+        )
+    )
+
+
+def t0342b_event_matches(nodes, frozen):
+    """Candidate scanner, test-only: parse identity, not substring similarity."""
+    import re
+
+    wanted = [
+        json.loads(
+            record.verbatim.split("<cmh_source_reference>\n")[1].split("\n</cmh_source_reference>")[
+                0
+            ]
+        )
+        for record in frozen.input_records
+    ]
+    matches = []
+    for node in nodes:
+        refs = [
+            json.loads(value)
+            for value in re.findall(
+                r"<cmh_source_reference>\s*(.*?)\s*</cmh_source_reference>", node.content, re.S
+            )
+        ]
+        if any(ref in refs for ref in wanted):
+            matches.append(node.node_id)
+    return matches
+
+
+@pytest.mark.parametrize("operation", ["add", "add_extracted"])
+def test_t0342b_absent_outcome_and_commit_before_nodes(t0342a_config, monkeypatch, operation):
+    config = t0342a_config
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            frozen = app.core.state.memory_write_queue.payload_for(job)
+            request = sdk_request(frozen)
+            sdk = await _sdk_library_bridge(app.core)._get_client()
+            claim = sdk._claim_write_outcome
+
+            async def stop_before_claim(**kwargs):
+                assert await sdk.async_get_write_outcome(request.request_id) is None
+                raise RuntimeError("synthetic_stop_before_claim")
+
+            # No row is committed and no node-writing implementation is entered.
+            with monkeypatch.context() as before:
+                before.setattr(sdk, "_claim_write_outcome", stop_before_claim)
+                with pytest.raises(RuntimeError, match="synthetic_stop_before_claim"):
+                    await t0342b_write(sdk, request, monkeypatch, operation)
+            assert (
+                await _sdk_library_bridge(app.core).get_sdk_write_outcome(request.request_id)
+                is None
+            )
+            assert await t0342b_nodes(sdk, request.user_id) == []
+            assert sdk._claim_write_outcome == claim
+            impl_name = "_async_add_impl" if operation == "add" else "_async_add_extracted_impl"
+            impl = getattr(sdk, impl_name)
+            inspected = []
+
+            async def check_committed_then_write(*args, **kwargs):
+                with sqlite3.connect(sdk._cache._db_path) as db:
+                    row = db.execute(
+                        "SELECT status,result_json FROM write_outcomes WHERE request_id=?",
+                        (request.request_id,),
+                    ).fetchone()
+                assert row == ("running", "{}")
+                assert (
+                    await sdk._vector_store.list_by_user(
+                        user_id=request.user_id, allow_raw_layer=True, with_vectors=False
+                    )
+                    == []
+                )
+                inspected.append(True)
+                return await impl(*args, **kwargs)
+
+            monkeypatch.setattr(sdk, impl_name, check_committed_then_write)
+            result = await t0342b_write(sdk, request, monkeypatch, operation)
+            assert result["success"] and inspected == [True]
+            assert await t0342b_nodes(sdk, request.user_id)
+            print(
+                f"T-034-2b order: operation={operation}, absent_row_nodes=0, "
+                "before_impl_disk_row=running/{}, before_impl_nodes=0, after_write_nodes=True"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_t0342b_old_cache_new_vectors_not_detected_on_restart(t0342a_config, monkeypatch):
+    config = t0342a_config
+
+    async def scenario(backup):
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            queue = app.core.state.memory_write_queue
+            job = await accepted(web, headers, event)
+            frozen = queue.payload_for(job)
+            request = sdk_request(frozen)
+            sdk = await _sdk_library_bridge(app.core)._get_client()
+            cache_path = sdk._cache._db_path
+            with sqlite3.connect(cache_path) as source:
+                source.backup(backup)
+            result = await t0342b_write(sdk, request, monkeypatch)
+            assert result["success"]
+            raw_id = result["memory_id"]
+            queue.settle(job, state="unknown", hy_invoked=True)
+        # Restore ONLY old cache, not Chroma or queue; no manual row deletion.
+        with sqlite3.connect(cache_path) as target:
+            backup.backup(target)
+        async with fixture(config) as (app, web):
+            app.core.state.cmh_governance.require_writes_ready()
+            bridge = _sdk_library_bridge(app.core)
+            sdk = await bridge._get_client()
+            assert await bridge.get_sdk_write_outcome(request.request_id) is None
+            raw = await bridge.get_sdk_raw(raw_id)
+            assert raw is not None and event["content"]["messages"][0]["text"] in raw.content
+            assert await app.core.state.cmh_reconciler.run() == 0
+            assert app.core.state.memory_write_queue.get(request.request_id).state == "unknown"
+            matches = t0342b_event_matches(
+                await t0342b_nodes(sdk, request.user_id, raw_only=True), frozen
+            )
+            assert matches == [raw_id]
+            print(
+                "T-034-2b split_restore: startup_allowed=True, outcome=None, raw_text=True, "
+                "reconciled=0, state=unknown, automatic_mismatch_detection=False, "
+                "manual_scan_found=1"
+            )
+
+    with sqlite3.connect(":memory:") as backup:
+        asyncio.run(scenario(backup))
+
+
+def test_t0342b_scan_running_outcome_raw_among_1000(t0342a_config, monkeypatch):
+    from dataclasses import replace
+    from time import perf_counter
+
+    config = t0342a_config
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            frozen = app.core.state.memory_write_queue.payload_for(job)
+            request = sdk_request(frozen)
+            bridge = _sdk_library_bridge(app.core)
+            sdk = await bridge._get_client()
+            observed = []
+
+            async def stop_finish(request_id, status, result):
+                observed.append(result["memory_id"])
+                raise RuntimeError("synthetic_stop_before_success_cache")
+
+            monkeypatch.setattr(sdk, "_finish_write_outcome", stop_finish)
+            with pytest.raises(RuntimeError, match="synthetic_stop_before_success_cache"):
+                await t0342b_write(sdk, request, monkeypatch)
+            outcome = await bridge.get_sdk_write_outcome(request.request_id)
+            assert (outcome["status"], outcome["result"]) == ("running", {})
+            assert observed
+            raw_id = observed[0]
+            raw = await _joined_thread(
+                lambda: sdk._loop_thread.run(sdk._vector_store.get_by_id(raw_id))
+            )
+            assert raw is not None
+            # Synthetic distracting raws retain all other event fields, but not event_id.
+            others = []
+            for _ in range(999):
+                content = raw.content.replace(event["event_id"], str(uuid4()))
+                others.append(replace(raw, node_id=str(uuid4()), content=content))
+            await _joined_thread(
+                lambda: sdk._loop_thread.run(sdk._vector_store.upsert_batch(others))
+            )
+            # Foreign namespace with the exact same source reference must not match.
+            foreign = replace(raw, node_id=str(uuid4()), user_id="synthetic-foreign-scope")
+            await _joined_thread(lambda: sdk._loop_thread.run(sdk._vector_store.upsert(foreign)))
+            samples = []
+            for _ in range(3):
+                start = perf_counter()
+                nodes = await t0342b_nodes(sdk, request.user_id, raw_only=True)
+                matches = t0342b_event_matches(nodes, frozen)
+                samples.append((perf_counter() - start) * 1000)
+                assert len(nodes) == 1000 and matches == [raw_id]
+                assert foreign.node_id not in matches
+            print(
+                "T-034-2b scan: outcome=running/{}, result_raw_id=None, "
+                f"raws=1000, matches=1, foreign_excluded=True, elapsed_ms={samples}"
+            )
+
+    asyncio.run(scenario())
+
+
 def test_hnsw_slack_is_the_only_residue_and_is_not_a_stored_record(tmp_path, monkeypatch):
     """Pin the known gap: residue, if any, is only in HNSW slack, never in a slot
     the index counts as an element; everything else is clean."""
