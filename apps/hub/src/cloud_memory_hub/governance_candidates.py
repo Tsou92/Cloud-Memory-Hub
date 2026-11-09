@@ -173,6 +173,7 @@ class CandidateInventory:
     blockers: tuple[CandidateBlocker, ...]
     ownership_coverage: Literal["complete", "incomplete"]
     usage: CandidateUsage
+    scope_nonterminal_job_ids: tuple[str, ...]
 
 
 class _Budget:
@@ -254,6 +255,7 @@ class _Collector:
         self.sources, self.receipts, self.selected = {}, {}, {}
         self.receipts_by_request = {}
         self.blockers, self.confirmed, self.rules = set(), [], []
+        self.nonterminal_jobs = set()
         self.coverage = True
         self.targets = frozenset(scope.rule_targets)
 
@@ -419,6 +421,10 @@ class _Collector:
         if owned is None:
             return
         identity, source = owned
+        # Even an unmatched or unreadable task may consume selected native
+        # memory later. Observing its identity grants no cancellation authority.
+        if job["state"] not in _TERMINAL_WRITE_STATES:
+            self.nonterminal_jobs.add(identity.job_id)
         receipt = self.receipts.get(identity.job_id)
         matches = self.receipts_by_request.get(identity.request_id, ())
         if any(row["receipt_id"] != identity.job_id for row in matches):
@@ -529,6 +535,7 @@ class _Collector:
             tuple(sorted(self.blockers, key=lambda item: (item.reason, item.job_id or ""))),
             "complete" if self.coverage else "incomplete",
             CandidateUsage(**self.budget.values),
+            tuple(sorted(self.nonterminal_jobs)),
         )
 
 

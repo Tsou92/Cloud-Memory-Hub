@@ -14,6 +14,7 @@ from cloud_memory_hub.governance_candidates import (
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_sources import capture_rules
 from cloud_memory_hub.remote_ingest import write_request
+from one_memory.memory_server.durable_queue import _TERMINAL_WRITE_STATES
 from test_original_archive import config_for
 from test_output_lineage import accepted, fixture
 from test_remote_ingest import provision
@@ -197,5 +198,120 @@ def test_ownership_original_and_frozen_damage_are_blockers_without_changes(
             assert tables(config) == before
             if damage == "instance":
                 assert result.ownership_coverage == "incomplete"
+                assert result.scope_nonterminal_job_ids == ()
+            else:
+                assert result.scope_nonterminal_job_ids == (job,)
+
+    asyncio.run(scenario())
+
+
+def native_scope(app, event):
+    records = {str(uuid4()): "memory"}
+    return ConfirmedScope(
+        event["scope_id"],
+        "purge",
+        records,
+        capture_rules(
+            app.core.state.cmh_governance.journal,
+            app.core.state.cmh_ingest,
+            event["scope_id"],
+            records,
+        ),
+        "preview",
+        view_digest="a" * 64,
+    )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "pending",
+        "running",
+        "waiting_for_permission",
+        "waiting_for_model",
+        "unknown",
+        "broken-state",
+    ],
+)
+def test_scope_nonterminal_ids_include_unmatched_http_jobs_but_exclude_foreign_jobs(
+    tmp_path, state
+):
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            first = await accepted(web, headers, event)
+            second = await accepted(web, headers, changed(event))
+            _, foreign_headers, _, foreign_event = await provision(web, config)
+            foreign_event["content"] = copy.deepcopy(event["content"])
+            foreign = await accepted(web, foreign_headers, foreign_event)
+            with sqlite3.connect(app.core.state.memory_write_queue.database_path) as db:
+                db.execute("UPDATE memory_write_jobs SET state=? WHERE job_id=?", (state, first))
+            before = tables(config)
+            result = observe(app, native_scope(app, event))
+            assert result.scope_nonterminal_job_ids == tuple(sorted((first, second)))
+            assert foreign not in result.scope_nonterminal_job_ids
+            assert result.confirmed_original_candidates == result.rule_only_candidates == ()
+            assert result.ownership_coverage == "complete"
+            if state in {"unknown", "broken-state"}:
+                assert {item.reason for item in result.blockers} == {
+                    "governance_candidate_state_unproven",
+                }
+            else:
+                assert result.blockers == ()
+            assert tables(config) == before
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "damage,reason",
+    [
+        ("payload", "governance_candidate_payload_unproven"),
+        ("receipt", "governance_candidate_original_unproven"),
+    ],
+)
+def test_scope_nonterminal_identity_is_kept_before_body_validation(tmp_path, damage, reason):
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            if damage == "payload":
+                with sqlite3.connect(app.core.state.memory_write_queue.database_path) as db:
+                    db.execute(
+                        "UPDATE memory_write_jobs SET payload_json='{}' WHERE job_id=?", (job,)
+                    )
+            else:
+                with app.core.state.cmh_ingest._database(writing=True) as db:
+                    db.execute(
+                        "UPDATE cmh_event_receipts SET payload_json='{}' WHERE receipt_id=?", (job,)
+                    )
+            before = tables(config)
+            result = observe(app, native_scope(app, event))
+            assert result.scope_nonterminal_job_ids == (job,)
+            assert result.confirmed_original_candidates == result.rule_only_candidates == ()
+            assert reason in {item.reason for item in result.blockers}
+            assert result.ownership_coverage == "complete"
+            assert tables(config) == before
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("state", sorted(_TERMINAL_WRITE_STATES))
+def test_scope_nonterminal_identity_excludes_all_upstream_terminal_states(tmp_path, state):
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            app.core.state.memory_write_queue.settle(job, state=state, hy_invoked=True)
+            result = observe(app, native_scope(app, event))
+            assert result.scope_nonterminal_job_ids == ()
+            assert result.confirmed_original_candidates == result.rule_only_candidates == ()
+            assert result.blockers == ()
 
     asyncio.run(scenario())
