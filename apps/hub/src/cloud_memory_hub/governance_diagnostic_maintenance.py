@@ -1,10 +1,10 @@
-"""Stopped-service diagnostic inspection, independent of startup replay/SDK.
+"""Stopped-service diagnostic maintenance, independent of startup replay/SDK.
 
-This entry produces bounded metadata candidates, not deletion confirmation.
-It can run while ordinary recovery refuses to open the business service.
+Inspection and explicit coverage activation remain available while ordinary
+recovery refuses to open the business service. Neither entry deletes files.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from cloud_memory_hub.events import canonical_uuid
@@ -17,10 +17,12 @@ from cloud_memory_hub.governance_diagnostic_confirmation import (
     cleanup_to_dict,
 )
 from cloud_memory_hub.governance_diagnostic_inventory import inspect_diagnostic_files
+from cloud_memory_hub.governance_diagnostic_profiles import CORE_PROFILE
 from cloud_memory_hub.governance_diagnostic_records import WriteRequest
+from cloud_memory_hub.governance_diagnostic_recovery import build_recovery_graph
 from cloud_memory_hub.governance_execution_store import ExecutionStore
 from cloud_memory_hub.governance_inflight import InflightGovernance
-from cloud_memory_hub.governance_journal import GovernanceError
+from cloud_memory_hub.governance_journal import GovernanceError, GovernanceJournal
 from cloud_memory_hub.remote_access import DeviceAccessStore
 from cloud_memory_hub.remote_ingest import RemoteIngest
 from cloud_memory_hub.source_history import PREFIX
@@ -33,6 +35,53 @@ class _StoppedQueueLocation:
     """Only a path for the upstream read-only database pool; no queue lifecycle."""
 
     database_path: Path
+
+
+def _coverage_activation_state(config):
+    """Pure pre/post validation, including external witnesses and actual plans."""
+    authority = open_authority(config, read_only=True)
+    with authority.access._connection() as db:
+        heads = authority._refresh(db, refresh_witness=False)
+        witnesses = tuple(
+            tuple(tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid"))
+            for table in ("cmh_governance_binding", "cmh_governance_floors")
+        )
+        recovery = ExecutionStore(authority.journal, read_only=True).recovery_snapshot()
+        graph = build_recovery_graph(recovery)
+    pending = set(graph.pending) | set(graph.orphans)
+    pending.update(intent.operation_id for intent in graph.unplanned)
+    return authority.journal, heads, witnesses, recovery, len(pending)
+
+
+def activate_file_coverage(config) -> dict:
+    """Explicitly raise a verified existing store's requirements under exclusion.
+
+    The only mutation is the bound main-journal capability. No migration,
+    witness refresh, cleanup, service construction or recovery is performed.
+    """
+    with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        journal, heads, witnesses, before, _ = _coverage_activation_state(config)
+        identity = before.snapshot.binding.store_id
+        changed = before.required_profile != CORE_PROFILE
+        if changed:
+            writer = GovernanceJournal(
+                journal.path, instance_id=journal.instance_id, key=journal._key
+            )
+            writer.bind_file_coverage(identity)
+        _, after_heads, after_witnesses, after, pending = _coverage_activation_state(config)
+        if (
+            heads != after_heads
+            or witnesses != after_witnesses
+            or replace(before, required_profile=CORE_PROFILE) != after
+        ):
+            raise GovernanceError("governance_coverage_activation_changed")
+        return {
+            "version": 1,
+            "required_profile": after.required_profile,
+            "store_id": identity,
+            "pending": pending,
+            "changed": changed,
+        }
 
 
 def preview_diagnostic_repair(config, operation_id: str) -> dict:

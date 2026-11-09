@@ -31,6 +31,10 @@ def test_physical_file_repair_survives_interruption_and_log_only_restore():
         "batch_interruption_and_restore": True,
         "repair_aware_execution_binding": True,
         "real_terminal_review_and_signed_retry": True,
+        "explicit_core_coverage_activation": True,
+        "native_core_strict_files_preserved": True,
+        "core_four_domain_fresh_recovery": True,
+        "unowned_core_body_preserved": True,
         "whole_purge_completed": False,
         "external_models": False,
     }

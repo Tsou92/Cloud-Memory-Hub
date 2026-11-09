@@ -79,6 +79,9 @@ def require_installed_sources():
         "cloud_memory_hub.governance_diagnostic_requests",
         "cloud_memory_hub.governance_diagnostic_maintenance",
         "cloud_memory_hub.governance_diagnostic_inventory",
+        "cloud_memory_hub.governance_core_records",
+        "cloud_memory_hub.governance_diagnostic_profiles",
+        "cloud_memory_hub.diagnostics",
         "hy_memory.client",
         "hy_memory.utils.file_log_lifecycle",
         "one_memory.api",
@@ -701,6 +704,158 @@ def review_retry_phase(root):
         assert (authority.execution.read_state(), authority.journal.head(saved["scope"])) == before
 
 
+def business_state(authority):
+    return {
+        identity: {"state": operation.state, "intent": operation.intent.model_dump(mode="json")}
+        for identity, operation in authority.execution.read_state().operations.items()
+    }
+
+
+def core_prepare_phase(root):
+    from cloud_memory_hub.config import HubConfig
+    from cloud_memory_hub.diagnostics import diagnostic_file_maintenance
+    from cloud_memory_hub.governance_authority import open_authority
+    from cloud_memory_hub.governance_diagnostic_files import recover_diagnostic_files
+    from cloud_memory_hub.storage_lease import StorageLease
+
+    config, saved = HubConfig.from_environment(), load_state(root)
+    with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        authority = open_authority(config)
+        before = business_state(authority)
+        with diagnostic_file_maintenance(roots=(logs(root),)) as gate:
+            receipts = recover_diagnostic_files(
+                authority.execution.store,
+                data_root=config.data_dir,
+                sdk_log_root=logs(root),
+                gate=gate,
+            )
+        assert len(receipts) == 4 and all(item.state == "verified" for item in receipts)
+        assert saved["parent"] not in authority.execution.read_state().pending
+        assert business_state(authority) == before
+        saved["core_business"] = before
+        save_state(root, saved)
+
+
+def core_emit_phase(root):
+    """Separate legacy process, using actual Core factories without strict mode."""
+    from hy_memory.utils.diagnostic_policy import strict_diagnostics_enabled
+    from one_memory.diagnostic_log import DiagnosticLog
+    from one_memory.log_file import start_logging_to_file
+
+    assert not strict_diagnostics_enabled()
+    target = root / "core-legacy-fixture"
+    destination = start_logging_to_file(target)
+    handler = next(
+        item
+        for item in logging.getLogger().handlers
+        if getattr(item, "baseFilename", None) == str(destination.resolve())
+    )
+    try:
+        logging.getLogger("one_memory.synthetic").warning(
+            "Synthetic unowned Core body\nsecond line"
+        )
+        diagnostic = DiagnosticLog(target)
+        diagnostic.write(
+            level="error",
+            component="core.database",
+            event="database.error",
+            outcome="failed",
+            details={"reason": "Synthetic unowned Core body"},
+        )
+        assert diagnostic.close()
+        handler.flush()
+    finally:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
+    assert all(b"Synthetic unowned Core body" in raw for raw in files_at(target / "logs").values())
+
+
+def core_coverage_phase(root, *, fresh=False, legacy=False):
+    from cloud_memory_hub.config import HubConfig
+    from cloud_memory_hub.diagnostics import diagnostic_file_maintenance
+    from cloud_memory_hub.governance_authority import open_authority
+    from cloud_memory_hub.governance_diagnostic_files import recover_diagnostic_files
+    from cloud_memory_hub.governance_diagnostic_profiles import CORE_PROFILE
+    from cloud_memory_hub.governance_journal import GovernanceError
+    from cloud_memory_hub.storage_lease import StorageLease
+    from one_memory.diagnostic_log import DiagnosticLog
+    from one_memory.log_file import start_logging_to_file
+    from probe_diagnostic_inventory import logical_snapshot
+
+    config, saved = HubConfig.from_environment(), load_state(root)
+    core_root = config.data_dir / "logs"
+    with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        authority = open_authority(config)
+        before = authority.execution.read_state()
+        assert before.required_profile == CORE_PROFILE
+        assert business_state(authority) == saved["core_business"]
+        if not fresh and not legacy:
+            assert saved["parent"] in before.pending, "probe_old_sdk_receipt_satisfied_core"
+        if legacy:
+            put_files(core_root, files_at(root / "core-legacy-fixture/logs"))
+            original = logical_snapshot(root), files_at(core_root), files_at(logs(root))
+            try:
+                with diagnostic_file_maintenance(roots=(logs(root), core_root)) as gate:
+                    recover_diagnostic_files(
+                        authority.execution.store,
+                        data_root=config.data_dir,
+                        sdk_log_root=logs(root),
+                        gate=gate,
+                    )
+            except GovernanceError as error:
+                assert str(error) == "diagnostic_core_authorization_required"
+            else:
+                raise AssertionError("probe_unowned_core_body_deleted")
+            assert (logical_snapshot(root), files_at(core_root), files_at(logs(root))) == original
+            return
+        handler = diagnostic = None
+        try:
+            if not fresh:
+                destination = start_logging_to_file(config.data_dir)
+                handler = next(
+                    item
+                    for item in logging.getLogger().handlers
+                    if getattr(item, "baseFilename", None) == str(destination.resolve())
+                )
+                logging.getLogger("one_memory.synthetic").warning("Synthetic strict Core body")
+                diagnostic = DiagnosticLog(config.data_dir)
+                diagnostic.write(
+                    level="error",
+                    component="core.database",
+                    event="database.error",
+                    outcome="failed",
+                    details={"reason": "Synthetic strict Core body"},
+                )
+            with diagnostic_file_maintenance(roots=(logs(root), core_root)) as gate:
+                original = files_at(core_root)
+                assert {"core.log", "diagnostic-core.jsonl"} <= set(original)
+                assert all(b"Synthetic strict Core body" not in raw for raw in original.values())
+                if fresh:
+                    assert original == files_at(root / "core-strict-fixture")
+                receipts = recover_diagnostic_files(
+                    authority.execution.store,
+                    data_root=config.data_dir,
+                    sdk_log_root=logs(root),
+                    gate=gate,
+                )
+                assert len(receipts) == 4 and all(
+                    item.state == "verified"
+                    and item.manifest.profile == item.verification.profile == CORE_PROFILE
+                    for item in receipts
+                )
+                assert files_at(core_root) == original, "probe_strict_core_bytes_changed"
+                assert business_state(authority) == saved["core_business"]
+                assert saved["parent"] not in authority.execution.read_state().pending
+                if not fresh:
+                    put_files(root / "core-strict-fixture", original)
+        finally:
+            if diagnostic is not None:
+                assert diagnostic.close()
+            if handler is not None:
+                logging.getLogger().removeHandler(handler)
+                handler.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--installed", action="store_true")
@@ -722,6 +877,11 @@ def main():
             "execution-binding",
             "review-submit",
             "review-retry",
+            "core-prepare",
+            "core-coverage",
+            "core-recover",
+            "core-emit",
+            "core-unowned",
         ),
     )
     parser.add_argument("--root", type=Path)
@@ -730,8 +890,8 @@ def main():
     if args.phase:
         assert args.root is not None
         forbid_network()
-        if args.phase == "emit":
-            emit_phase(args.root)
+        if args.phase in {"emit", "core-emit"}:
+            (emit_phase if args.phase == "emit" else core_emit_phase)(args.root)
         else:
             from cloud_memory_hub.diagnostics import initialize_diagnostics
             from probe_original_archive import environment
@@ -755,6 +915,10 @@ def main():
                 "execution-binding": lambda: execution_binding_phase(args.root),
                 "review-submit": lambda: review_submit_phase(args.root),
                 "review-retry": lambda: review_retry_phase(args.root),
+                "core-prepare": lambda: core_prepare_phase(args.root),
+                "core-coverage": lambda: core_coverage_phase(args.root),
+                "core-recover": lambda: core_coverage_phase(args.root, fresh=True),
+                "core-unowned": lambda: core_coverage_phase(args.root, legacy=True),
             }
             actions[args.phase]()
         if args.installed:
@@ -828,7 +992,30 @@ def main():
             "execution-binding",
             "review-submit",
             "review-retry",
+            "core-prepare",
         ):
+            phase(name)
+        for name, changed in (("core-activate", True), ("core-activate-repeat", False)):
+            before = logical_snapshot(root)
+            invoke(
+                name,
+                [
+                    sys.executable,
+                    "-m",
+                    "cloud_memory_hub",
+                    "activate-file-coverage",
+                    "--writers-stopped",
+                ],
+            )
+            result = json.loads((root / (name + ".log")).read_text().splitlines()[-1])
+            assert set(result) == {"version", "required_profile", "store_id", "pending", "changed"}
+            assert result["version"] == 1 and result["changed"] is changed
+            assert (
+                result["required_profile"] == "sdk-core-four-domains-v1" and result["pending"] == 4
+            )
+            if not changed:
+                assert logical_snapshot(root) == before
+        for name in ("core-coverage", "core-recover", "core-emit", "core-unowned"):
             phase(name)
         print(
             json.dumps(
@@ -850,6 +1037,10 @@ def main():
                     "batch_interruption_and_restore": True,
                     "repair_aware_execution_binding": True,
                     "real_terminal_review_and_signed_retry": True,
+                    "explicit_core_coverage_activation": True,
+                    "native_core_strict_files_preserved": True,
+                    "core_four_domain_fresh_recovery": True,
+                    "unowned_core_body_preserved": True,
                     "whole_purge_completed": False,
                     "external_models": False,
                 },
