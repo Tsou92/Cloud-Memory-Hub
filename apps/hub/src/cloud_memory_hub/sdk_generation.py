@@ -77,9 +77,7 @@ class SdkGeneration:
         # A legacy restored job cannot establish that its previous invocation
         # or captured inputs predate a deletion. Keep that project's evidence
         # until the positive-effect recovery path can certify it.
-        if any(
-            intent.scope_id == scope for _, intent in self.suppressions.store.operations().values()
-        ):
+        if self.suppressions.business_plans(scope):
             raise GovernanceError("governance_admission_legacy_scope_unproven")
 
     async def permit(self, actual):

@@ -397,6 +397,7 @@ class LegacySnapshot:
     committed: tuple[str, ...]
     orphans: tuple[str, ...]
     journal_digest: str
+    unplanned: tuple[Intent, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "operations", MappingProxyType(dict(self.operations)))
@@ -537,22 +538,40 @@ class ExecutionStore:
                 unplanned.append(intent)
         return tuple(sorted(committed)), tuple(sorted(orphans)), tuple(unplanned)
 
-    def inspect_legacy(self):
-        """Read schema 1 and the real chain without repairing any row or witness."""
+    def legacy_recovery_snapshot(self, *, allow_missing=False):
+        """Read v1 and its actual chain together, including unplanned intents.
+
+        A missing store is only an observation, never initialization. Migration
+        still uses inspect_legacy, which requires a present, complete old store.
+        """
+        if type(allow_missing) is not bool:
+            raise GovernanceError("governance_execution_mode_invalid")
         # This order also governs all mutations: journal, then execution.
-        with self.journal._connection() as journal_db, self._connection(version=1) as db:
+        with self.journal._connection() as journal_db:
             entries = self._journal_snapshot(journal_db)
-            operations, rows = self._old_snapshot(db)
+            if self.journal._capabilities(journal_db).get("execution_store_v2") is not None:
+                raise GovernanceError("governance_execution_binding_mismatch")
+            if allow_missing and not self.path.exists() and not self.path.is_symlink():
+                operations, rows = {}, [[], []]
+            else:
+                with self._connection(version=1) as db:
+                    operations, rows = self._old_snapshot(db)
             committed, orphans, unplanned = self._classify(operations, entries)
-            if unplanned:
-                raise GovernanceError("governance_execution_pending")
             return LegacySnapshot(
                 _digest(rows),
                 operations,
                 committed,
                 orphans,
                 _digest([[key, value[0].model_dump(), value[1]] for key, value in entries.items()]),
+                unplanned,
             )
+
+    def inspect_legacy(self):
+        """Pure migration inspection; unplanned real intents cannot be migrated."""
+        snapshot = self.legacy_recovery_snapshot()
+        if snapshot.unplanned:
+            raise GovernanceError("governance_execution_pending")
+        return snapshot
 
     @staticmethod
     def _entries_digest(entries):

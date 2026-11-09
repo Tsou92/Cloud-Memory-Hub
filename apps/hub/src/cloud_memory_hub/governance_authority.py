@@ -52,6 +52,7 @@ class GovernanceAuthority:
         self._runtime_recovery.set()
         self._runtime_maintenance = 0
         self._runtime_lock = Lock()
+        self._execution_binding = None
         if access.instance_id != journal.instance_id:
             raise GovernanceError("governance_binding_mismatch")
         self.verify()
@@ -162,14 +163,35 @@ class GovernanceAuthority:
             raise GovernanceError("governance_authority_read_only")
         return self._run(intent)
 
-    def _pending(self):
-        from cloud_memory_hub.governance_execution import ExecutionStore, pending_operations
+    @property
+    def execution(self):
+        """One selected format; every state read still verifies its live binding."""
+        from cloud_memory_hub.governance_execution_binding import select_execution_store
 
+        # Selection does not initialize or migrate either store. Cooperating
+        # format migration requires the stopped-service StorageLease, so a
+        # changed capability in this process is a mismatch, not an upgrade.
+        with self._runtime_lock:
+            if self._execution_binding is None:
+                self._execution_binding = select_execution_store(
+                    self.journal, read_only=self.read_only
+                )
+            return self._execution_binding
+
+    def _pending(self):
         self.verify()
-        store = ExecutionStore(self.journal)
-        if store.path.is_symlink():
-            raise GovernanceError("governance_execution_unavailable")
-        return pending_operations(self.journal, store), store.operations()
+        state = self.execution.read_state()
+        planned = {
+            identity: (operation.state, operation.intent)
+            for identity, operation in state.operations.items()
+        }
+        pending = [
+            state.operations[identity].intent
+            for identity in state.pending
+            if identity in state.operations
+        ]
+        pending.extend(state.unplanned)
+        return pending, planned
 
     def require_ready(self) -> None:
         # Schema-2 file execution is still an independently tested component.
