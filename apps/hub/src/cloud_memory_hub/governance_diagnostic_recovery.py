@@ -9,6 +9,7 @@ The file executor must reject graph.unplanned before any file or progress I/O.
 from dataclasses import dataclass
 
 from cloud_memory_hub.governance_diagnostic_confirmation import cleanup_digest
+from cloud_memory_hub.governance_diagnostic_profiles import coverage_satisfies
 from cloud_memory_hub.governance_diagnostic_records import (
     MAX_SELECTION,
     RecordGrant,
@@ -216,7 +217,7 @@ def build_recovery_graph(
         for identity, operation in operations.items()
         if operation.state != "completed"
         or operation.cleanup is not None
-        and operation.cleanup.state != "verified"
+        and not coverage_satisfies(operation.cleanup, recovery.required_profile)
     }
     return DiagnosticRecoveryGraph(
         tuple(business),

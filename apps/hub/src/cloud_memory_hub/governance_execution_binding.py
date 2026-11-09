@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
+from cloud_memory_hub.governance_diagnostic_profiles import SDK_PROFILE, coverage_satisfies
 from cloud_memory_hub.governance_execution_store import (
     ExecutionStore as ExecutionStoreV2,
 )
@@ -31,6 +32,7 @@ class ExecutionState:
     unplanned: tuple[Intent, ...]
     pending: tuple[str, ...]
     recovery: RecoverySnapshot | None
+    required_profile: str = SDK_PROFILE
 
     def __post_init__(self):
         object.__setattr__(self, "operations", MappingProxyType(dict(self.operations)))
@@ -78,8 +80,10 @@ class ExecutionBinding:
                 recovery.orphans,
                 recovery.unplanned,
             )
+            required_profile = recovery.required_profile
         else:
             recovery = None
+            required_profile = SDK_PROFILE
             snapshot = ExecutionStoreV2(self.journal, read_only=True).legacy_recovery_snapshot(
                 allow_missing=True
             )
@@ -100,7 +104,7 @@ class ExecutionBinding:
             for identity, operation in operations.items()
             if operation.state != "completed"
             or operation.cleanup is not None
-            and operation.cleanup.state != "verified"
+            and not coverage_satisfies(operation.cleanup, required_profile)
         )
         return ExecutionState(
             operations,
@@ -110,6 +114,7 @@ class ExecutionBinding:
             tuple(sorted(unplanned, key=lambda intent: intent.operation_id)),
             tuple(sorted(pending)),
             recovery,
+            required_profile,
         )
 
     def suppressed(self, scope_id: str) -> dict[str, str]:

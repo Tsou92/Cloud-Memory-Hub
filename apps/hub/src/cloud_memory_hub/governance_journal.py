@@ -17,6 +17,7 @@ from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore, Scope
 
 MAX_SEQUENCE = 2**53 - 1
 MAX_PAGE_BYTES = 2 * 1024 * 1024
+FILE_COVERAGE_CAPABILITY = "execution_file_coverage_v2"
 TargetKind = Literal["memory", "raw", "source_record", "content"]
 
 
@@ -236,6 +237,7 @@ class GovernanceJournal:
         if len(names) != len(rows) or names not in (
             {"admissions_ledger_id"},
             {"admissions_ledger_id", "execution_store_v2"},
+            {"admissions_ledger_id", "execution_store_v2", FILE_COVERAGE_CAPABILITY},
         ):
             raise GovernanceError("governance_capability_invalid")
         result = {}
@@ -250,6 +252,11 @@ class GovernanceJournal:
             if not valid:
                 raise GovernanceError("governance_capability_invalid")
             result[row["name"]] = value
+        if (
+            FILE_COVERAGE_CAPABILITY in result
+            and result[FILE_COVERAGE_CAPABILITY] != result["execution_store_v2"]
+        ):
+            raise GovernanceError("governance_capability_invalid")
         return result
 
     def _admissions_binding(self, db):
@@ -262,6 +269,45 @@ class GovernanceJournal:
     def execution_store_id(self):
         with self._connection() as db:
             return self._capabilities(db).get("execution_store_v2")
+
+    def _coverage_profile(self, db):
+        from cloud_memory_hub.governance_diagnostic_profiles import CORE_PROFILE, SDK_PROFILE
+
+        capabilities = self._capabilities(db)
+        return CORE_PROFILE if FILE_COVERAGE_CAPABILITY in capabilities else SDK_PROFILE
+
+    def file_coverage_profile(self):
+        """Read the signed requirement, never infer completed file coverage."""
+        with self._connection() as db:
+            return self._coverage_profile(db)
+
+    def bind_file_coverage(self, store_id: str) -> None:
+        """Raise requirements after explicit stopped-service store validation.
+
+        This marker does not finish cleanup, rewrite old receipts or open the
+        ordinary runtime. Repeating the same activation changes no stored data.
+        """
+        if self.read_only:
+            raise GovernanceError("governance_journal_read_only")
+        identity = self._instance(store_id)
+        with self._connection(writing=True) as db:
+            self._verify(db)
+            capabilities = self._capabilities(db)
+            current = capabilities.get("execution_store_v2")
+            if current is None:
+                raise GovernanceError("governance_execution_binding_required")
+            if current != identity:
+                raise GovernanceError("governance_capability_mismatch")
+            if FILE_COVERAGE_CAPABILITY in capabilities:
+                return
+            db.execute(
+                "INSERT INTO capabilities VALUES (?,?,?)",
+                (
+                    FILE_COVERAGE_CAPABILITY,
+                    identity,
+                    self._mac("capability", [FILE_COVERAGE_CAPABILITY, identity]),
+                ),
+            )
 
     def bind_execution_store(self, store_id: str) -> None:
         """Explicit activation after stopped-writer execution-store validation.
