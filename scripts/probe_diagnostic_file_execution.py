@@ -67,6 +67,7 @@ def require_installed_sources():
         "cloud_memory_hub.governance_execution_store",
         "cloud_memory_hub.governance_diagnostic_files",
         "cloud_memory_hub.governance_diagnostic_confirmation",
+        "cloud_memory_hub.governance_diagnostic_recovery",
         "cloud_memory_hub.governance_diagnostic_maintenance",
         "cloud_memory_hub.governance_diagnostic_inventory",
         "hy_memory.client",
@@ -317,11 +318,75 @@ def repair_phase(root):
     execute_phase(root, failure=True)
 
 
-def execute_phase(root, *, failure=False, restored=False):
+def batch_repair_phase(root):
+    """An additional real signed repair covers only the newly changed bytes."""
+    from cloud_memory_hub.config import HubConfig
+    from cloud_memory_hub.governance_authority import open_authority
+    from cloud_memory_hub.governance_diagnostic_confirmation import (
+        CleanupAuthority,
+        RepairParent,
+        cleanup_policy_targets,
+        cleanup_to_dict,
+    )
+    from cloud_memory_hub.governance_diagnostic_inventory import inspect_diagnostic_files
+    from cloud_memory_hub.governance_diagnostic_records import WriteRequest
+    from cloud_memory_hub.governance_execution_store import ExecutionStore
+    from cloud_memory_hub.governance_journal import Intent
+    from cloud_memory_hub.storage_lease import StorageLease
+
+    config, state = HubConfig.from_environment(), load_state(root)
+    with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        authority = open_authority(config)
+        store, journal = ExecutionStore(authority.journal), authority.journal
+        recovery = store.recovery_snapshot()
+        parent = recovery.snapshot.operations[state["parent"]]
+        requests = tuple(
+            WriteRequest(item.request_id, f"cmh:{journal.instance_id}:{parent.intent.scope_id}")
+            for item in parent.cleanup.authority.selectors
+        )
+        proposal = inspect_diagnostic_files(
+            data_root=config.data_dir, sdk_log_root=logs(root), requests=requests, mode="propose"
+        )
+        previous = recovery.snapshot.operations[state["repair"]].cleanup.authority.grants
+        added = tuple(sorted(set(proposal.grants) - set(previous)))
+        assert len(added) == 1, "probe_new_exact_variant_missing"
+        selected = CleanupAuthority(
+            "repair",
+            parent.cleanup.authority.selectors,
+            added,
+            RepairParent(
+                state["parent"], recovery.committed_digests[state["parent"]], journal.ledger_id
+            ),
+        )
+        intent = Intent(
+            operation_id=str(uuid4()),
+            actor_id=journal.instance_id,
+            scope_id=parent.intent.scope_id,
+            action="purge",
+            targets=cleanup_policy_targets(journal, parent.intent.scope_id, selected),
+        )
+        store.plan(intent, {}, cleanup=selected)
+        authority.append(intent)
+        actual = store.recovery_snapshot().snapshot.operations
+        assert len(actual) == 3, "probe_batch_members_changed"
+        state.update(
+            batch_head=journal.head(state["scope"]).model_dump(),
+            batch_states={key: value.state for key, value in actual.items()},
+            batch_authorities={
+                key: cleanup_to_dict(value.cleanup.authority) for key, value in actual.items()
+            },
+        )
+        save_state(root, state)
+        put_files(root / "batch-fixture", files_at(logs(root)))
+    execute_phase(root, failure=True, batch=True)
+
+
+def execute_phase(root, *, failure=False, restored=False, batch=False):
     from cloud_memory_hub import governance_diagnostic_files as engine
     from cloud_memory_hub.config import HubConfig
     from cloud_memory_hub.diagnostics import diagnostic_file_maintenance
     from cloud_memory_hub.governance_authority import open_authority
+    from cloud_memory_hub.governance_diagnostic_confirmation import cleanup_to_dict
     from cloud_memory_hub.governance_execution_store import ExecutionStore
     from cloud_memory_hub.governance_journal import GovernanceError
     from cloud_memory_hub.storage_lease import StorageLease
@@ -343,6 +408,10 @@ def execute_phase(root, *, failure=False, restored=False):
             def run():
                 authority.verify()
                 with diagnostic_file_maintenance(roots=(logs(root),)) as gate:
+                    if batch:
+                        return engine.recover_diagnostic_files(
+                            store, data_root=config.data_dir, sdk_log_root=logs(root), gate=gate
+                        )
                     return engine.execute_diagnostic_files(
                         store,
                         state["repair"],
@@ -368,15 +437,24 @@ def execute_phase(root, *, failure=False, restored=False):
                     else:
                         raise AssertionError("probe_failure_not_reached")
                 assert len(calls) == 2, "probe_replacement_boundary_missing"
-                assert store.cleanup(state["repair"]).state == "pending", (
-                    "probe_failure_not_pending"
-                )
+                owner = min(state["batch_states"]) if batch else state["repair"]
+                assert store.cleanup(owner).state == "pending", "probe_failure_not_pending"
                 assert any(name.endswith(".tmp") for name in files_at(logs(root))), (
                     "probe_stage_missing"
                 )
                 return
             result = run()
-            assert result.state == "verified" and result.verification is not None
+            if batch:
+                assert len(result) == 3
+                assert all(item.state == "verified" and item.verification for item in result)
+                assert all(item.manifest.contributors is not None for item in result)
+                actual = store.recovery_snapshot().snapshot.operations
+                assert {key: item.state for key, item in actual.items()} == state["batch_states"]
+                assert {
+                    key: cleanup_to_dict(item.cleanup.authority) for key, item in actual.items()
+                } == state["batch_authorities"], "probe_batch_rewrote_original_authority"
+            else:
+                assert result.state == "verified" and result.verification is not None
             assert store.operations()[state["repair"]][0] == "planned", "probe_claimed_whole_purge"
             assert store.cleanup(state["parent"]).authority.grants == (), (
                 "probe_resigned_old_grants"
@@ -385,7 +463,8 @@ def execute_phase(root, *, failure=False, restored=False):
                 store.operations()[state["parent"]][1].model_dump(mode="json")
                 == state["parent_intent"]
             )
-            assert authority.journal.head(state["scope"]).model_dump() == state["repair_head"]
+            expected_head = state["batch_head"] if batch else state["repair_head"]
+            assert authority.journal.head(state["scope"]).model_dump() == expected_head
             expected = files_at(root / "retained-fixture")
             if restored:
                 expected["hy_memory.log"] += (root / "safe-tail.bin").read_bytes()
@@ -417,8 +496,8 @@ def execute_phase(root, *, failure=False, restored=False):
             handler.close()
 
 
-def restore_phase(root):
-    put_files(logs(root), files_at(root / "legacy-fixture"))
+def restore_phase(root, *, batch=False):
+    put_files(logs(root), files_at(root / ("batch-fixture" if batch else "legacy-fixture")))
     with (logs(root) / "hy_memory.log").open("ab") as stream:
         stream.write((root / "safe-tail.bin").read_bytes())
 
@@ -474,6 +553,10 @@ def main():
             "restore",
             "recover-restored",
             "changed-record",
+            "batch-repair-fault",
+            "batch-recover",
+            "batch-restore",
+            "batch-recover-restored",
         ),
     )
     parser.add_argument("--root", type=Path)
@@ -498,6 +581,12 @@ def main():
                 "restore": lambda: restore_phase(args.root),
                 "recover-restored": lambda: execute_phase(args.root, restored=True),
                 "changed-record": lambda: changed_record_phase(args.root),
+                "batch-repair-fault": lambda: batch_repair_phase(args.root),
+                "batch-recover": lambda: execute_phase(args.root, batch=True),
+                "batch-restore": lambda: restore_phase(args.root, batch=True),
+                "batch-recover-restored": lambda: execute_phase(
+                    args.root, restored=True, batch=True
+                ),
             }
             actions[args.phase]()
         if args.installed:
@@ -558,7 +647,17 @@ def main():
         preview("preview-v1")
         phase("migrate")
         preview("preview-capability-gap")
-        for name in ("repair-fault", "recover", "restore", "recover-restored", "changed-record"):
+        for name in (
+            "repair-fault",
+            "recover",
+            "restore",
+            "recover-restored",
+            "changed-record",
+            "batch-repair-fault",
+            "batch-recover",
+            "batch-restore",
+            "batch-recover-restored",
+        ):
             phase(name)
         print(
             json.dumps(
@@ -575,6 +674,9 @@ def main():
                     "exact_file_restore_recleaned": True,
                     "strict_tail_preserved": True,
                     "changed_record_blocked": True,
+                    "signed_multi_repair_recovery": True,
+                    "legacy_parent_authority_unchanged": True,
+                    "batch_interruption_and_restore": True,
                     "whole_purge_completed": False,
                     "external_models": False,
                 },

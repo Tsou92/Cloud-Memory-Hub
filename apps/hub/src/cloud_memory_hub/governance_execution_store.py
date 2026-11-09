@@ -20,6 +20,7 @@ from uuid import uuid4
 from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.governance_diagnostic_confirmation import (
     CleanupAuthority,
+    cleanup_digest,
     cleanup_from_dict,
     cleanup_to_dict,
     validate_cleanup_for_intent,
@@ -34,6 +35,7 @@ from cloud_memory_hub.remote_access import DeviceAccessStore
 
 SCHEMA = 2
 MAX_REVISION = 2**53 - 1
+MAX_CONTRIBUTORS = 10_000
 _OLD_COLUMNS = {
     "operations": ("operation_id", "scope_id", "intent", "state", "signature"),
     "suppressed": ("operation_id", "scope_id", "record_id", "kind", "signature"),
@@ -130,16 +132,48 @@ class ArtifactEntry:
             raise GovernanceError("governance_cleanup_manifest_invalid")
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class CleanupContributor:
+    operation_id: str
+    intent_digest: str
+    cleanup_digest: str
+
+    def __post_init__(self):
+        try:
+            canonical_uuid(self.operation_id)
+            if not _hex(self.intent_digest) or not _hex(self.cleanup_digest):
+                raise ValueError
+        except (ValueError, TypeError, AttributeError):
+            raise GovernanceError("governance_cleanup_contributor_invalid") from None
+
+
 @dataclass(frozen=True, slots=True)
 class CleanupManifest:
     operation_id: str
     pass_id: str
     artifacts: tuple[ArtifactEntry, ...]
+    contributors: tuple[CleanupContributor, ...] | None = None
 
     def __post_init__(self):
         try:
             canonical_uuid(self.operation_id)
             canonical_uuid(self.pass_id)
+            if self.contributors is not None:
+                if (
+                    type(self.contributors) is not tuple
+                    or not 0 < len(self.contributors) <= MAX_CONTRIBUTORS
+                    or any(type(item) is not CleanupContributor for item in self.contributors)
+                ):
+                    raise ValueError
+                for item in self.contributors:
+                    item.__post_init__()
+                if (
+                    self.contributors != tuple(sorted(set(self.contributors)))
+                    or len({item.operation_id for item in self.contributors})
+                    != len(self.contributors)
+                    or self.operation_id not in {item.operation_id for item in self.contributors}
+                ):
+                    raise ValueError
             if type(self.artifacts) is not tuple or len(self.artifacts) > 256:
                 raise ValueError
             keys = []
@@ -165,12 +199,15 @@ def manifest_to_dict(value):
     if not isinstance(value, CleanupManifest):
         raise GovernanceError("governance_cleanup_manifest_invalid")
     value.__post_init__()
-    return {
-        "version": 1,
+    result = {
+        "version": 1 if value.contributors is None else 2,
         "operation_id": value.operation_id,
         "pass_id": value.pass_id,
         "artifacts": [asdict(item) for item in value.artifacts],
     }
+    if value.contributors is not None:
+        result["contributors"] = [asdict(item) for item in value.contributors]
+    return result
 
 
 def manifest_from_dict(value):
@@ -179,9 +216,11 @@ def manifest_from_dict(value):
     try:
         if (
             type(value) is not dict
-            or set(value) != {"version", "operation_id", "pass_id", "artifacts"}
             or type(value["version"]) is not int
-            or value["version"] != 1
+            or value["version"] not in {1, 2}
+            or set(value)
+            != {"version", "operation_id", "pass_id", "artifacts"}
+            | ({"contributors"} if value["version"] == 2 else set())
             or type(value["artifacts"]) is not list
             or len(value["artifacts"]) > 256
         ):
@@ -197,7 +236,15 @@ def manifest_from_dict(value):
             }:
                 raise ValueError
             artifacts.append(ArtifactEntry(**{**item, "before": FileObservation(**item["before"])}))
-        return CleanupManifest(value["operation_id"], value["pass_id"], tuple(artifacts))
+        contributors = None
+        if value["version"] == 2:
+            raw = value["contributors"]
+            if type(raw) is not list or not 0 < len(raw) <= MAX_CONTRIBUTORS:
+                raise ValueError
+            contributors = tuple(CleanupContributor(**item) for item in raw)
+        return CleanupManifest(
+            value["operation_id"], value["pass_id"], tuple(artifacts), contributors
+        )
     except (ValueError, TypeError, KeyError):
         raise GovernanceError("governance_cleanup_manifest_invalid") from None
 
@@ -328,6 +375,12 @@ class RecoverySnapshot:
     committed: tuple[str, ...]
     orphans: tuple[str, ...]
     unplanned: tuple[Intent, ...]
+    committed_digests: Mapping[str, str]
+
+    def __post_init__(self):
+        object.__setattr__(
+            self, "committed_digests", MappingProxyType(dict(self.committed_digests))
+        )
 
     @property
     def purges_to_rescan(self):
@@ -929,7 +982,54 @@ class ExecutionStore:
                     or parent.ledger_id != self.journal.ledger_id
                 ):
                     raise GovernanceError("governance_cleanup_parent_invalid")
-        return RecoverySnapshot(snapshot, committed, orphans, unplanned)
+        recovery = RecoverySnapshot(
+            snapshot,
+            committed,
+            orphans,
+            unplanned,
+            {operation_id: entries[operation_id][1] for operation_id in committed},
+        )
+        # A batch stores the same frozen references on several receipts. Reuse
+        # validation only within this real journal/execution snapshot; nothing
+        # survives this call or skips a later main-chain check.
+        resolved_owners = {}
+        for operation in snapshot.operations.values():
+            if operation.cleanup is None or operation.cleanup.manifest is None:
+                continue
+            manifest = operation.cleanup.manifest
+            references = manifest.contributors
+            if references is None:
+                self._resolve_manifest(recovery, manifest)
+                continue
+            if references not in resolved_owners:
+                resolved = self._resolve_manifest(recovery, manifest)
+                resolved_owners[references] = frozenset(
+                    reference.operation_id for reference in resolved.contributors
+                )
+            if manifest.operation_id not in resolved_owners[references]:
+                raise GovernanceError("governance_cleanup_contributor_invalid")
+        return recovery
+
+    @staticmethod
+    def _resolve_manifest(recovery, manifest):
+        # The pure resolver imports these immutable storage types; delay this
+        # import so both layers reuse the same authority checks without a cycle.
+        from cloud_memory_hub.governance_diagnostic_recovery import resolve_cleanup_authority
+
+        contributors = manifest.contributors
+        if contributors is None:
+            operation = recovery.snapshot.operations[manifest.operation_id]
+            digest = recovery.committed_digests.get(manifest.operation_id)
+            if digest is None:
+                raise GovernanceError("governance_operation_uncommitted")
+            contributors = (
+                CleanupContributor(
+                    manifest.operation_id, digest, cleanup_digest(operation.cleanup.authority)
+                ),
+            )
+        return resolve_cleanup_authority(
+            recovery, contributors, owner_operation_id=manifest.operation_id
+        )
 
     def recovery_snapshot(self):
         """Bind stored plans to real entries; external floors are checked by authority."""
@@ -1090,11 +1190,13 @@ class ExecutionStore:
             raise GovernanceError("governance_cleanup_manifest_invalid")
         with self._mutation() as (db, recovery, _):
             self._current(recovery, expected)
+            if operation_id != expected.operation_id:
+                raise GovernanceError("governance_cleanup_manifest_invalid")
+            resolved = self._resolve_manifest(recovery, manifest)
             if (
-                operation_id != expected.operation_id
-                or expected.pass_id == manifest.pass_id
+                expected.pass_id == manifest.pass_id
                 or any(item.state != "registered" for item in manifest.artifacts)
-                or not expected.authority.grants
+                or not resolved.grants
                 and manifest.artifacts
                 or any(
                     item.retained_bytes >= item.before.byte_length
@@ -1125,6 +1227,7 @@ class ExecutionStore:
                 or expected.state != "pending"
                 or manifest.operation_id != old.operation_id
                 or manifest.pass_id != old.pass_id
+                or manifest.contributors != old.contributors
                 or len(manifest.artifacts) != len(old.artifacts)
             ):
                 raise GovernanceError("governance_cleanup_manifest_invalid")

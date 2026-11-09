@@ -8,6 +8,7 @@ Progress is a retry cache: every invocation validates all current records again.
 
 import hashlib
 import os
+import re
 import stat
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -20,6 +21,7 @@ from cloud_memory_hub.governance_diagnostic_inventory import (
     _snapshot,
 )
 from cloud_memory_hub.governance_diagnostic_records import WriteRequest
+from cloud_memory_hub.governance_diagnostic_recovery import build_recovery_graph
 from cloud_memory_hub.governance_execution_store import (
     ArtifactAbsence,
     ArtifactEntry,
@@ -104,6 +106,41 @@ class _Capture:
             _prove_stage(directory, entry.stage_name, expected, current.retained)
 
 
+class _RecoveryCapture(_Capture):
+    """Resolve only extant stages; historical absent names consume no file budget."""
+
+    _NAME = re.compile(r"\.cmh-cleanup-([0-9a-f-]{36})-([0-9a-f-]{36})-([0-9]{3})\.tmp")
+
+    def __init__(self, receipts, budget):
+        super().__init__(receipts[0], budget)
+        self.registered = {}
+        self.receipts = {receipt.operation_id: receipt for receipt in receipts}
+
+    def artifact(self, domain, directory, name, expected, device):
+        match = self._NAME.fullmatch(name)
+        if match is None:
+            return False
+        operation_id, pass_id, index = match.groups()
+        receipt = self.receipts.get(operation_id)
+        if (
+            receipt is None
+            or receipt.manifest is None
+            or receipt.pass_id != pass_id
+            or int(index) >= len(receipt.manifest.artifacts)
+        ):
+            return False
+        entry = receipt.manifest.artifacts[int(index)]
+        if entry.before.domain != domain or entry.stage_name != name:
+            return False
+        key = (domain, name)
+        if key in self.registered:
+            raise GovernanceError("diagnostic_file_artifact_unproven")
+        if len(self.registered) >= self.budget.max_files:
+            raise GovernanceError("diagnostic_inventory_budget_exceeded")
+        self.registered[key] = entry
+        return super().artifact(domain, directory, name, expected, device)
+
+
 def _prove_stage(directory, name, expected, retained, *, digest=None):
     descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     try:
@@ -166,7 +203,14 @@ def _absence(scan, receipt):
 
 def _retire_previous(store, receipt, capture, scan):
     # All current files and every retained prefix are proven before the first unlink.
-    for (_domain, name), (directory, expected) in sorted(capture.stages.items()):
+    owned = {
+        (entry.before.domain, entry.stage_name)
+        for entry in (() if receipt.manifest is None else receipt.manifest.artifacts)
+    }
+    for key, (directory, expected) in sorted(capture.stages.items()):
+        if key not in owned:
+            continue
+        _domain, name = key
         scan.verify_paths()
         if _snapshot(os.stat(name, dir_fd=directory, follow_symlinks=False)) != expected:
             raise GovernanceError("diagnostic_inventory_changed")
@@ -190,7 +234,7 @@ def _retire_previous(store, receipt, capture, scan):
     return receipt, _absence(scan, receipt)
 
 
-def _new_manifest(operation_id, capture):
+def _new_manifest(operation_id, capture, *, contributors=None):
     pass_id = str(uuid4())
     entries = []
     for _key, file in sorted(capture.files.items()):
@@ -203,7 +247,7 @@ def _new_manifest(operation_id, capture):
                     stage_name(operation_id, pass_id, len(entries)),
                 )
             )
-    return CleanupManifest(operation_id, pass_id, tuple(entries))
+    return CleanupManifest(operation_id, pass_id, tuple(entries), contributors=contributors)
 
 
 def _checkpoint(store, receipt, index, state):
@@ -272,7 +316,17 @@ def _adopt(gate, path, file, requests, identity):
         raise
 
 
-def _execute(store, receipt, *, data_root, sdk_log_root, gate, budget):
+def _execute(
+    store,
+    receipt,
+    *,
+    data_root,
+    sdk_log_root,
+    gate,
+    budget,
+    recovery_receipts=None,
+    resolved=None,
+):
     roots = {"pipeline": data_root / "hy-memory/governed-v2/logs", "sdk": sdk_log_root}
     requests = tuple(
         WriteRequest(item.request_id, f"cmh:{store.journal.instance_id}:{receipt.scope_id}")
@@ -281,31 +335,50 @@ def _execute(store, receipt, *, data_root, sdk_log_root, gate, budget):
     options = dict(
         data_root=data_root,
         sdk_log_root=sdk_log_root,
-        requests=requests,
-        grants=receipt.authority.grants,
+        requests=requests if resolved is None else resolved.requests,
+        grants=receipt.authority.grants if resolved is None else resolved.grants,
         mode="authorized",
         budget=budget,
     )
-    capture = _Capture(receipt, budget)
+    capture = (
+        _Capture(receipt, budget)
+        if recovery_receipts is None
+        else _RecoveryCapture(recovery_receipts, budget)
+    )
     with _inspection(
         **options,
         on_record=capture.record,
         on_file=capture.file,
         artifact=capture.artifact,
-        artifact_limit=len(capture.registered),
+        artifact_limit=len(capture.registered) if recovery_receipts is None else budget.max_files,
     ) as (before, scan):
-        old_files = (
-            ()
-            if receipt.manifest is None
-            else tuple(item.before for item in receipt.manifest.artifacts)
-        )
+        if recovery_receipts is None:
+            old_files = (
+                ()
+                if receipt.manifest is None
+                else tuple(item.before for item in receipt.manifest.artifacts)
+            )
+        else:
+            # A historical absent stage does not authorize an old open inode.
+            # Failed native rebinds are sealed and handled by the existing gate.
+            old_files = tuple(item.before for item in capture.registered.values())
         gate.require_bound(_bindings(roots, (*before.files, *old_files)))
         capture.prove_retained_artifacts()
         scan.verify_unchanged()
-        receipt, absent = _retire_previous(store, receipt, capture, scan)
+        if recovery_receipts is None:
+            receipt, absent = _retire_previous(store, receipt, capture, scan)
+        else:
+            retired = {}
+            for previous in recovery_receipts:
+                retired[previous.operation_id] = _retire_previous(store, previous, capture, scan)
+            receipt, absent = retired[receipt.operation_id]
         for file in capture.files.values():
             _unchanged_file(file)
-        manifest = _new_manifest(receipt.operation_id, capture)
+        manifest = _new_manifest(
+            receipt.operation_id,
+            capture,
+            contributors=None if resolved is None else resolved.contributors,
+        )
         receipt = store.begin_pass(
             receipt.operation_id, expected=receipt, manifest=manifest, artifact_absence=absent
         )
@@ -366,7 +439,30 @@ def _execute(store, receipt, *, data_root, sdk_log_root, gate, budget):
             for index in range(len(manifest.artifacts)):
                 receipt = _checkpoint(store, receipt, index, "verified")
             verification = CleanupVerification(after, _absence(final_scan, receipt))
-            return store.verify_pass(receipt, verification=verification)
+            verified = store.verify_pass(receipt, verification=verification)
+            if recovery_receipts is None:
+                return verified
+            results = {verified.operation_id: verified}
+            for previous, absent in retired.values():
+                if previous.operation_id == verified.operation_id:
+                    continue
+                # The single physical pass already proved the entire current
+                # domain. Each authority keeps its own CAS/absence evidence;
+                # no repair grant is written back into its legacy parent.
+                empty = CleanupManifest(
+                    previous.operation_id, str(uuid4()), (), resolved.contributors
+                )
+                current = store.begin_pass(
+                    previous.operation_id,
+                    expected=previous,
+                    manifest=empty,
+                    artifact_absence=absent,
+                )
+                results[current.operation_id] = store.verify_pass(
+                    current,
+                    verification=CleanupVerification(after, _absence(final_scan, current)),
+                )
+            return tuple(results[key] for key in sorted(results))
 
 
 def execute_diagnostic_files(
@@ -396,6 +492,51 @@ def execute_diagnostic_files(
     try:
         return _execute(
             store, receipt, data_root=data_root, sdk_log_root=sdk_log_root, gate=gate, budget=budget
+        )
+    except OSError:
+        raise GovernanceError("diagnostic_file_io_failed") from None
+
+
+def recover_diagnostic_files(
+    store,
+    *,
+    data_root: Path,
+    sdk_log_root: Path,
+    gate,
+    budget: InventoryBudget | None = None,
+):
+    """Replay all committed exact grants together; never complete business purges.
+
+    The caller retains the same real service/SDK/diagnostic exclusion required by
+    execute_diagnostic_files. Every pass rechecks the actual signed recovery graph,
+    all current files and all extant registered artifacts, including verified rows.
+    """
+    store.require_capability()
+    recovery = store.recovery_snapshot()
+    graph = build_recovery_graph(recovery)
+    if graph.unplanned:
+        raise GovernanceError("governance_execution_pending")
+    budget = InventoryBudget() if budget is None else budget
+    if not isinstance(budget, InventoryBudget):
+        raise GovernanceError("diagnostic_inventory_budget_invalid")
+    resolved = graph.authority
+    if len(resolved.grants) > budget.max_grants:
+        raise GovernanceError("diagnostic_inventory_budget_exceeded")
+    receipts = tuple(
+        recovery.snapshot.operations[item.operation_id].cleanup for item in resolved.contributors
+    )
+    if not receipts:
+        return ()
+    try:
+        return _execute(
+            store,
+            receipts[0],
+            data_root=data_root,
+            sdk_log_root=sdk_log_root,
+            gate=gate,
+            budget=budget,
+            recovery_receipts=receipts,
+            resolved=resolved,
         )
     except OSError:
         raise GovernanceError("diagnostic_file_io_failed") from None
