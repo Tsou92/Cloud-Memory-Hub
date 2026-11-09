@@ -1,6 +1,6 @@
 # 2026-11-10 诊断后台写入排空
 
-关联 FR-10、FR-11、ENG-01；设计见 [ADR-0040](../adr/0040-diagnostic-write-quiescence.md)。本地实现和验证已完成，安装制品仍待单独验收。
+关联 FR-10、FR-11、ENG-01；设计见 [ADR-0040](../adr/0040-diagnostic-write-quiescence.md)。本地实现、安装制品及 NAS 隔离验收已完成；常驻实验实例未升级。
 
 ## 实际缺陷与修前证据
 
@@ -41,11 +41,27 @@
 | 源码独立进程探针 | 6 个实例通过；原生 SDK/HTTP/存储参与，提炼和 embedding 为合成替身，外部模型调用被硬性阻止 |
 | Hub 最终全量 | 1107 通过、5 个可选后端跳过、289 个既有弃用警告，188.04 秒；无 xfail |
 | 工程门禁 | `make check` 通过，含 19 项工程测试、格式、静态、路径/链接、离线凭证扫描及差异检查 |
-| 安装/NAS | 尚待以最终提交构建的同一制品验证 |
+| 本地安装 | 最终提交同一 Linux amd64 制品的 8 项探针全部通过，实际 UID/GID 1000、site-packages、20 补丁清单与 6 个已安装生产源码摘要一致 |
+| NAS 安装 | 同一制品的 8 项探针全部通过，逐项退出码 0，无跳过；身份、清单和安装源码摘要检查通过，整组 217.5 秒 |
 
 原生 async 测试复用现有 Python 3.12 虚拟环境和缓存的 pytest-asyncio 1.4.1，未安装新依赖。首次在未加载插件的环境运行四项测试未进入测试体，之后在正确环境实际通过；不把环境收集错误记成产品失败或通过。Core 使用官方隔离测试入口避免 SDK 的 tests 包遮蔽 Core 测试命名空间。
 
 本轮不变更存储版本或配置格式，无数据库迁移；回退使用原镜像和原配置。关闭失败现在明确报告并保留 Core 注册对象，绕过 Core 注册表直接把已关闭 runtime 交给第三方新客户端，不在本轮保护合同内。
+
+## 安装制品与 NAS 状态
+
+制品来自代码提交 `e5275662f189c2452b2d14b8a5756a17f14d1c1a`，标签 `cloud-memory-hub:dev-e527566`。从固定 pristine 上游全新应用 20 补丁后，0022 的八个文件逐字节匹配所测源码；构建复用根 Dockerfile、锁文件和已校验的公开 embedding 资产，不安装私有开发副本。实际安装的六个生产文件在本地与 NAS 均核验 SHA-256。
+
+- 镜像 config digest：`sha256:58f317eeee4fcbf23869ad30b3e9a6ab994841ec32c03d412dc7a8d87d4860e0`。
+- 传输归档：261332480 字节，SHA-256 `58f498ec739603e92ed10fa6bb039d3f6a32e73564cb8cbd54a60846ddea26d7`。
+- 本地 OCI index 为 `sha256:61d59f7e4bf17d11cfe769895a10af969d1e4990e96be25f6bbf01d1a8484929`，未把它与上述 config digest 混为一谈。
+- manifest SHA-256：`b7315b2cb2b2272f6479b5d6b446b1dbc1a95f61fb52b798e01678951f4b4266`；导入 NAS 后再次检查架构、提交、清单和探针摘要。
+
+八项为 diagnostic_quiescence、write_effects、governance_execution、drain_quiescence、entity_inventory、productivity_forget_guard、chroma_delete_replay、inflight_governance。新增探针包含六个独立实例的真实 HTTP/SDK/日志/存储路径；提炼与 embedding 为合成替身，禁止外部模型。保护性拒绝类探针仍只证明其保护合同，不代表生产力删除或完整副作用证书已完成。
+
+两端验证都使用 UID/GID 1000、只读根目录、移除全部 capabilities、no-new-privileges、无网络、2 CPU/3 GiB 与独立临时存储。本轮未重跑完整 Compose smoke 或双镜像迁移：数据库和配置格式未改，原有结果见[上一轮记录](2026-11-10-inflight-execution.md)。没有把这些未执行项记成通过。
+
+NAS 常驻空实例验证前后均为 `cloud-memory-hub:dev-c0467f5`、running healthy，容器 ID 与启动时间一致。本轮只新增隔离验证镜像/目录，没有重启、升级常驻实例、修改 SSH、导入真实历史或改动日常 Agent 配置；也没有向 GitHub 发布。
 
 ## 尚未完成
 

@@ -98,3 +98,7 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 2026-11-10 副作用调查确认成功结果不覆盖 shadow-only UPDATE、链折叠、画像旁路及生产力 SQLite 先写后向量失败的残留。补丁 0021 首先复用 Chroma 五个变更入口、history 共同插入、SQLite 请求日志/episode 和原 SDK 生命周期，增加请求级有界观察。无需复制每个 writer 分支或引入第二个存储；上游没有完整持久覆盖证书，因此这一观察不直接授权删除。诊断缓存清理复用原 `Purger` 的精确请求定位，补齐原生两张日志表；没有重建日志后端。具体合同和剩余持久证据见 [ADR-0039](../adr/0039-sdk-write-effect-observation.md)。
 
 同日后台生命周期调查实际复现：原 `drain_pipeline_log_tasks` 只扫描当前 loop 的任务，超时仅告警，外层任务取消后实际 JSONL/SQLite 线程仍可能落盘。0022 继续使用原日志后端和线程池，仅补充每 cache 的真实完成登记、暂停租约、严格排空和关闭重试；不重建日志队列。两个原生搜索入口复用已有共享 SDK 准入，保持并发。Hub 复用原 Chroma 只读预检并将其放到初始化前，保留无执行记录时的按需启动；设计、负对照及已验证边界见 [ADR-0040](../adr/0040-diagnostic-write-quiescence.md) 和[本轮记录](../reviews/2026-11-10-diagnostic-quiescence.md)。
+
+后续内容治理只读调查（尚未实现）：0017 的非 debug 投影仍可能通过任意字典键、reason/error/source/owner、标识后缀字符串及伪造 redacted 占位符输出正文；text add 的 INFO 消息、异常格式化和直接 JSONL 调用也存在未过滤位置。固定 Hub/Core 没有直接返回 SDK pipeline 完整正文的 HTTP 接口，桌面流水线面板只需步骤/时间/计数/请求标识；SDK MemoryInspector 的原始接口则需保留默认兼容。可评估 Hub 专用的版本化封闭元数据投影，使 cache、文件与所有 Hub 输出处理器共用固定内容策略，独立于 debug 级别；SDK 自有、root/第三方及 Uvicorn 处理器分别安装，不能只给 root 加过滤器。
+
+原生格式的合成实验另确认：JSONL 必须按字节 LF 划分，通用 Unicode splitlines 会误拆合法正文；直接替换文件后，旧 FileHandler 会继续向已断开的 inode 写入，需在排空后持处理器锁关闭/重开。独立读取 request 可在首个 user_id 标签下包含另一项目节点，不能以该字段或 memory_ids 交集授权删除整请求。未来文件清理须复用已有签名请求定位，同时区分完整回执与输入快照所属请求，保留同文件中未选记录字节，并覆盖仅日志恢复；这些观察尚不构成完整文件治理实现。
