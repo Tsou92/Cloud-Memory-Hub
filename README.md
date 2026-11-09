@@ -16,6 +16,8 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 
 诊断后台写入现已接入维护等待：删除会等真实日志任务和线程结束，搜索保持并发，关闭失败可重试。Hub 全量 1107 通过、5 跳过；原生/Core 相关 119 项通过；`e527566` 的同一镜像在本地和 NAS 各 8 项隔离安装验收全部通过，常驻 `c0467f5` 未升级。既有日志文件正文仍需后续清理，见[诊断生命周期记录](docs/reviews/2026-11-10-diagnostic-quiescence.md)。
 
+新增 Hub 严格诊断策略，debug 下也仅输出封闭元数据，SDK 默认兼容保留。最终本地 Hub 1111 通过／5 跳过，原生/Core 187 项通过，独立并发/异常审查与工程门禁通过；本轮安装/NAS 验证待执行。业务原文和记忆保留，旧物理日志仍待清理，见[验证记录](docs/reviews/2026-11-10-diagnostic-content.md)。
+
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
 本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。Claude 每轮在线召回已在隔离的实际 CLI 中验证；日常客户端安装、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md)、[授权读取接口](docs/remote-read.md) 和 [Claude 召回](docs/agent-recall.md)。
@@ -75,6 +77,7 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 | 持久准入与在途任务取消 | [准入证明与恢复设计](docs/adr/0038-durable-sdk-admission.md) · [执行、安装与验证边界](docs/reviews/2026-11-10-inflight-execution.md) |
 | 原生写入副作用 | [请求级观察与后续持久证书](docs/adr/0039-sdk-write-effect-observation.md) · [诊断副本恢复与验证](docs/reviews/2026-11-10-write-effects.md)；观察字段不授予删除权限 |
 | 诊断后台写入 | [暂停、排空与关闭设计](docs/adr/0040-diagnostic-write-quiescence.md) · [回归及安装记录](docs/reviews/2026-11-10-diagnostic-quiescence.md)；不代替已有文件清理 |
+| 诊断正文策略 | [Hub 严格元数据与 SDK 兼容](docs/adr/0041-strict-diagnostic-content-policy.md) · [真实出口及并发验证](docs/reviews/2026-11-10-diagnostic-content.md)；旧物理日志仍待治理 |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 

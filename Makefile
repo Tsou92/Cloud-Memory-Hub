@@ -135,3 +135,7 @@ probe-write-effects: prepare-upstream
 .PHONY: probe-diagnostic-quiescence
 probe-diagnostic-quiescence: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_diagnostic_quiescence.py
+
+.PHONY: probe-diagnostic-content
+probe-diagnostic-content: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_diagnostic_content.py

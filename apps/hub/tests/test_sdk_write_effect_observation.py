@@ -467,6 +467,8 @@ def test_pipeline_enqueue_records_selector_before_unjoined_background_write(tmp_
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
         rows = []
+        # Strict diagnostics retain SDK UUIDs, never free-form request labels.
+        request_id = str(uuid4())
 
         async def persist(**kwargs):
             entered.set()
@@ -478,10 +480,10 @@ def test_pipeline_enqueue_records_selector_before_unjoined_background_write(tmp_
             log_writer=SimpleNamespace(write_step=lambda **kwargs: None),
             trace_enabled=True,
         )
-        capture = observation()
+        capture = observation(request_id)
         token = capture.activate()
         try:
-            await wrapped(request_id="synthetic-request", prompt="Synthetic unrecorded body")
+            await wrapped(request_id=request_id, prompt="Synthetic unrecorded body")
             value = capture.seal()
         finally:
             capture.reset(token)
@@ -490,13 +492,13 @@ def test_pipeline_enqueue_records_selector_before_unjoined_background_write(tmp_
         assert not rows
         assert "background_pipeline_logs_unjoined" in value["reasons"]
         assert value["status"] == "partial"
-        assert selectors(value, "cache_request_rows", "request_id") == {"synthetic-request"}
+        assert selectors(value, "cache_request_rows", "request_id") == {request_id}
         assert "Synthetic unrecorded body" not in json.dumps(value)
         release.set()
         from hy_memory.utils.pipeline_observability import drain_pipeline_log_tasks
 
         await drain_pipeline_log_tasks()
-        assert rows == ["synthetic-request"] and value == frozen
+        assert rows == [request_id] and value == frozen
 
     asyncio.run(scenario())
 

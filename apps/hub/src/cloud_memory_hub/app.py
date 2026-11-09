@@ -3,33 +3,36 @@
 import secrets
 from contextlib import asynccontextmanager
 
-from one_memory.api import _sdk_library_bridge, create_app
-from one_memory.config import Settings
-from pydantic import SecretStr
-
-from cloud_memory_hub.boundary import CloudBoundary
 from cloud_memory_hub.config import HubConfig
-from cloud_memory_hub.governance_authority import open_authority
-from cloud_memory_hub.governance_execution import ExecutionStore, GovernanceExecutor
-from cloud_memory_hub.governance_inflight import InflightGovernance
-from cloud_memory_hub.governance_journal import GovernanceError
-from cloud_memory_hub.governance_preview import GovernancePreview
-from cloud_memory_hub.governance_purge import Purger
-from cloud_memory_hub.governance_sources import SourceSuppression
-from cloud_memory_hub.output_lineage import OutputLineage
-from cloud_memory_hub.privacy import CredentialFilter
-from cloud_memory_hub.remote_api import create_remote_api
-from cloud_memory_hub.remote_ingest import RemoteIngest
-from cloud_memory_hub.remote_read import RemoteRead
-from cloud_memory_hub.sdk_admission import SdkAdmission
-from cloud_memory_hub.sdk_generation import SdkGeneration
-from cloud_memory_hub.sdk_reconcile import SdkReconciler
-from cloud_memory_hub.secret_store import EncryptedSecretStore
-from cloud_memory_hub.source_history import SourceHistory
-from cloud_memory_hub.unified_read import UnifiedReadBridge
+from cloud_memory_hub.diagnostics import initialize_diagnostics
 
 
-def create_hub(config: HubConfig) -> CloudBoundary:
+def create_hub(config: HubConfig):
+    initialize_diagnostics()
+    from one_memory.api import _sdk_library_bridge, create_app
+    from one_memory.config import Settings
+    from pydantic import SecretStr
+
+    from cloud_memory_hub.boundary import CloudBoundary
+    from cloud_memory_hub.governance_authority import open_authority
+    from cloud_memory_hub.governance_execution import ExecutionStore, GovernanceExecutor
+    from cloud_memory_hub.governance_inflight import InflightGovernance
+    from cloud_memory_hub.governance_journal import GovernanceError
+    from cloud_memory_hub.governance_preview import GovernancePreview
+    from cloud_memory_hub.governance_purge import Purger
+    from cloud_memory_hub.governance_sources import SourceSuppression
+    from cloud_memory_hub.output_lineage import OutputLineage
+    from cloud_memory_hub.privacy import CredentialFilter
+    from cloud_memory_hub.remote_api import create_remote_api
+    from cloud_memory_hub.remote_ingest import RemoteIngest
+    from cloud_memory_hub.remote_read import RemoteRead
+    from cloud_memory_hub.sdk_admission import SdkAdmission
+    from cloud_memory_hub.sdk_generation import SdkGeneration
+    from cloud_memory_hub.sdk_reconcile import SdkReconciler
+    from cloud_memory_hub.secret_store import EncryptedSecretStore
+    from cloud_memory_hub.source_history import SourceHistory
+    from cloud_memory_hub.unified_read import UnifiedReadBridge
+
     governance = open_authority(config)
     governance.require_ready()
     internal_token = secrets.token_urlsafe(48)
