@@ -63,6 +63,7 @@
 | 内容重导入与任务协调 | [设计与剩余清扫工作](docs/adr/0034-inflight-ingest-and-content-reimport.md) · [分步验证](docs/reviews/2026-11-09-content-quiescence.md) |
 | 删除中断与缓存恢复 | [请求身份与重放设计](docs/adr/0035-purge-cache-recovery.md) · [验证记录](docs/reviews/2026-11-09-purge-cache-recovery.md) |
 | 治理请求重试与实体副本 | [请求一致性设计](docs/adr/0036-governance-request-identity.md) · [恢复检查与验证](docs/reviews/2026-11-09-governance-retry-and-entities.md) |
+| 删除后继续写入 | [Chroma 序号与删除重放设计](docs/adr/0037-chroma-purge-sequence.md) · [验证记录](docs/reviews/2026-11-09-chroma-purge-sequence.md) |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
