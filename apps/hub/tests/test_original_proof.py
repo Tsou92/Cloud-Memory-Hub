@@ -189,7 +189,11 @@ def test_actual_queue_only_job_recovers_without_creating_a_receipt(tmp_path):
             failed = await web.post("/hub/v1/events", headers=headers, json=raw)
             assert failed.status_code == 503, failed.text
             queue = app.core.state.memory_write_queue
-            request_id = f"cmh:{raw['instance_id']}:{raw['device_id']}:{raw['event_id']}"
+            with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
+                request_id = db.execute("SELECT idempotency_key FROM memory_write_jobs").fetchone()[
+                    0
+                ]
+            assert request_id.startswith("cmh2:")
             job = queue.get(request_id)
             assert job is not None
             request = queue.payload_for(job.job_id)

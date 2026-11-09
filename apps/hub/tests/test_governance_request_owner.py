@@ -48,6 +48,7 @@ def test_owner_proof_accepts_real_rows_without_reading_payload_or_source_status(
         "source_id": source["source_id"],
         "device_id": source["device_id"],
         "event_id": job["idempotency_key"].split(":")[-1],
+        "birth_id": None,
     }
     assert "synthetic-private-body" not in repr(result)
     with pytest.raises(FrozenInstanceError):
@@ -161,7 +162,8 @@ def test_purger_keeps_revoked_source_ownership_and_actual_receipt_validation(tmp
             )
             assert revoked.status_code == 200, revoked.text
             purger = app.core.state.cmh_executor.purger
-            expected = {f"cmh:{raw['instance_id']}:{raw['device_id']}:{raw['event_id']}"}
+            frozen = app.core.state.memory_write_queue.payload_for(job_id)
+            expected = {frozen.idempotency_key}
             assert purger._requests({job_id}, set(), raw["scope_id"]) == expected
             with sqlite3.connect(config.config_dir / "remote-access.sqlite3") as db:
                 db.execute(

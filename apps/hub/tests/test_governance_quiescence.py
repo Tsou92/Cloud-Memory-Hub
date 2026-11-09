@@ -6,6 +6,7 @@ SDK writer. Each asynchronous wait has a bounded failure path.
 """
 
 import asyncio
+import sqlite3
 from contextlib import asynccontextmanager, suppress
 from threading import Event
 from uuid import uuid4
@@ -58,8 +59,14 @@ def fresh(event):
     }
 
 
-def request_id(event):
-    return f"cmh:{event['instance_id']}:{event['device_id']}:{event['event_id']}"
+def request_id(queue, event):
+    with sqlite3.connect(queue.database_path) as db:
+        rows = db.execute(
+            "SELECT idempotency_key FROM memory_write_jobs WHERE idempotency_key LIKE ?",
+            ("%:" + event["device_id"] + ":" + event["event_id"],),
+        ).fetchall()
+    assert len(rows) <= 1
+    return rows[0][0] if rows else None
 
 
 async def confirmed_request(web, config, event, receipt):
@@ -121,7 +128,7 @@ def test_governance_waits_for_whole_worker_then_pending_work_resumes(tmp_path, m
             process = supervisor.process_sdk_job
 
             async def preparing(records, **kwargs):
-                if phase == "prepare" and kwargs["request_id"] == request_id(event):
+                if phase == "prepare" and kwargs["request_id"] == request_id(queue, event):
                     blocked.set()
                     await release.wait()
                 return await process(records, **kwargs)
@@ -146,7 +153,7 @@ def test_governance_waits_for_whole_worker_then_pending_work_resumes(tmp_path, m
             governance = None
             try:
                 await wait(blocked)
-                assert queue.get(request_id(event)).state == RUNNING
+                assert queue.get(request_id(queue, event)).state == RUNNING
                 following = fresh(event)
                 await accepted(web, headers, following)
                 governance = asyncio.create_task(web.post(EXECUTE, headers=admin, json=body))
@@ -159,8 +166,8 @@ def test_governance_waits_for_whole_worker_then_pending_work_resumes(tmp_path, m
                     pass
                 release.set()
                 await wait(governing)
-                assert queue.get(request_id(event)).state == COMPLETED
-                assert queue.get(request_id(following)).state == PENDING
+                assert queue.get(request_id(queue, event)).state == COMPLETED
+                assert queue.get(request_id(queue, following)).state == PENDING
                 with app.core.state.cmh_ingest._database() as db:
                     assert db.execute(
                         "SELECT 1 FROM cmh_event_outcomes WHERE receipt_id=?", (worker_job,)
@@ -168,7 +175,7 @@ def test_governance_waits_for_whole_worker_then_pending_work_resumes(tmp_path, m
                 release_governance.set()
                 reply = await asyncio.wait_for(asyncio.shield(governance), 8)
                 assert reply.status_code == 200, reply.text
-                await wait_state(queue, request_id(following), COMPLETED)
+                await wait_state(queue, request_id(queue, following), COMPLETED)
                 assert executor.store.operations()[body["operation_id"]][0] == "completed"
             finally:
                 release.set()
@@ -251,7 +258,7 @@ def test_cancelled_upload_joins_intake_before_governance_and_new_uploads_are_ref
                 return original_accept(credential, incoming)
 
             def plan_after_intake(intent, records):
-                assert queue.get(request_id(event)) is not None
+                assert queue.get(request_id(queue, event)) is not None
                 plans.append(intent.operation_id)
                 return original_plan(intent, records)
 
@@ -279,7 +286,7 @@ def test_cancelled_upload_joins_intake_before_governance_and_new_uploads_are_ref
                 refused = await web.post("/hub/v1/events", headers=headers, json=later)
                 assert refused.status_code == 503, refused.text
                 assert refused.json() == {"detail": "governance_maintenance_in_progress"}
-                assert queue.get(request_id(later)) is None
+                assert queue.get(request_id(queue, later)) is None
                 assert not plans
                 release.set()
                 with pytest.raises(asyncio.CancelledError):
@@ -287,7 +294,7 @@ def test_cancelled_upload_joins_intake_before_governance_and_new_uploads_are_ref
                 result = await asyncio.wait_for(asyncio.shield(governance), 8)
                 assert result.status_code == 200, result.text
                 assert plans == [body["operation_id"]]
-                assert queue.get(request_id(event)).state == PENDING
+                assert queue.get(request_id(queue, event)).state == PENDING
                 with ingest._database() as db:
                     assert db.execute(
                         "SELECT 1 FROM cmh_event_receipts WHERE event_id=?", (event["event_id"],)

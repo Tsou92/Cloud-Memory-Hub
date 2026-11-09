@@ -131,7 +131,7 @@ class DeviceAccessStore:
                 )
                 db.execute("PRAGMA user_version=1")
                 version = 1
-            elif version not in {1, 2}:
+            elif version not in {1, 2, 3}:
                 raise AccessError("access_store_version_unsupported", 503)
             # Validate existing schema too; never recreate a partly damaged store.
             row = db.execute("SELECT instance_id FROM instance WHERE id=1").fetchone()
@@ -143,7 +143,7 @@ class DeviceAccessStore:
                 raise AccessError("access_store_unrecognized", 503)
             self.instance_id = row[0]
             self.schema_version = version
-            if version == 2:
+            if version in {2, 3}:
                 binding = db.execute("SELECT ledger_id FROM cmh_governance_binding").fetchall()
                 if len(binding) != 1:
                     raise AccessError("access_store_unrecognized", 503)

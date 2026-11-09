@@ -21,6 +21,7 @@ from cloud_memory_hub.remote_api import create_remote_api
 from cloud_memory_hub.remote_ingest import RemoteIngest
 from cloud_memory_hub.remote_read import RemoteRead
 from cloud_memory_hub.sdk_admission import SdkAdmission
+from cloud_memory_hub.sdk_generation import SdkGeneration
 from cloud_memory_hub.sdk_reconcile import SdkReconciler
 from cloud_memory_hub.secret_store import EncryptedSecretStore
 from cloud_memory_hub.source_history import SourceHistory
@@ -65,6 +66,8 @@ def create_hub(config: HubConfig) -> CloudBoundary:
     source_suppressions = SourceSuppression(suppressions, ingest)
     ingest.require_source_allowed = source_suppressions.require_allowed
     ingest.require_source_rules = source_suppressions.targets
+    generation = SdkGeneration(governance, source_suppressions)
+    ingest.enroll_request = generation.enroll
 
     def claims_ready():
         if not core.state.cmh_executor.ready:
@@ -94,12 +97,14 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         sdk_operation_guard=sdk_admission.operation,
         sdk_reconcile_unknown=reconcile_unknown,
         sdk_output_observer=lineage.observe,
+        sdk_generation_permit=generation.permit,
     )
     core.state.cmh_reconciler = reconciler
     core.state.cmh_lineage = lineage
     core.state.cmh_sdk_admission = sdk_admission
     core.state.cmh_ingest = ingest
     core.state.cmh_governance = governance
+    core.state.cmh_generation = generation
     originals = SourceHistory(ingest)
     reads = RemoteRead(
         devices,

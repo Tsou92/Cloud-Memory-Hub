@@ -54,7 +54,7 @@ class GovernanceAuthority:
         """Explicit stopped-service migration; never reset a preexisting binding."""
         if access.instance_id != journal.instance_id:
             raise GovernanceError("governance_binding_mismatch")
-        if access.schema_version == 2:
+        if access.schema_version in {2, 3}:
             return cls(access, journal)
         if journal.scopes():
             raise GovernanceError("governance_activation_requires_empty_journal")
@@ -80,7 +80,7 @@ class GovernanceAuthority:
         return cls(access, journal)
 
     def _refresh(self, db) -> dict[str, Checkpoint]:
-        if self.access.schema_version != 2:
+        if self.access.schema_version not in {2, 3}:
             raise GovernanceError("governance_migration_required")
         rows = db.execute("SELECT * FROM cmh_governance_binding").fetchall()
         if (
@@ -166,7 +166,7 @@ class GovernanceAuthority:
 def open_authority(config) -> GovernanceAuthority:
     require_separate_directory(config.governance_dir, config.config_dir, config.data_dir)
     access = DeviceAccessStore(config.config_dir / "remote-access.sqlite3", require_existing=True)
-    if access.schema_version != 2:
+    if access.schema_version not in {2, 3}:
         raise GovernanceError("governance_migration_required")
     journal = GovernanceJournal(
         config.governance_dir / "journal.sqlite3",
@@ -189,4 +189,8 @@ def activate_authority(config_dir: Path, governance_dir: Path, encryption_key: b
         journal = GovernanceJournal.initialize(path, instance_id=access.instance_id, key=key)
     else:
         journal = GovernanceJournal(path, instance_id=access.instance_id, key=key)
-    return GovernanceAuthority.activate(access, journal)
+    authority = GovernanceAuthority.activate(access, journal)
+    from cloud_memory_hub.write_admissions import WriteAdmissions
+
+    WriteAdmissions.activate(access, journal)
+    return authority

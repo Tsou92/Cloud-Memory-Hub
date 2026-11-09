@@ -230,6 +230,7 @@ async def phase(root, mode):
                         rows.append(
                             {
                                 "receipt": receipt,
+                                "request_id": frozen.idempotency_key,
                                 "memory": result["memory_ids"][0],
                                 "raw": result["memory_id"],
                                 "event": current,
@@ -302,10 +303,7 @@ async def phase(root, mode):
                 assert conflict.json() == {"detail": "governance_operation_conflict"}
                 assert journal.head(scope) == checkpoint, "retry_appended_new_intent"
             for index, row in enumerate(state["rows"]):
-                current = row["event"]
-                identity = (
-                    f"cmh:{current['instance_id']}:{current['device_id']}:{current['event_id']}"
-                )
+                identity = row["request_id"]
                 outcome = await _joined_thread(sdk.get_write_outcome, identity)
                 assert (outcome is None) == (index == 1), "purge_result_cache_mismatch"
             # New revisions must not resurrect either forgotten or purged
@@ -316,10 +314,11 @@ async def phase(root, mode):
                 reply = await web.post("/hub/v1/events", headers=device, json=revised)
                 assert reply.status_code == 409, "source_reimport_was_accepted"
                 assert reply.json() == {"detail": "governance_source_suppressed"}
-                request_id = (
-                    f"cmh:{event['instance_id']}:{event['device_id']}:{revised['event_id']}"
-                )
-                assert queue.get(request_id) is None, "suppressed_source_was_queued"
+                with sqlite3.connect(queue.database_path) as jobs:
+                    assert not jobs.execute(
+                        "SELECT 1 FROM memory_write_jobs WHERE idempotency_key LIKE ?",
+                        ("%:" + revised["device_id"] + ":" + revised["event_id"],),
+                    ).fetchone(), "suppressed_source_was_queued"
                 with app.core.state.cmh_ingest._database() as db:
                     assert not db.execute(
                         "SELECT 1 FROM cmh_event_receipts WHERE event_id=?",
@@ -354,8 +353,11 @@ async def phase(root, mode):
                 reply = await web.post("/hub/v1/events", headers=device, json=mixed)
                 assert reply.status_code == 409, "content_reimport_was_accepted_" + action
                 assert reply.json() == {"detail": "governance_content_suppressed"}
-                request_id = f"cmh:{mixed['instance_id']}:{mixed['device_id']}:{mixed['event_id']}"
-                assert queue.get(request_id) is None, "suppressed_content_was_queued_" + action
+                with sqlite3.connect(queue.database_path) as jobs:
+                    assert not jobs.execute(
+                        "SELECT 1 FROM memory_write_jobs WHERE idempotency_key LIKE ?",
+                        ("%:" + mixed["device_id"] + ":" + mixed["event_id"],),
+                    ).fetchone(), "suppressed_content_was_queued_" + action
                 with app.core.state.cmh_ingest._database() as db:
                     assert not db.execute(
                         "SELECT 1 FROM cmh_event_receipts WHERE event_id=?", (mixed["event_id"],)
@@ -405,8 +407,7 @@ def main():
         # Restore only the SDK outcome cache. No raw/vector node is restored,
         # so ID existence alone cannot trigger replay (ADR-0035).
         state = json.loads((root / "state.json").read_text())
-        event = state["rows"][1]["event"]
-        request_id = f"cmh:{event['instance_id']}:{event['device_id']}:{event['event_id']}"
+        request_id = state["rows"][1]["request_id"]
         caches = list((backup / "data").rglob("cache.sqlite3"))
         assert len(caches) == 1, "cache_location_unproven"
         cache = caches[0]

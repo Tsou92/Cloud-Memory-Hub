@@ -382,7 +382,8 @@ class _Collector:
             self.jobs,
             "memory_write_jobs",
             _JOB,
-            f"(source_key GLOB 'cmh:*' OR idempotency_key GLOB 'cmh:*') AND {_LIVE}",
+            f"(source_key GLOB 'cmh:*' OR idempotency_key GLOB 'cmh:*' "
+            f"OR idempotency_key GLOB 'cmh2:*') AND {_LIVE}",
             _TERMINALS,
             "rowid",
         ):
@@ -468,6 +469,8 @@ class _Collector:
                 proof, event, digest = "unavailable", None, reaped
             else:
                 request = WriteRequest.model_validate_json(payload)
+                if request.idempotency_key != identity.request_id:
+                    raise ValueError
                 if event is None:
                     event = recover_event(request)
                     proof = "queue_roundtrip"

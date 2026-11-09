@@ -65,7 +65,7 @@ class ReconcileGraph:
         event = validate_original(row, self.instance)
         if event.scope_id != self.scope:
             raise GovernanceError("governance_input_scope_mismatch")
-        frozen = write_request(event)
+        frozen = write_request(event, request_id=row["request_id"])
         request = MemoryTaskRunner.request_for(frozen.idempotency_key, frozen.input_records)
         links = self.links(self.db, receipt)
         if row["links_digest"] is None or self.digest(links) != row["links_digest"]:

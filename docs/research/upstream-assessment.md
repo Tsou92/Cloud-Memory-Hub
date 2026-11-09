@@ -90,3 +90,7 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 补丁 0016 复用 writer 的会话滚动摘要、图投影请求句柄和 SDK 终态回执流程。原会话摘要未保存任务句柄，可能在写入回执完成后继续写入；新增请求级句柄与共同收尾，保留并发并在取消后等待实际完成。不引入新任务队列、存储或摘要算法。上游 episode、写入结果、executor、图投影和并发门控回归，以及 Hub 准入和真实 SDK 重开探针见 [ADR-0030](../adr/0030-derived-task-lifecycle.md) 与[验证记录](../reviews/2026-11-04-derived-lifecycle.md)。
 
 补丁 0018 复用 Core DurableWriteDrain 的领取、续租、执行及输出观察，扩展原锁和共享 worker 集合以支持暂停领取并等待完整任务结束。原 SDK 准入只覆盖分段调用，无法识别领取后尚未进入 SDK 或等待产出观察的任务；直接停止并等待主循环又会与维护回调中的 resume 自锁，故需最小生命周期适配。新增默认不启用的 claim-ready 回调，不改变来源权限或未知任务判定，也不新增队列。上游持久队列 187 项通过，补丁及真实并发测试范围见 [ADR-0034](../adr/0034-inflight-ingest-and-content-reimport.md)。
+
+补丁 0019 复用 `MemoryTaskRunner.request_for`、原输入清洗和 imported-content 判路由，并在 `HyMemoryBridge` 两个既有生成入口及两个构造点增加可选的调用前许可。固定上游只有调用标记与事后结果，无法证明任务从未进入 SDK；因此需要 Hub 独立出生登记与持久见证。最终 SDK 实参由同一构造器产生，登记指纹与实际调用共用；未启用回调时保留原行为。独立入口 `import_sdk_*_exact`、update/delete 不属于这两个生成门，不能因此宣称所有变更都被覆盖。设计与兼容边界见 [ADR-0038](../adr/0038-durable-sdk-admission.md)。
+
+补丁 0020 复用 Core 状态机与 `main_database` 原子写事务，只新增受信治理协调器可调用的精确比较取消与单任务终态正文清理；原 `settle`／unknown 查询规则不放宽，不增加 HTTP 接口。独立证据、签名范围与调用互斥仍须由 Hub 提供，API 本身不宣称具备这些证明。目前尚未接入治理 execute/resume，因此这项基础能力不计为待执行任务的删除完成。

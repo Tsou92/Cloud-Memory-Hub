@@ -22,6 +22,27 @@ def canonical_uuid(value: str) -> str:
     return value
 
 
+def split_request_identity(value: str) -> tuple[str, str, str, str | None]:
+    """Transport identity only; a cmh2 birth still requires its signed admission."""
+    if not isinstance(value, str):
+        raise ValueError("invalid_request_identity")
+    parts = value.split(":")
+    if len(parts) == 4 and parts[0] == "cmh":
+        instance, device, event = (canonical_uuid(item) for item in parts[1:])
+        return instance, device, event, None
+    if len(parts) == 5 and parts[0] == "cmh2":
+        instance, birth, device, event = (canonical_uuid(item) for item in parts[1:])
+        return instance, device, event, birth
+    raise ValueError("invalid_request_identity")
+
+
+def require_event_request_identity(value: str, event: "EventEnvelope") -> str:
+    instance, device, event_id, _ = split_request_identity(value)
+    if (instance, device, event_id) != (event.instance_id, event.device_id, event.event_id):
+        raise ValueError("request_event_mismatch")
+    return value
+
+
 class EventEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     protocol_version: Literal[1] = 1

@@ -163,7 +163,13 @@ def stored_context(db, receipt):
 def context_parents(db, context, event):
     if context is None:
         return frozenset()
-    rebuilt = write_request(event)
+    row = db.execute(
+        "SELECT * FROM cmh_event_receipts WHERE device_id=? AND event_id=? AND scope_id=?",
+        (event.device_id, event.event_id, event.scope_id),
+    ).fetchone()
+    if row is None or validate_original(row, event.instance_id) != event:
+        raise ValueError("lineage_context_original_changed")
+    rebuilt = write_request(event, request_id=row["request_id"])
     request = MemoryTaskRunner.request_for(rebuilt.idempotency_key, rebuilt.input_records)
     parents = set()
     for identity in context.history_request_ids:
@@ -177,7 +183,9 @@ def context_parents(db, context, event):
         if len(rows) != 1:
             raise ValueError("lineage_context_original_ambiguous")
         row = rows[0]
-        prior = write_request(validate_original(row, event.instance_id))
+        prior = write_request(
+            validate_original(row, event.instance_id), request_id=row["request_id"]
+        )
         historical = MemoryTaskRunner.request_for(prior.idempotency_key, prior.input_records)
         if (historical.user_id, historical.agent_id, historical.source_id) != (
             request.user_id,
