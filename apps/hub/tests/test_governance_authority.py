@@ -270,6 +270,9 @@ def test_response_prepared_before_intent_is_not_published_after_it(tmp_path):
 def test_stream_ends_before_obsolete_chunk_when_authority_changes(tmp_path):
     config = config_for(tmp_path)
     authority = open_authority(config)
+    # This standalone streaming fixture has no Executor lifespan. Validate its
+    # actual empty journal/plan state before admitting the first Core response.
+    authority.finish_runtime_recovery()
 
     async def stream(scope, receive, send):
         async def chunks():

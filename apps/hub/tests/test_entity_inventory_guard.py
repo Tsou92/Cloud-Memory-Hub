@@ -334,7 +334,9 @@ def test_legacy_plan_cannot_complete_with_unmodeled_entities(
                 sdk._config.recall.entity_store_enabled = True
 
             if recovery == "same_process":
-                assert executor._replayed is True
+                assert executor._replayed is False
+                assert executor.ready is False
+                assert executor.authority.runtime_recovery_required
                 with pytest.raises(GovernanceError, match="^governance_derivation_unmodeled$"):
                     await asyncio.wait_for(executor.resume(), 8)
                 assert executor.store.operations()[body["operation_id"]][0] == "planned"

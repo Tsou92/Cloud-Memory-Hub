@@ -20,6 +20,8 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_boundary import guarded_call
 
+STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg"})
+
 LOGIN_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 Cloud Memory Hub</title>
@@ -49,11 +51,23 @@ class CloudBoundary:
 
     async def __call__(self, scope, receive, send) -> None:
         if self.governance is not None:
-            await guarded_call(self.governance, self._handle, scope, receive, send)
+            core_response = {"runtime_required": False}
+
+            async def handle(scope, receive, send):
+                await self._handle(scope, receive, send, core_response=core_response)
+
+            await guarded_call(
+                self.governance,
+                handle,
+                scope,
+                receive,
+                send,
+                runtime_required=lambda: core_response["runtime_required"],
+            )
         else:
             await self._handle(scope, receive, send)
 
-    async def _handle(self, scope, receive, send) -> None:
+    async def _handle(self, scope, receive, send, *, core_response=None) -> None:
         if scope["type"] == "lifespan":
             await self.core(scope, receive, send)
             return
@@ -153,7 +167,21 @@ class CloudBoundary:
                 (b"host", b"127.0.0.1"),
             ]
         )
-        await self.core({**scope, "headers": headers}, receive, send)
+        forwarded = {**scope, "headers": headers}
+        static = request.method in {"GET", "HEAD"} and (
+            path in STATIC_PATHS or path.startswith("/assets/")
+        )
+        if self.governance is not None and not static:
+            core_response["runtime_required"] = True
+            # Core's native reads do not apply Hub suppression. Keep its body
+            # behind the runtime fence, including a fault after request entry.
+            # Login, static assets and the authorized Hub maintenance/read API
+            # retain their existing paths and the outer structural guard.
+            await guarded_call(
+                self.governance, self.core, forwarded, receive, send, runtime_only=True
+            )
+        else:
+            await self.core(forwarded, receive, send)
 
     def _valid_token(self, value: str) -> bool:
         return value.isascii() and hmac.compare_digest(value, self.config.admin_token)

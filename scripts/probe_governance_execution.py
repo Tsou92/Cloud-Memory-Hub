@@ -17,12 +17,18 @@ import hy_memory.pipelines.writer as native_writer
 from cloud_memory_hub.app import create_hub
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.events import EventEnvelope
+from cloud_memory_hub.governance_journal import GovernanceError
 from httpx import ASGITransport, AsyncClient
 from hy_memory.agent.mem_agent import AgentResult, MemAgent
 from hy_memory.data.cache_sqlite import SqliteCache
 from one_memory.api import _sdk_library_bridge
-from one_memory.hy_memory_bridge import HyMemoryIngestResult, HyMemoryOutput, _joined_thread
-from one_memory.memory_processing import MemoryTaskRunner
+from one_memory.hy_memory_bridge import (
+    HyMemoryBridgeError,
+    HyMemoryIngestResult,
+    HyMemoryOutput,
+    _joined_thread,
+)
+from one_memory.memory_processing import MemoryTaskRunner, sdk_generation_input_for
 from one_memory.memory_server.durable_queue import (
     CANCELLED,
     COMPLETED,
@@ -171,6 +177,121 @@ def require_cancelled_revision(queue, revision):
     assert (queue.payload_for(revision["receipt"]) is None) == (reaped is not None)
 
 
+async def check_recovery_fence(app, sdk, web, state, admin, device):
+    """A completed retry must not leave native SDK permission open after I/O failure."""
+    executor = app.core.state.cmh_executor
+    drain = app.core.state.memory_write_drain
+    generation = app.core.state.cmh_generation
+    bridge = _sdk_library_bridge(app.core)
+    event = {
+        **state["rows"][1]["event"],
+        **{key: str(uuid4()) for key in ("event_id", "record_id", "conversation_id")},
+        "content": {"messages": [{"role": "user", "text": "Synthetic fresh telescope task."}]},
+    }
+    accepted = await web.post("/hub/v1/events", headers=device, json=event)
+    assert accepted.status_code == 202, "recovery_fence_fresh_intake_failed"
+    frozen = app.core.state.memory_write_queue.payload_for(accepted.json()["receipt_id"])
+    request = MemoryTaskRunner.request_for(frozen.idempotency_key, frozen.input_records).model_copy(
+        update={"source_context": None}
+    )
+
+    def permission():
+        with generation.admissions.access._connection(writing=True) as db:
+            return generation.admissions.proof_in(
+                db, frozen.idempotency_key, actual=sdk_generation_input_for(frozen)
+            )
+
+    source = "cmh:" + event["source_id"]
+
+    def blocked():
+        assert not executor.ready, "recovery_fence_claim_ready_after_failure"
+        try:
+            executor.authority.require_writes_ready()
+        except GovernanceError as error:
+            assert str(error) == "governance_recovery_required", "wrong_recovery_fault"
+        else:
+            raise AssertionError("recovery_fence_authority_open")
+        assert not drain.source_claim_enabled(source), "recovery_fence_claim_open"
+        assert not drain.source_writes_permitted(source), "recovery_fence_source_open"
+        executor.authority.require_ready()
+
+    failed_io, sdk_calls = [], []
+
+    async def broken(*args):
+        failed_io.append(True)
+        raise OSError("Synthetic governance native-delete failure")
+
+    def reached_sdk(*args, **kwargs):
+        sdk_calls.append(True)
+        raise RuntimeError("Synthetic SDK entrance; no model invocation")
+
+    profiles = app.core.state.model_profile_store
+    saved = state["governance_requests"][1]["request"]
+    target = state["rows"][1]
+    target_path = "/api/v2/memories/" + target["memory"]
+    assert (await web.get(target_path, headers=admin)).status_code == 404
+    # Restore the exact native row captured before the successful purge. This
+    # deliberately does not restore its Hub suppression or governance state.
+    await _joined_thread(sdk._vector_store._collection.upsert, **target["native_memory"])
+    restored = await web.get(target_path, headers=admin)
+    assert restored.status_code == 200
+    assert restored.json()["content"] == target["native_memory"]["documents"][0]
+    with (
+        patch.object(profiles, "active_identity", lambda: ("synthetic-profile", 1)),
+        patch.object(profiles, "active", lambda secrets: None),
+        patch.object(sdk, "add", reached_sdk),
+    ):
+        assert executor.ready and drain.source_claim_enabled(source)
+        assert drain.source_writes_permitted(source)
+        before = permission()
+        assert before.state == "enrolled"
+        with patch.object(executor.purger, "_sdk_delete", broken):
+            failed = await web.post("/hub/v1/governance/execute", headers=admin, json=saved)
+            assert failed.status_code == 503 and len(failed_io) == 1
+            assert executor.store.operations()[saved["operation_id"]][0] == "completed"
+            blocked()
+            native = await web.get(target_path, headers=admin)
+            assert native.status_code == 503, "fault_exposed_restored_core_content"
+            assert target["native_memory"]["documents"][0] not in native.text
+            remote = await web.post(
+                "/hub/v1/memories/get",
+                headers=device,
+                json={"scope_id": event["scope_id"], "record_id": target["memory"]},
+            )
+            assert remote.status_code == 404, "fault_lost_scoped_suppression"
+            try:
+                await bridge.ingest(request)
+            except HyMemoryBridgeError:
+                pass
+            else:
+                raise AssertionError("recovery_fence_native_permit_open")
+            assert sdk_calls == [] and permission() == before, "fault_consumed_permission"
+            for _ in range(2):
+                try:
+                    await executor.resume()
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("recovery_cache_skipped_failed_operation")
+                blocked()
+            assert len(failed_io) == 3
+        retry = await web.post("/hub/v1/governance/execute", headers=admin, json=saved)
+        assert retry.status_code == 200, "recovery_local_retry_failed"
+        blocked()  # One successful operation does not certify the whole instance.
+        await executor.resume()
+        executor.authority.require_writes_ready()
+        assert executor.ready and drain.source_claim_enabled(source)
+        assert drain.source_writes_permitted(source)
+        assert (await web.get(target_path, headers=admin)).status_code == 404
+        try:
+            await bridge.ingest(request)
+        except HyMemoryBridgeError:
+            pass
+        else:
+            raise AssertionError("probe_synthetic_sdk_seam_not_reached")
+        assert sdk_calls == [True] and permission().state == "possible"
+
+
 async def phase(root, mode):
     os.environ.update(environment(root))
     if mode == "seed":
@@ -232,6 +353,9 @@ async def phase(root, mode):
                 assert reply.json()["state"] == "completed", "execute_not_completed"
                 return {"request": request, "result": reply.json()}
 
+            if mode == "fence":
+                await check_recovery_fence(app, sdk, web, state, admin, device)
+                return
             if mode == "seed":
                 with sqlite3.connect(queue.database_path) as jobs:
                     assert (
@@ -310,6 +434,12 @@ async def phase(root, mode):
                             )
                         diagnostics = diagnostic_rows(sdk._cache._db_path, request.request_id)
                         assert all(diagnostics.values()), "diagnostic_fixture_empty"
+                        snapshot = await _joined_thread(
+                            sdk._vector_store._collection.get,
+                            ids=[sdk._vector_store._node_id_to_point_id(result["memory_ids"][0])],
+                            include=["metadatas", "documents", "embeddings"],
+                        )
+                        assert len(snapshot["ids"]) == 1, "native_restore_snapshot_missing"
                         rows.append(
                             {
                                 "receipt": receipt,
@@ -318,6 +448,12 @@ async def phase(root, mode):
                                 "raw": result["memory_id"],
                                 "event": current,
                                 "diagnostics": diagnostics,
+                                "native_memory": {
+                                    "ids": snapshot["ids"],
+                                    "metadatas": snapshot["metadatas"],
+                                    "documents": snapshot["documents"],
+                                    "embeddings": snapshot["embeddings"].tolist(),
+                                },
                             }
                         )
                     queue.clear_terminal_payloads()
@@ -497,7 +633,7 @@ def run(root, mode):
 
 def main():
     if len(sys.argv) == 3:
-        assert sys.argv[1] in {"seed", "govern", "read"}
+        assert sys.argv[1] in {"seed", "govern", "read", "fence"}
         asyncio.run(phase(Path(sys.argv[2]), sys.argv[1]))
         return
     with TemporaryDirectory(prefix="cmh-governance-execution-") as temporary:
@@ -564,11 +700,13 @@ def main():
         assert leftover(root, MARK + " fact 1"), "restore_fixture_invalid"
         run(root, "read")
         assert leftover(root, MARK + " fact 1") == [], "restore_replay_residue"
+        run(root, "fence")
     print(
         "Forget, purge, restart, full/cache-only/diagnostics-only/history-only restore, "
         "identical/conflicting request retries, "
-        "accepted revision scope/retention/cancellation, source/content reimport prevention "
-        "and restored forget exclusion from new SDK history passed across processes "
+        "accepted revision scope/retention/cancellation, source/content reimport prevention, "
+        "restored forget exclusion from new SDK history, and runtime recovery-fault "
+        "claim/source/SDK-permit and native content fencing passed across processes "
         "(synthetic extraction and supervisor)."
     )
 
