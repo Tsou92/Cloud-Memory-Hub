@@ -60,6 +60,9 @@ _RECEIPT_TABLES = (
     "cmh_event_outcomes",
     "cmh_event_receipts",
 )
+# Use the same request selectors for execution and restored-cache detection.
+# Diagnostic text can differ from the source, so byte needles alone miss it.
+_REQUEST_CACHE_TABLES = ("write_outcomes", "pipeline_logs_v2", "memory_operations_v2")
 
 
 def partition(records):
@@ -315,7 +318,8 @@ class Purger:
             _delete_in(db, "memory_history", "memory_id", native)
         if paths["cache"].exists():
             with sqlite3.connect(paths["cache"], timeout=30) as db:
-                _delete_in(db, "write_outcomes", "request_id", requests)
+                for table in _REQUEST_CACHE_TABLES:
+                    _delete_in(db, table, "request_id", requests)
 
     def _hub_rows(self, receipts, snapshots):
         """Whole receipts in scope; only the in-scope snapshots of other receipts."""
@@ -369,7 +373,7 @@ class Purger:
         return any(
             _present_in(paths[store], table, column, values)
             for store, table, column, values in (
-                ("cache", "write_outcomes", "request_id", requests),
+                *(("cache", table, "request_id", requests) for table in _REQUEST_CACHE_TABLES),
                 ("history", "memory_history", "memory_id", native),
             )
         ) or payload_rows_present(paths["chroma"], paths["chroma_topic"], point_ids(native))

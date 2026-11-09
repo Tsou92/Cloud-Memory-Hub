@@ -49,6 +49,10 @@ def test_real_non_uuid_purge_maps_only_queue_ids_and_preserves_other_collection(
         )
     with sqlite3.connect(cache) as db:
         db.execute("CREATE TABLE write_outcomes(request_id TEXT, content TEXT)")
+        # Minimal side-table fixtures for this Chroma ID-mapping contract;
+        # native diagnostic persistence/recovery has separate integration tests.
+        for table in ("pipeline_logs_v2", "memory_operations_v2"):
+            db.execute(f"CREATE TABLE {table}(request_id TEXT, content TEXT)")
         db.executemany(
             "INSERT INTO write_outcomes VALUES (?,?)", [(request, "target"), (native, "other")]
         )
