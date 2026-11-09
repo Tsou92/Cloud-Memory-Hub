@@ -6,12 +6,12 @@
 
 ## 初始化与状态
 
-先按 [运行指南](development-runtime.md) 准备固定上游和 Python 运行环境。以下 UUID 仅供隔离演示，不表示已经配对 NAS；正式配对必须使用服务端签发的身份，当前未提供配对命令。
+先按 [Mac 客户端安装](agent-access.md#mac-客户端安装)准备固定上游、Python 3.12 与客户端运行环境；容器运行指南不负责安装 Mac 命令。以下命令在仓库根目录执行，UUID 仅供隔离演示，不表示已经配对 NAS；正式配对必须使用服务端签发的身份，当前未提供配对命令。
 
 ```sh
 CMH_DEMO_INSTANCE=11111111-1111-4111-8111-111111111111
 CMH_DEMO_DEVICE=22222222-2222-4222-8222-222222222222
-uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub \
+.local/install-tools/bin/uv run --locked --no-dev --directory apps/hub \
   cloud-memory-connector init \
   --state-dir ../../.local/connector-demo \
   --instance-id "$CMH_DEMO_INSTANCE" --device-id "$CMH_DEMO_DEVICE"
@@ -62,7 +62,7 @@ uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub \
 提供 `--connection-file` 后，init／enqueue／status 可以从中取得 instance/device，不必再传两个 ID；若同时传入必须一致。入队时也会把当前设备凭证加入已知秘密集合。新队列先执行一次 init；已有队列不能重新初始化。
 
 ```sh
-uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub \
+.local/install-tools/bin/uv run --locked --no-dev --directory apps/hub \
   cloud-memory-connector send \
   --state-dir ../../.local/connector-demo \
   --connection-file ../../.local/connector-demo/connection.json

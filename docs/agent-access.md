@@ -4,6 +4,54 @@
 
 本页对应 FR-01、FR-02、FR-03、FR-05、FR-07、FR-12。可安装的 Skill 位于 [cloud-memory-hub/SKILL.md](../packages/agent-skill/cloud-memory-hub/SKILL.md)。当前已进入 G2：MCP／CLI／Skill 已实现，同一镜像本地和 NAS 安装探针各 6/6；实际两 Mac、宿主自动调用与网络入口仍待验收，详细范围见[本轮记录](reviews/2026-11-10-agent-access-mvp.md)。
 
+## Mac 客户端安装
+
+这部分安装连接 NAS 的本机 MCP／CLI，不需要在 Mac 启动 Docker 服务。先安装 Git 和 **Python 3.12**，将本仓库放在之后保持不变的目录；网络须可访问上游 GitHub 仓库和锁定的 Python 依赖。以下命令在仓库根目录执行，首次安装任一步失败都先处理错误，不跳过上游校验。
+
+1. 进入源码目录，检查工具。产品运行环境要求 Python `>=3.12,<3.13`，不能用根工程允许的其他版本代替。
+
+   ```sh
+   cd "/path/to/Memory-Hub"
+   git --version
+   python3.12 --version
+   ```
+
+2. 在本仓库的私有工具环境中安装固定版本 uv，不修改系统 Python 包。后续使用此处的 uv 路径。
+
+   ```sh
+   python3.12 -m venv .local/install-tools
+   .local/install-tools/bin/python -m pip install uv==0.12.5
+   ```
+
+3. 准备固定上游与已审核补丁。该命令按 manifest 校验提交、补丁摘要和实际源码；不自动覆盖已有修改。
+
+   ```sh
+   python3.12 -m scripts.prepare_upstream
+   ```
+
+4. 安装 **apps/hub** 的锁定运行依赖和命令入口。根目录 `uv sync` 只安装工程检查工具，不会生成 MCP 命令。
+
+   ```sh
+   .local/install-tools/bin/uv sync --locked --no-dev --python 3.12 --directory apps/hub
+   ```
+
+5. 检查命令已生成。后续本文的简写命令可在激活后的当前终端运行；MCP 客户端仍须配置绝对路径。
+
+   ```sh
+   source apps/hub/.venv/bin/activate
+   cloud-memory-mcp --help
+   cloud-memory-agent --help
+   ```
+
+6. 按下节准备本机独立的私有配置，仅首次初始化队列；随后将 MCP 配置中的 `command` 设置为 `/path/to/Memory-Hub/apps/hub/.venv/bin/cloud-memory-mcp`，参数仍指向该私有配置。
+
+   ```sh
+   cloud-memory-agent --config-file /path/to/private/agent.json init
+   cloud-memory-agent --config-file /path/to/private/agent.json status
+   ```
+
+本地安装复用 `.local/upstream/hy-memory` 的 editable 源码依赖，须保留仓库、上游和虚拟环境的位置；移动后应重新安装并更新 MCP 路径。另一台 Mac 从源码重复安装，不复制这台机器的虚拟环境。以上不会安装 Skill、修改日常 Agent 配置或启动 NAS 模型。
+
 ## 准备连接
 
 管理员先创建项目，为每台设备签发独立设备身份，再注册来源并授予所需权限：
@@ -32,7 +80,7 @@
 }
 ```
 
-可选 `known_credentials_file` 指向已有格式的私有凭证字符串数组文件，用于本机额外过滤，不是认证配置。初次使用执行 `cloud-memory-agent --config-file /path/to/private/agent.json init`，已有队列不重复初始化。运行环境沿用[连接组件安装准备](local-connector.md)，本配置不安装系统后台服务。
+可选 `known_credentials_file` 指向已有格式的私有凭证字符串数组文件，用于本机额外过滤，不是认证配置。初次使用执行 `cloud-memory-agent --config-file /path/to/private/agent.json init`，已有队列不重复初始化。运行环境按上方 Mac 客户端安装步骤准备，本配置不安装系统后台服务。
 
 ## MCP 与 Skill
 
@@ -44,7 +92,7 @@
 {
   "mcpServers": {
     "cloud-memory-hub": {
-      "command": "/path/to/runtime/bin/cloud-memory-mcp",
+      "command": "/path/to/Memory-Hub/apps/hub/.venv/bin/cloud-memory-mcp",
       "args": ["--config-file", "/path/to/private/agent.json"]
     }
   }
