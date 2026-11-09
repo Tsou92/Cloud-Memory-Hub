@@ -57,7 +57,14 @@ def _main() -> None:
     parser = argparse.ArgumentParser(prog="cloud-memory-hub")
     parser.add_argument(
         "command",
-        choices=["serve", "init", "migrate-governance", "migrate-originals", "diagnostic-preview"],
+        choices=[
+            "serve",
+            "init",
+            "migrate-governance",
+            "migrate-originals",
+            "diagnostic-preview",
+            "activate-file-coverage",
+        ],
         nargs="?",
         default="serve",
     )
@@ -75,6 +82,28 @@ def _main() -> None:
     )
     if args.operation_id and args.command != "diagnostic-preview":
         parser.error("--operation-id is only valid for diagnostic-preview")
+    if args.command == "activate-file-coverage":
+        if not args.writers_stopped:
+            parser.error("activate-file-coverage requires --writers-stopped")
+        from cloud_memory_hub.governance_diagnostic_maintenance import activate_file_coverage
+        from cloud_memory_hub.governance_journal import GovernanceError
+        from cloud_memory_hub.remote_access import AccessError
+
+        config = HubConfig(
+            Path(os.environ.get("CMH_DATA_DIR", "/data")),
+            config_dir,
+            "http://localhost:8800",
+            read_private_file(config_dir / "admin-token").decode("ascii").strip(),
+            read_private_file(config_dir / "encryption-key").strip(),
+            governance_dir=governance_dir,
+        )
+        try:
+            result = activate_file_coverage(config)
+        except (GovernanceError, AccessError):
+            print(json.dumps({"error": "file_coverage_activation_unavailable"}))
+            raise SystemExit(2) from None
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return
     if args.command == "diagnostic-preview":
         if not args.writers_stopped or not args.operation_id:
             parser.error("diagnostic-preview requires --writers-stopped and --operation-id")

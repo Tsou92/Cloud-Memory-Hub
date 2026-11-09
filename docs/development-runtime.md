@@ -6,6 +6,8 @@
 
 诊断恢复的只读维护入口为 `diagnostic-preview --writers-stopped --operation-id UUID`：先停止该实例所有写者，使用原 data/config/governance 卷与原私有配置运行命令。它持有现有存储租约，在普通服务启动之前读取实际已提交的 purge 和精确文件候选；返回元数据，不输出日志正文、不签确认、不执行删除。失败保留现场。新增 execution schema2 目前仅供隔离组件验证，普通服务明确拒绝该格式，不能在常驻实例自行迁移；完整确认/恢复入口尚未交付，见 [ADR-0043](adr/0043-diagnostic-physical-execution.md)。
 
+已有完整绑定的隔离 schema2 实例可显式运行 `activate-file-coverage --writers-stopped`，将文件覆盖要求提高到 SDK 和 Core 的四个范围。命令沿用该实例的三个目录、私有配置及互斥锁，只增加覆盖要求，不完成迁移、删除或业务恢复。成功响应中的 `pending` 表示待处理操作数，`changed=false` 表示已经启用；它们都不是日志正文已清除的证明。旧 schema1、绑定缺口或无效 witness 保持原状并拒绝；若提高要求后的复核失败，保留现场并可重试同一命令。提高后不能直接使用不认识该能力的旧程序；不要手工删除能力行以回退。详见 [ADR-0047](adr/0047-core-file-coverage-and-physical-authority.md)。普通服务的 schema2 限制仍保持。
+
 需要 Docker 与 Compose，以及可访问 GitHub、锁定依赖和 Hugging Face 模型文件的构建网络。目标为 Linux amd64；其他主机架构运行该镜像需要 Docker 的模拟支持。镜像包含第三方许可证和上游来源清单，以及构建时按固定摘要校验的内置检索模型；首次运行无需下载它。源码检出及依赖安装不会访问本机 Agent 历史。
 
 在仓库根目录执行：

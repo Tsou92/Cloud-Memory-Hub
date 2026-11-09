@@ -1,5 +1,7 @@
 # Hy-Memory / MemHub 复用评估
 
+2026-11-10 四域覆盖继续复用既有 23 个补丁，无新增上游补丁。Core 字节判别复用 `StrictDiagnosticFormatter` 与 `project_core_diagnostic`，真实样例由原生 `start_logging_to_file`、`DiagnosticLog.write/close` 产生；文件维护复用补丁 0025 的实际写者暂停和处理器租约。上游未提供 Hub 的父操作授权、版本化覆盖证明或无来源副本许可，因此这些边界保留在 Hub；无来源 Core 正文暂不执行物理删除，见 [ADR-0047](../adr/0047-core-file-coverage-and-physical-authority.md)。
+
 2026-11-10 当前补充：补丁 0025 复用 SDK 已有文件 lease、Core 的 RotatingFileHandler 和独立诊断队列，增加真正的暂停/排空/失败重试及受管工厂接入；不新建日志后端。实际源码的 flush 不阻止新入队、configure/reset 忽略关闭失败、drop 行旁路 strict 投影，因此需要原生小补丁。旧默认行为及相关 SDK/Core 回归保留，修前反例、交叉审查和当前验证见[记录](../reviews/2026-11-10-runtime-binding-and-core-maintenance.md)。这不是 Core 历史正文或 Docker 日志已完成清理的证据。
 
 初评日期：2026-10-21。本文件保留当时的源码阅读结论和路径；后续实测见[运行记录](../reviews/2026-10-22-runtime.md)。2026-10-22 已完成[新基线评估](2026-10-22-upstream-candidate.md)并采用 SDK 权威存储版本；旧治理／session 表的描述不能继续当作现有能力。真实客户端验收仍未完成。
