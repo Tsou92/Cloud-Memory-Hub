@@ -27,7 +27,9 @@ def environment(root):
     }
 
 
-async def phase(root, mode):
+async def phase(root, mode, *, accept_event=True):
+    if not accept_event and mode != "seed":
+        raise ValueError("provision_only_requires_seed")
     os.environ.update(environment(root))
     config = HubConfig.from_environment()
     config.data_dir.mkdir(exist_ok=True, mode=0o700)
@@ -92,6 +94,11 @@ async def phase(root, mode):
                     },
                 }
                 state["event"] = json.loads(EventEnvelope.model_validate(event).canonical_payload())
+                if not accept_event:
+                    # Other probes can reuse identities without introducing an
+                    # unrelated pending write into their governance scope.
+                    state_path.write_text(json.dumps(state))
+                    return
             headers = {"Authorization": "Bearer " + state["credential"]}
             event = state["event"]
             if mode == "reap":

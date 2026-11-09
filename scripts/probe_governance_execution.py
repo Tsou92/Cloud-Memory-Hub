@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -15,12 +16,19 @@ from uuid import uuid4
 import hy_memory.pipelines.writer as native_writer
 from cloud_memory_hub.app import create_hub
 from cloud_memory_hub.config import HubConfig
+from cloud_memory_hub.events import EventEnvelope
 from httpx import ASGITransport, AsyncClient
 from hy_memory.agent.mem_agent import AgentResult, MemAgent
 from one_memory.api import _sdk_library_bridge
 from one_memory.hy_memory_bridge import HyMemoryIngestResult, HyMemoryOutput, _joined_thread
 from one_memory.memory_processing import MemoryTaskRunner
-from one_memory.memory_server.durable_queue import COMPLETED, RUNNING
+from one_memory.memory_server.durable_queue import (
+    CANCELLED,
+    COMPLETED,
+    PENDING,
+    RUNNING,
+    _strict_reaped_digest,
+)
 from probe_original_archive import environment
 from probe_original_archive import phase as archive_phase
 
@@ -104,10 +112,26 @@ def leftover(root, needle):
     )
 
 
+def require_cancelled_revision(queue, revision):
+    with sqlite3.connect(queue.database_path) as db:
+        row = db.execute(
+            "SELECT state,hy_invoked,payload_json FROM memory_write_jobs WHERE job_id=?",
+            (revision["receipt"],),
+        ).fetchone()
+    assert row is not None and row[:2] == (CANCELLED, 0), "confirmed_revision_not_cancelled"
+    # Core's independent terminal retention may reap the queue copy on restart.
+    # Forget retains the original archive, not an exemption from queue retention.
+    reaped = _strict_reaped_digest(row[2])
+    assert (reaped or sha256(row[2].encode()).hexdigest()) == revision["input_digest"], (
+        "forgotten_revision_frozen_input_changed"
+    )
+    assert (queue.payload_for(revision["receipt"]) is None) == (reaped is not None)
+
+
 async def phase(root, mode):
     os.environ.update(environment(root))
     if mode == "seed":
-        await archive_phase(root, "seed")
+        await archive_phase(root, "seed", accept_event=False)
     state_path = root / "state.json"
     state = json.loads(state_path.read_text())
     config = HubConfig.from_environment()
@@ -166,6 +190,10 @@ async def phase(root, mode):
                 return {"request": request, "result": reply.json()}
 
             if mode == "seed":
+                with sqlite3.connect(queue.database_path) as jobs:
+                    assert (
+                        jobs.execute("SELECT count(*) FROM memory_write_jobs").fetchone()[0] == 0
+                    ), "provisioning_introduced_unrelated_pending_write"
                 await web.put(
                     "/hub/v1/devices/" + event["device_id"] + "/grants",
                     headers=admin,
@@ -257,9 +285,18 @@ async def phase(root, mode):
                 }
                 reply = await web.post("/hub/v1/events", headers=device, json=revised)
                 assert reply.status_code == 202, "revision_accept_failed"
+                receipt = reply.json()["receipt_id"]
+                with sqlite3.connect(queue.database_path) as jobs:
+                    frozen = jobs.execute(
+                        "SELECT state,hy_invoked,payload_json FROM memory_write_jobs "
+                        "WHERE job_id=?",
+                        (receipt,),
+                    ).fetchone()
+                assert frozen[:2] == (PENDING, 0), "revision_fixture_not_pending"
                 state["unprocessed_revision"] = {
-                    "receipt": reply.json()["receipt_id"],
-                    "event": revised,
+                    "receipt": receipt,
+                    "event": json.loads(EventEnvelope.model_validate(revised).canonical_payload()),
+                    "input_digest": sha256(frozen[2].encode()).hexdigest(),
                 }
                 state["rows"] = rows
                 state_path.write_text(json.dumps(state))
@@ -275,16 +312,25 @@ async def phase(root, mode):
                     ),
                     await execute("purge", "cmhe:" + rows[1]["receipt"]),
                 ]
+                require_cancelled_revision(queue, state["unprocessed_revision"])
                 state_path.write_text(json.dumps(state))
                 return
             first, second = state["rows"]
+            require_cancelled_revision(queue, state["unprocessed_revision"])
             assert await get("memories", first["memory"]) == 404
             assert await get("history", "cmhe:" + first["receipt"]) == 200
             assert await get("memories", second["memory"]) == 404
             assert await get("history", "cmhe:" + second["receipt"]) == 404
-            assert (
-                await get("history", "cmhe:" + state["unprocessed_revision"]["receipt"]) == 200
-            ), "forgotten_revision_not_retained_for_explicit_read"
+            revision = state["unprocessed_revision"]
+            retained = await web.post(
+                "/hub/v1/history/get",
+                headers=device,
+                json={"scope_id": scope, "record_id": "cmhe:" + revision["receipt"]},
+            )
+            assert retained.status_code == 200, "forgotten_revision_not_retained_for_explicit_read"
+            item = retained.json()["items"][0]
+            assert item["next_content_offset"] is None, "short_revision_fixture_was_truncated"
+            assert json.loads(item["content"]) == revision["event"], "retained_revision_changed"
             journal = app.core.state.cmh_governance.journal
             checkpoint = journal.head(scope)
             assert checkpoint.sequence == 2, "unexpected_governance_intent_count"
@@ -427,9 +473,9 @@ def main():
         assert leftover(root, MARK + " fact 1") == [], "restore_replay_residue"
     print(
         "Forget, purge, restart, full/cache-only restore, identical/conflicting request retries, "
-        "accepted revision scope/retention, source/content reimport prevention and restored "
-        "forget exclusion from new SDK history passed across processes (synthetic extraction "
-        "and supervisor; pending-job cancellation not verified)."
+        "accepted revision scope/retention/cancellation, source/content reimport prevention "
+        "and restored forget exclusion from new SDK history passed across processes "
+        "(synthetic extraction and supervisor)."
     )
 
 
