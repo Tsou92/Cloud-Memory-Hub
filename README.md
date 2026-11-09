@@ -60,6 +60,7 @@
 | 基础画像输入与写入证据 | [原生旁路设计](docs/adr/0028-basic-profile-evidence.md) · [SDK 验证](docs/reviews/2026-11-03-profile-evidence.md) · [Hub 来源接线](docs/adr/0029-basic-profile-lineage.md) · [接线验证](docs/reviews/2026-11-03-profile-lineage.md) |
 | 忘记与彻底删除执行 | [状态机、清理清单与已知缺口](docs/adr/0032-governance-execution.md) |
 | 删除后的来源屏蔽 | [稳定来源规则与旧操作兼容](docs/adr/0033-durable-source-suppression.md) |
+| 删除中断与缓存恢复 | [请求身份与重放设计](docs/adr/0035-purge-cache-recovery.md) · [验证记录](docs/reviews/2026-11-09-purge-cache-recovery.md) |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 

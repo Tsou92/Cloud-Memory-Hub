@@ -5,6 +5,7 @@ only, never content. The journal intent is the authority; this table records
 how far execution reached so a restart can finish it.
 """
 
+import asyncio
 import hmac
 import json
 import sqlite3
@@ -225,6 +226,7 @@ class GovernanceExecutor:
     def __init__(self, authority, bridge, previews, admission, lineage=None, purger=None):
         self.purger = purger
         self._replayed = False
+        self._resume_lock = asyncio.Lock()
         self.authority = authority
         self.bridge = bridge
         self.previews = previews
@@ -283,7 +285,7 @@ class GovernanceExecutor:
             # re-extraction and re-import after the content itself is gone.
             # contents is only available in the executing process; a resumed
             # purge is verified by ID absence through the same idempotent steps.
-            await self.purger.run(records, contents)
+            await self.purger.run(records, contents, scope_id=intent.scope_id)
         else:
             # Hub-owned identities (originals, input snapshots) have no SDK node;
             # the Hub suppression table alone governs them.
@@ -302,13 +304,19 @@ class GovernanceExecutor:
         for operation_id, (state, intent) in operations.items():
             if state == "completed" and intent.action == "purge":
                 records = await _joined_thread(self.store.records, operation_id)
-                if await self.purger.present(records):
+                if await self.purger.present(records, scope_id=intent.scope_id):
                     async with self.admission.exclusive():
-                        await self.purger.run(records, ())
+                        await self.purger.run(records, (), scope_id=intent.scope_id)
         self._replayed = True
 
     async def resume(self):
         """Finish planned forgets, drop plans whose intent never committed."""
+        # Core starts its maintenance loop inside its lifespan. That loop can
+        # reach resume before the Hub's startup resume has completed.
+        async with self._resume_lock:
+            await self._resume()
+
+    async def _resume(self):
         await self.replay_purges()
         planned = await _joined_thread(self.store.operations)
         if all(state == "completed" for state, _ in planned.values()):
