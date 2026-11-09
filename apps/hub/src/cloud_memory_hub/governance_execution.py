@@ -59,24 +59,33 @@ class ExecuteRequest(PreviewRequest):
 class ExecutionStore:
     """planned (IDs saved, intent maybe not yet appended) -> completed."""
 
-    def __init__(self, journal):
+    def __init__(self, journal, *, read_only=False):
+        if type(read_only) is not bool:
+            raise GovernanceError("governance_execution_mode_invalid")
         self.journal = journal
         self.path = journal.path.with_name("execution.sqlite3")
+        self.read_only = read_only
 
     def _sign(self, values):
         return self.journal._mac("execution-v1", values)
 
     @contextmanager
     def _connection(self, *, writing=False):
+        if writing and self.read_only:
+            raise GovernanceError("governance_execution_read_only")
         try:
             DeviceAccessStore._check_private(self.path.parent, directory=True)
             if writing and not self.path.exists():
                 self.path.touch(mode=0o600, exist_ok=False)
             DeviceAccessStore._check_private(self.path)
-            db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=10)
+            mode = "ro" if self.read_only else "rw"
+            db = sqlite3.connect(self.path.as_uri() + "?mode=" + mode, uri=True, timeout=10)
             db.row_factory = sqlite3.Row
             try:
-                db.execute("PRAGMA synchronous=FULL")
+                if self.read_only:
+                    db.execute("PRAGMA query_only=ON")
+                else:
+                    db.execute("PRAGMA synchronous=FULL")
                 db.execute("BEGIN IMMEDIATE" if writing else "BEGIN")
                 version = db.execute("PRAGMA user_version").fetchone()[0]
                 if version == 0 and writing:
@@ -257,6 +266,7 @@ class GovernanceExecutor:
         drain=None,
         *,
         inflight,
+        execution=None,
     ):
         self.purger = purger
         self.drain = drain
@@ -270,7 +280,10 @@ class GovernanceExecutor:
         self.previews = previews
         self.admission = admission
         self.lineage = lineage
-        self.store = ExecutionStore(authority.journal)
+        self.execution = authority.execution if execution is None else execution
+        if self.execution is not authority.execution:
+            raise GovernanceError("governance_execution_binding_mismatch")
+        self.store = self.execution.store
         # One administrator identity today; recorded so later multi-admin audit
         # does not need a journal migration.
         self.actor_id = authority.access.instance_id

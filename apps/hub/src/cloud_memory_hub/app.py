@@ -15,7 +15,7 @@ def create_hub(config: HubConfig):
 
     from cloud_memory_hub.boundary import CloudBoundary
     from cloud_memory_hub.governance_authority import open_authority
-    from cloud_memory_hub.governance_execution import ExecutionStore, GovernanceExecutor
+    from cloud_memory_hub.governance_execution import GovernanceExecutor
     from cloud_memory_hub.governance_inflight import InflightGovernance
     from cloud_memory_hub.governance_journal import GovernanceError
     from cloud_memory_hub.governance_preview import GovernancePreview
@@ -65,7 +65,7 @@ def create_hub(config: HubConfig):
         await reconciler.run()
         await lineage.reconcile_completed()
 
-    suppressions = ExecutionStore(governance.journal)
+    suppressions = governance.execution
     ingest.suppressed = suppressions.suppressed
     source_suppressions = SourceSuppression(suppressions, ingest)
     ingest.require_source_allowed = source_suppressions.require_allowed
@@ -132,6 +132,7 @@ def create_hub(config: HubConfig):
         Purger(ingest, lambda: _sdk_library_bridge(core), config.data_dir),
         drain=lambda: core.state.memory_write_drain,
         inflight=InflightGovernance(ingest, generation.admissions, governance.journal),
+        execution=governance.execution,
     )
     core.state.cmh_executor = executor
     # Before serving or draining: finish interrupted executions and re-apply

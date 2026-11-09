@@ -96,33 +96,51 @@ def _capture(journal, ingest, scope_id, records, *, include_content):
 
 class SourceSuppression:
     def __init__(self, store, ingest=None):
-        self.store = store
+        from cloud_memory_hub.governance_execution_binding import (
+            ExecutionBinding,
+            select_execution_store,
+        )
+
+        self.execution = (
+            store
+            if isinstance(store, ExecutionBinding)
+            else select_execution_store(store.journal, read_only=store.read_only)
+        )
+        self.store = self.execution.store
         self.ingest = ingest
+
+    def business_plans(self, scope_id):
+        """One verified view, including ordinary orphans but excluding repair."""
+        state = self.execution.read_state()
+        return tuple(
+            state.operations[identity]
+            for identity in state.business_plans
+            if state.operations[identity].intent.scope_id == scope_id
+        )
 
     def _rules(self, scope_id):
         targets = set()
         unavailable = None
         marker = content_policy_target(self.store.journal, scope_id)
         operations = {
-            operation: intent
-            for operation, (_, intent) in self.store.operations().items()
-            if intent.scope_id == scope_id
+            operation.intent.operation_id: operation for operation in self.business_plans(scope_id)
         }
         covered_originals = {
             record
-            for operation, intent in operations.items()
-            if marker in intent.targets
-            for record in self.store.records(operation)
+            for operation in operations.values()
+            if marker in operation.intent.targets
+            for record in operation.records
             if record.startswith(PREFIX)
         }
-        for operation, intent in operations.items():
+        for operation in operations.values():
+            intent = operation.intent
             sources = {target for target in intent.targets if target.kind == "source_record"}
             targets.update(
                 target for target in intent.targets if target.kind in {"source_record", "content"}
             )
             if marker in intent.targets:
                 continue
-            records = self.store.records(operation)
+            records = operation.records
             if intent.action == "purge":
                 # A deleted original cannot prove either an empty rule set or
                 # content coverage. Never rewrite or re-sign historical intents.
