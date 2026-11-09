@@ -131,3 +131,7 @@ probe-inflight-governance: prepare-upstream
 .PHONY: probe-write-effects
 probe-write-effects: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_write_effects.py
+
+.PHONY: probe-diagnostic-quiescence
+probe-diagnostic-quiescence: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_diagnostic_quiescence.py

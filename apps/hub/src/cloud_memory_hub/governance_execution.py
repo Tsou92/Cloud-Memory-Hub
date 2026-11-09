@@ -17,7 +17,11 @@ from one_memory.hy_memory_bridge import _joined_thread
 from pydantic import ConfigDict, Field, ValidationError, field_validator
 
 from cloud_memory_hub.governance_candidates import ConfirmedScope
-from cloud_memory_hub.governance_inventory import observe_inventory, require_modeled_scope
+from cloud_memory_hub.governance_inventory import (
+    observe_inventory,
+    require_modeled_scope,
+    require_sdk_preflight,
+)
 from cloud_memory_hub.governance_journal import GovernanceError, Intent
 from cloud_memory_hub.governance_plan import PreviewRequest, plan_relations
 from cloud_memory_hub.governance_requests import request_targets, require_same_request
@@ -276,7 +280,14 @@ class GovernanceExecutor:
         # their whole lifetime before closing SDK and intake admission.
         async with self.drain().quiesce() if self.drain is not None else nullcontext():
             async with self.admission.exclusive():
-                yield
+                bridge = self.bridge()
+                # Creating a cold SDK can itself take a native Chroma write
+                # lock. Preserve the existing read-only corruption preflight.
+                await require_sdk_preflight(bridge)
+                # SDK requests can return while diagnostics still own native
+                # I/O. Keep enqueue paused until maintenance has finished.
+                async with bridge.quiesce_diagnostics():
+                    yield
 
     async def run(self, request):
         try:
@@ -430,6 +441,13 @@ class GovernanceExecutor:
         effects without appending intents or rebuilding partly deleted lineage.
         """
         if self._replayed:
+            return
+        # The caller holds _resume_lock. With no signed execution records there
+        # is no SDK work to replay; keep the ordinary empty startup lazy. A cold
+        # real maintenance operation still initializes inside the full barrier.
+        if not await _joined_thread(self.store.operations):
+            if self.purger is not None:
+                self._replayed = True
             return
         async with self._exclusive():
             operations = await _joined_thread(self.store.operations)

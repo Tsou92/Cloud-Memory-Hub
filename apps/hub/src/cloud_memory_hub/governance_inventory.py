@@ -147,6 +147,17 @@ async def _require_modeled_scope(sdk, namespace):
     await _require_no_entity_copies(vector, namespace)
 
 
+async def require_sdk_preflight(bridge):
+    """Preserve SDK version and disk checks before initialization can mutate it."""
+    if version("hy-memory") != "2.0.5.dev3":
+        raise GovernanceError("governance_sdk_version_unsupported")
+    existing = (
+        Path(bridge.data_dir) / "hy-memory" / HY_MEMORY_NAMESPACE / "vector" / "chroma.sqlite3"
+    )
+    if existing.exists():
+        await _joined_thread(require_sequence, existing)
+
+
 async def require_modeled_scope(bridge, namespace):
     """Bounded recovery preflight; the caller already holds exclusive admission.
 
@@ -154,17 +165,11 @@ async def require_modeled_scope(bridge, namespace):
     inventory. Check writer configuration, log sequence and one scoped companion ID.
     """
     try:
-        if version("hy-memory") != "2.0.5.dev3":
-            raise GovernanceError("governance_sdk_version_unsupported")
         # The pinned bridge fixes this path before constructing the SDK. Inspect
         # an existing log before SDK initialization can acquire a Chroma write
         # lock or reopen its segments; the actual configured path is rechecked
         # below after initialization (including a newly created empty store).
-        existing = (
-            Path(bridge.data_dir) / "hy-memory" / HY_MEMORY_NAMESPACE / "vector" / "chroma.sqlite3"
-        )
-        if existing.exists():
-            await _joined_thread(require_sequence, existing)
+        await require_sdk_preflight(bridge)
         sdk = await bridge._get_client()
         await _joined_thread(lambda: sdk._loop_thread.run(_require_modeled_scope(sdk, namespace)))
     except GovernanceError:

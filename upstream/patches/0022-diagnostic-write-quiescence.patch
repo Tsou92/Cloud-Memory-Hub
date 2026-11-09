@@ -1,0 +1,1548 @@
+diff --git a/hy_memory/client.py b/hy_memory/client.py
+index ebcd180..3bd582a 100644
+--- a/hy_memory/client.py
++++ b/hy_memory/client.py
+@@ -2219,14 +2219,44 @@ class HyMemoryClient:
+                 continue
+             seen.add(id(loop_thread))
+             loop_thread.stop()
+-
+-    def close(self):
+-        """关闭客户端，释放所有资源"""
++            if loop_thread._thread.is_alive():
++                raise RuntimeError("hy_memory_client_loop_still_running")
++
++    def close(self, *, diagnostic_timeout=None):
++        """Close owned resources only after diagnostic work has really ended."""
++        if any(
++            owner is not None and threading.current_thread() is owner._thread
++            for owner in (self._loop_thread, getattr(self, "_search_loop_thread", None))
++        ):
++            raise RuntimeError("hy_memory_client_close_from_owned_loop")
++        close_lock = self.__dict__.setdefault("_close_lock", threading.Lock())
++        if not close_lock.acquire(blocking=False):
++            raise RuntimeError("hy_memory_client_closing")
+         try:
+-            if self._registry is not None:
+-                self._loop_thread.run(self._close_async())
+-        finally:
++            if self._owns_runtime and self._cache is not None:
++                from .utils.pipeline_log_lifecycle import require_sync_drain_safe
++
++                require_sync_drain_safe((self._cache,))
++            if any(getattr(self, name, None) is not None for name in (
++                "_registry", "_cache", "_history_store", "_graph_store",
++            )):
++                self._loop_thread.run(self._close_with_diagnostics(diagnostic_timeout))
+             self._stop_owned_loops()
++        finally:
++            close_lock.release()
++
++    async def _close_with_diagnostics(self, timeout):
++        if not self._owns_runtime:
++            # Other clients still own this runtime and must remain usable.
++            await self._close_async()
++            return
++        from .utils.pipeline_log_lifecycle import quiesce_pipeline_logs, work_groups
++
++        caches = () if self._cache is None else (self._cache,)
++        async with quiesce_pipeline_logs(caches, timeout=timeout):
++            for group in work_groups(caches):
++                group.seal()
++            await self._close_async()
+
+     def history(self, memory_id: str) -> List[Dict[str, Any]]:
+         """
+diff --git a/hy_memory/runtime.py b/hy_memory/runtime.py
+index f7f29e3..eadafe0 100644
+--- a/hy_memory/runtime.py
++++ b/hy_memory/runtime.py
+@@ -63,7 +63,9 @@ await runtime.aclose()     # 关 shared 基础设施
+
+ from __future__ import annotations
+
++import asyncio
+ import logging
++import threading
+ from typing import TYPE_CHECKING
+
+ if TYPE_CHECKING:
+@@ -91,6 +93,7 @@ class SharedRuntime:
+         self._metrics = None      # type: Optional[object]  # MetricsCollector
+         self._observability_installed = False
+         self._closed = False
++        self._close_lock = threading.Lock()
+
+     # ------------------------------------------------------------
+     # 工厂 / 生命周期
+@@ -197,80 +200,84 @@ class SharedRuntime:
+     # 关闭
+     # ------------------------------------------------------------
+
+-    async def aclose(self) -> None:
+-        """异步关闭 shared 资源（cache + loop）。"""
++    def _begin_close(self):
++        if any(
++            owner is not None and threading.current_thread() is owner._thread
++            for owner in (self._loop_thread, self._search_loop_thread)
++        ):
++            raise RuntimeError("hy_memory_runtime_close_from_owned_loop")
++        if not self._close_lock.acquire(blocking=False):
++            raise RuntimeError("hy_memory_runtime_closing")
+         if self._closed:
+-            return
+-        self._closed = True
+-
+-        if self._metrics is not None:
+-            try:
+-                await self._loop_thread.run_async(
+-                    self._metrics.stop_background_tasks()
+-                )
+-            except Exception as e:
+-                logger.warning(f"[runtime] metrics close failed: {e}")
+-            self._metrics = None
+-
+-        if self._cache is not None:
+-            try:
+-                # cache 在 _LoopThread 的 loop 上建的，关也得在它上面关
+-                await self._loop_thread.run_async(self._cache.close())
+-            except Exception as e:
+-                logger.warning(f"[runtime] cache close failed: {e}")
+-            self._cache = None
++            self._close_lock.release()
++            return False
++        return True
+
+-        if self._loop_thread is not None:
+-            try:
+-                self._loop_thread.stop()
+-            except Exception as e:
+-                logger.warning(f"[runtime] loop_thread stop failed: {e}")
+-            self._loop_thread = None
++    async def aclose(self, *, diagnostic_timeout=None) -> None:
++        """Drain diagnostics before closing; cancellation waits for the owner Task."""
++        from .utils.pipeline_log_lifecycle import run_on_loop_joined
+
+-        if self._search_loop_thread is not None:
+-            try:
+-                self._search_loop_thread.stop()
+-            except Exception as e:
+-                logger.warning(f"[runtime] search_loop_thread stop failed: {e}")
+-            self._search_loop_thread = None
++        if not self._begin_close():
++            return
++        try:
++            if self._cache is not None or self._metrics is not None:
++                await run_on_loop_joined(
++                    self._close_with_diagnostics(diagnostic_timeout), self._loop_thread._loop,
++                )
++            self._stop_loops()
++            self._closed = True
++        finally:
++            self._close_lock.release()
+
+-        logger.info("[runtime] SharedRuntime closed")
++    def close(self, *, diagnostic_timeout=None) -> None:
++        """Synchronous close with the same retryable state as aclose."""
++        from .utils.pipeline_log_lifecycle import require_sync_drain_safe
+
+-    def close(self) -> None:
+-        """同步关闭，方便从非 async 场景调用。"""
+-        if self._closed:
++        if not self._begin_close():
+             return
+-        if self._loop_thread is not None:
+-            try:
+-                # cache.close 必须在它绑定的 loop 上跑
+-                self._loop_thread.run(self._aclose_inner())
+-            except Exception as e:
+-                logger.warning(f"[runtime] sync close inner failed: {e}")
+-            try:
+-                self._loop_thread.stop()
+-            except Exception as e:
+-                logger.warning(f"[runtime] loop_thread stop failed: {e}")
+-        if self._search_loop_thread is not None:
+-            try:
+-                self._search_loop_thread.stop()
+-            except Exception as e:
+-                logger.warning(f"[runtime] search_loop_thread stop failed: {e}")
+-        self._loop_thread = None
+-        self._search_loop_thread = None
+-        self._cache = None
+-        self._closed = True
+-        logger.info("[runtime] SharedRuntime closed")
++        try:
++            require_sync_drain_safe(() if self._cache is None else (self._cache,))
++            if self._cache is not None or self._metrics is not None:
++                self._loop_thread.run(self._close_with_diagnostics(diagnostic_timeout))
++            self._stop_loops()
++            self._closed = True
++        finally:
++            self._close_lock.release()
++
++    def _stop_loops(self):
++        for name in ("_search_loop_thread", "_loop_thread"):
++            owner = getattr(self, name)
++            if owner is not None:
++                owner.stop()
++                if owner._thread.is_alive():
++                    raise RuntimeError("hy_memory_runtime_loop_still_running")
++                setattr(self, name, None)
++
++    async def _close_with_diagnostics(self, timeout):
++        from .utils.pipeline_log_lifecycle import quiesce_pipeline_logs, work_groups
++
++        caches = () if self._cache is None else (self._cache,)
++        async with quiesce_pipeline_logs(caches, timeout=timeout):
++            # Once resource shutdown starts, retained wrappers must never enqueue
++            # again, including after a partial close failure and on later retry.
++            for group in work_groups(caches):
++                group.seal()
++            pending = asyncio.create_task(self._aclose_inner())
++            interrupted = None
++            while not pending.done():
++                try:
++                    await asyncio.wait((pending,))
++                except asyncio.CancelledError as error:
++                    interrupted = error
++            pending.result()
++            if interrupted is not None:
++                raise interrupted
+
+     async def _aclose_inner(self) -> None:
+-        """在 loop 内执行的关闭流程（仅 close cache，不停 loop —— stop 由外面来做）。"""
++        """Resources remain reachable until their own close succeeds."""
+         if self._metrics is not None:
+-            try:
+-                await self._metrics.stop_background_tasks()
+-            except Exception as e:
+-                logger.warning(f"[runtime] metrics close failed: {e}")
++            await self._metrics.stop_background_tasks()
+             self._metrics = None
+         if self._cache is not None:
+-            try:
+-                await self._cache.close()
+-            except Exception as e:
+-                logger.warning(f"[runtime] cache close failed: {e}")
++            await self._cache.close()
++            self._cache = None
+diff --git a/hy_memory/utils/async_executor.py b/hy_memory/utils/async_executor.py
+index 0ab0c7e..c6092d8 100644
+--- a/hy_memory/utils/async_executor.py
++++ b/hy_memory/utils/async_executor.py
+@@ -27,9 +27,47 @@ async def run_in_executor_guarded(
+     """
+     loop = asyncio.get_running_loop()
+     call = functools.partial(func, *args, **kwargs) if args or kwargs else func
+-    future = loop.run_in_executor(executor, call)
++    from .pipeline_log_lifecycle import current_work_group
++
++    group = current_work_group()
++    if group is not None and executor is not None:
++        # Retain the native completion even when its asyncio waiter is cancelled.
++        # Pipeline JSONL and SQLite both use explicit, existing executors.
++        ticket = group.reserve()
++        try:
++            native = executor.submit(call)
++        except BaseException:
++            ticket.finish()
++            raise
++        native.add_done_callback(ticket.finish)
++        # The event-loop handoff is also owned work. An abandoned waiter must
++        # not produce a later "Future exception was never retrieved" log.
++        delivery = group.reserve(loop=loop)
++        try:
++            future = asyncio.wrap_future(native, loop=loop)
++        except BaseException:
++            delivery.finish()
++            raise
++
++        def consume(completed):
++            try:
++                if not completed.cancelled():
++                    completed.exception()
++            finally:
++                delivery.finish()
++
++        future.add_done_callback(consume)
++    else:
++        future = loop.run_in_executor(executor, call)
+     interval = max(0.01, float(guard_seconds))
+     while True:
++        if group is not None and executor is not None:
++            # wait() leaves the I/O alive on caller cancellation without creating
++            # abandoned shield futures (which can emit late exception logs).
++            done, _pending = await asyncio.wait((future,), timeout=interval)
++            if done:
++                return future.result()
++            continue
+         try:
+             return await asyncio.wait_for(asyncio.shield(future), timeout=interval)
+         except asyncio.TimeoutError:
+diff --git a/hy_memory/utils/pipeline_log_lifecycle.py b/hy_memory/utils/pipeline_log_lifecycle.py
+new file mode 100644
+index 0000000..4d28ae2
+--- /dev/null
++++ b/hy_memory/utils/pipeline_log_lifecycle.py
+@@ -0,0 +1,262 @@
++"""Quiescence of diagnostic work, independent of request outcome evidence.
++
++Groups own scheduling tickets and actual executor completions.  They do not
++record log contents and do not prove that an attempted log was persisted.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import concurrent.futures
++import functools
++import math
++import threading
++import time
++from contextlib import asynccontextmanager
++from contextvars import ContextVar
++
++
++class PipelineLogDrainTimeout(RuntimeError):
++    def __init__(self):
++        super().__init__("pipeline_log_drain_timeout")
++
++
++class PipelineLogDrainUnavailable(RuntimeError):
++    def __init__(self):
++        super().__init__("pipeline_log_drain_unavailable")
++
++
++class PipelineLogQuiescenceUnsupported(RuntimeError):
++    def __init__(self):
++        super().__init__("pipeline_log_quiescence_unsupported")
++
++
++_CURRENT: ContextVar[PipelineLogWorkGroup | None] = ContextVar(
++    "pipeline_log_work_group", default=None,
++)
++
++
++def current_work_group():
++    return _CURRENT.get()
++
++
++class _Ticket:
++    def __init__(self, group, loop):
++        self.group = group
++        self.loop = loop
++
++    def finish(self, _future=None):
++        with self.group._lock:
++            self.group._pending.discard(self)
++
++
++class PipelineLogWorkGroup:
++    def __init__(self):
++        self._lock = threading.RLock()
++        self._pending = set()
++        self._leases = set()
++        self._sealed = False
++        self._suppressed = 0
++
++    def reserve(self, *, loop=None):
++        """Register already-admitted descendants even while admission is paused."""
++        with self._lock:
++            ticket = _Ticket(self, loop)
++            self._pending.add(ticket)
++            return ticket
++
++    def _admit(self):
++        with self._lock:
++            if self._sealed or self._leases:
++                self._suppressed += 1
++                return None
++            return self.reserve(loop=asyncio.get_running_loop())
++
++    def admitted(self, method):
++        @functools.wraps(method)
++        async def wrapped(*args, **kwargs):
++            ticket = self._admit()
++            if ticket is None:
++                return False
++            token = _CURRENT.set(self)
++            try:
++                return await method(*args, **kwargs)
++            finally:
++                _CURRENT.reset(token)
++                ticket.finish()
++        return wrapped
++
++    def pause(self):
++        with self._lock:
++            lease = object()
++            self._leases.add(lease)
++            return lease
++
++    def resume(self, lease):
++        with self._lock:
++            self._leases.discard(lease)
++
++    def seal(self):
++        """Permanently reject new enqueues once resource shutdown has begun."""
++        with self._lock:
++            self._sealed = True
++
++    def snapshot(self):
++        with self._lock:
++            return {
++                "pending": len(self._pending),
++                "paused": bool(self._leases),
++                "sealed": self._sealed,
++                "suppressed": self._suppressed,
++            }
++
++    def pending(self):
++        with self._lock:
++            for ticket in self._pending:
++                if ticket.loop is not None and (
++                    ticket.loop.is_closed() or not ticket.loop.is_running()
++                ):
++                    raise PipelineLogDrainUnavailable()
++            return bool(self._pending)
++
++    def uses_loop(self, loop):
++        with self._lock:
++            return any(ticket.loop is loop for ticket in self._pending)
++
++    def dispatch(self, coroutine, loop, *, track_task, on_done=lambda: None):
++        """Register before dispatch; only the owner Task can finish its ticket."""
++        ticket = self.reserve(loop=loop)
++
++        def finish(_task=None):
++            try:
++                on_done()
++            finally:
++                ticket.finish()
++
++        def start():
++            try:
++                task = loop.create_task(coroutine)
++            except BaseException:  # noqa: BLE001 -- task creation failed before any work ran
++                coroutine.close()
++                finish()
++                return
++            # The existing exception-consuming callback may emit a text log.
++            # Its callback runs first, before the quiescence ticket is released.
++            track_task(task)
++            task.add_done_callback(finish)
++
++        try:
++            if loop is asyncio.get_running_loop():
++                start()
++            else:
++                loop.call_soon_threadsafe(start)
++        except BaseException:
++            coroutine.close()
++            finish()
++            raise
++
++
++def work_groups(caches):
++    groups = []
++    for cache in caches:
++        group = getattr(cache, "_pipeline_log_work_group", None)
++        wrapper_group = getattr(getattr(cache, "store_pipeline_log", None), "work_group", None)
++        if not isinstance(group, PipelineLogWorkGroup) or wrapper_group is not group:
++            raise PipelineLogQuiescenceUnsupported()
++        if group not in groups:
++            groups.append(group)
++    return groups
++
++
++def require_sync_drain_safe(caches):
++    """A synchronous caller cannot block the loop needed to finish its logs."""
++    try:
++        loop = asyncio.get_running_loop()
++    except RuntimeError:
++        return
++    if any(group.uses_loop(loop) for group in work_groups(caches)):
++        raise RuntimeError("pipeline_log_sync_drain_requires_async")
++
++
++async def _drain(groups, timeout):
++    if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
++        raise ValueError("invalid_pipeline_log_drain_timeout")
++    deadline = None if timeout is None else time.monotonic() + timeout
++    while any(group.pending() for group in groups):
++        if deadline is not None and time.monotonic() >= deadline:
++            raise PipelineLogDrainTimeout()
++        await asyncio.sleep(0.01)
++
++
++async def run_on_loop_joined(coroutine, loop):
++    """Cancel on the owner loop, but await its actual Task's termination."""
++    if loop is asyncio.get_running_loop():
++        return await coroutine
++    completed = concurrent.futures.Future()
++    cancellation = threading.Event()
++    task_ref = []
++
++    def finished(task):
++        try:
++            completed.set_result(task.result())
++        except BaseException as error:  # noqa: BLE001 -- forward the exact task termination
++            completed.set_exception(error)
++
++    def start():
++        try:
++            task = loop.create_task(coroutine)
++        except BaseException as error:  # noqa: BLE001 -- forward dispatch failure to the waiter
++            coroutine.close()
++            completed.set_exception(error)
++            return
++        task_ref.append(task)
++        task.add_done_callback(finished)
++        if cancellation.is_set():
++            task.cancel()
++
++    def cancel():
++        if task_ref:
++            task_ref[0].cancel()
++
++    try:
++        loop.call_soon_threadsafe(start)
++    except BaseException:
++        coroutine.close()
++        raise
++    wrapped = asyncio.wrap_future(completed)
++    interrupted = None
++    while not wrapped.done():
++        try:
++            await asyncio.wait((wrapped,), timeout=0.05)
++            if not wrapped.done() and (loop.is_closed() or not loop.is_running()):
++                raise PipelineLogDrainUnavailable() from None
++        except asyncio.CancelledError as error:
++            if interrupted is None:
++                interrupted = error
++                cancellation.set()
++                loop.call_soon_threadsafe(cancel)
++    if interrupted is not None:
++        if wrapped.done() and not wrapped.cancelled():
++            wrapped.exception()
++        raise interrupted
++    return wrapped.result()
++
++
++@asynccontextmanager
++async def quiesce_pipeline_logs(caches, *, timeout=None):
++    """Pause every cache before waiting; retain all work on failure/cancellation.
++
++    The caller must first exclude foreground SDK reads/writes and cache creation.
++    No registry, native-store or logging-handler lock may be held while awaiting.
++    """
++    groups = work_groups(caches)
++    leases = []
++    try:
++        for group in groups:
++            leases.append((group, group.pause()))
++        await _drain(groups, timeout)
++        yield
++        await _drain(groups, timeout)
++    finally:
++        for group, lease in reversed(leases):
++            group.resume(lease)
+diff --git a/hy_memory/utils/pipeline_observability.py b/hy_memory/utils/pipeline_observability.py
+index ec8bb03..f6a2bdd 100644
+--- a/hy_memory/utils/pipeline_observability.py
++++ b/hy_memory/utils/pipeline_observability.py
+@@ -40,6 +40,7 @@ from pathlib import Path
+ from typing import Any, Callable, Set
+
+ from .async_executor import run_in_executor_guarded
++from .pipeline_log_lifecycle import PipelineLogWorkGroup
+ from ..core.write_effects import observe_async
+
+ logger = logging.getLogger(__name__)
+@@ -278,6 +279,7 @@ def wrap_store_pipeline_log(
+       为 None 时退回"当前 loop"（solo/单 loop 旧行为）。
+     """
+     _last_event: OrderedDict[str, float] = OrderedDict()
++    work_group = PipelineLogWorkGroup()
+     try:
+         _trace_max_pending = max(
+             1, int(os.getenv("MEMORY_PIPELINE_TRACE_MAX_PENDING", "64")),
+@@ -338,6 +340,7 @@ def wrap_store_pipeline_log(
+         lambda a: ({"table": "pipeline_logs_v2", "request_id": a["request_id"]},),
+         partial_reason="background_pipeline_logs_unjoined",
+     )
++    @work_group.admitted
+     async def _store_pipeline_observability(
+         *,
+         request_id: str = "",
+@@ -456,35 +459,17 @@ def wrap_store_pipeline_log(
+         try:
+             loop = asyncio.get_running_loop()
+             # JSONL 用线程池，与 loop 无亲和，留在当前 loop。
+-            _track_task(loop.create_task(_persist_jsonl()))
++            work_group.dispatch(_persist_jsonl(), loop, track_task=_track_task)
+             # DB trace 用 cache pool（可能 aiomysql，绑定 owner_loop）。若当前不在
+             # owner_loop（如 search 走独立 loop），派发回 owner_loop 执行，避免跨 loop。
+             if trace_enabled:
+                 if _reserve_trace_slot():
+                     try:
+-                        if owner_loop is not None and owner_loop is not loop:
+-                            trace_coro = _persist_trace()
+-                            try:
+-                                future = asyncio.run_coroutine_threadsafe(
+-                                    trace_coro, owner_loop,
+-                                )
+-                            except Exception:
+-                                trace_coro.close()
+-                                raise
+-
+-                            def _consume(f):
+-                                try:
+-                                    f.result()
+-                                except Exception as e:
+-                                    logger.debug(
+-                                        "[pipeline-log] cross-loop trace failed: %s", e,
+-                                    )
+-                                finally:
+-                                    _release_once(release_state)
+-
+-                            future.add_done_callback(_consume)
+-                        else:
+-                            _track_task(loop.create_task(_persist_trace()))
++                        work_group.dispatch(
++                            _persist_trace(), owner_loop or loop,
++                            track_task=_track_task,
++                            on_done=lambda: _release_once(release_state),
++                        )
+                     except Exception as e:
+                         _release_once(release_state)
+                         logger.debug(
+@@ -539,6 +524,7 @@ def wrap_store_pipeline_log(
+         return True
+
+     _store_pipeline_observability.trace_stats = _trace_stats
++    _store_pipeline_observability.work_group = work_group
+     return _store_pipeline_observability
+
+
+@@ -555,6 +541,12 @@ def install_pipeline_observability(
+     """
+     from .pipeline_log_writer import PipelineLogWriter
+
++    existing = getattr(cache, "_pipeline_log_work_group", None)
++    if existing is not None:
++        if getattr(cache.store_pipeline_log, "work_group", None) is not existing:
++            raise RuntimeError("pipeline_log_wrapper_replaced")
++        return
++
+     try:
+         owner_loop = asyncio.get_running_loop()
+     except RuntimeError:
+@@ -575,3 +567,4 @@ def install_pipeline_observability(
+         trace_enabled=trace_enabled,
+         owner_loop=owner_loop,
+     )
++    cache._pipeline_log_work_group = cache.store_pipeline_log.work_group
+diff --git a/memhub/apps/core/src/one_memory/hy_memory_bridge.py b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+index dc3e72c..902f577 100644
+--- a/memhub/apps/core/src/one_memory/hy_memory_bridge.py
++++ b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+@@ -85,12 +85,16 @@ def graph_store_enabled() -> bool:
+ _HY_CLIENT_INITIALIZATION_LOCK = threading.Lock()
+ _HY_SHARED_RUNTIME_LOCK = threading.RLock()
+ _HY_SHARED_RUNTIMES: dict[str, tuple[Any, int]] = {}
++_HY_SHARED_RUNTIME_CLOSING: set[str] = set()
++_HY_SHARED_RUNTIME_CLOSE_FAILED: set[str] = set()
+
+
+ def _shared_hy_runtime(config: Any, data_dir: Path) -> Any:
+     """Return the process-owned HY runtime for one physical data directory."""
+     key = str(data_dir.resolve())
+     with _HY_SHARED_RUNTIME_LOCK:
++        if key in _HY_SHARED_RUNTIME_CLOSING or key in _HY_SHARED_RUNTIME_CLOSE_FAILED:
++            raise RuntimeError("hy_memory_runtime_closing")
+         entry = _HY_SHARED_RUNTIMES.get(key)
+         if entry is None:
+             runtime_type = import_module("hy_memory.runtime").SharedRuntime
+@@ -102,32 +106,49 @@ def _shared_hy_runtime(config: Any, data_dir: Path) -> Any:
+         return runtime
+
+
+-def _release_shared_hy_runtime(data_dir: Path) -> None:
+-    key = str(data_dir.resolve())
+-    runtime: Any | None = None
++def _close_shared_runtime(key: str, *, release_one: bool) -> None:
+     with _HY_SHARED_RUNTIME_LOCK:
++        if key in _HY_SHARED_RUNTIME_CLOSING:
++            raise RuntimeError("hy_memory_runtime_closing")
+         entry = _HY_SHARED_RUNTIMES.get(key)
+         if entry is None:
+             return
+-        candidate, references = entry
+-        if references > 1:
+-            _HY_SHARED_RUNTIMES[key] = (candidate, references - 1)
++        runtime, references = entry
++        if release_one and references > 1:
++            _HY_SHARED_RUNTIMES[key] = (runtime, references - 1)
+             return
+-        runtime = candidate
+-        _HY_SHARED_RUNTIMES.pop(key, None)
+-    runtime.close()
++        _HY_SHARED_RUNTIME_CLOSING.add(key)
++    try:
++        runtime.close()
++    except BaseException:
++        with _HY_SHARED_RUNTIME_LOCK:
++            _HY_SHARED_RUNTIME_CLOSE_FAILED.add(key)
++        raise
++    else:
++        with _HY_SHARED_RUNTIME_LOCK:
++            _HY_SHARED_RUNTIMES.pop(key, None)
++            _HY_SHARED_RUNTIME_CLOSE_FAILED.discard(key)
++    finally:
++        with _HY_SHARED_RUNTIME_LOCK:
++            _HY_SHARED_RUNTIME_CLOSING.discard(key)
++
++
++def _release_shared_hy_runtime(data_dir: Path) -> None:
++    _close_shared_runtime(str(data_dir.resolve()), release_one=True)
+
+
+ def close_shared_hy_runtimes() -> None:
+-    """Release process-owned HY loops after all clients have stopped."""
++    """Keep failed runtime slots available for retry, never hide close failures."""
+     with _HY_SHARED_RUNTIME_LOCK:
+-        runtimes = tuple(runtime for runtime, _references in _HY_SHARED_RUNTIMES.values())
+-        _HY_SHARED_RUNTIMES.clear()
+-    for runtime in runtimes:
++        keys = tuple(_HY_SHARED_RUNTIMES)
++    failures = []
++    for key in keys:
+         try:
+-            runtime.close()
+-        except Exception:
+-            logging.getLogger(__name__).exception("hy_shared_runtime_close_failed")
++            _close_shared_runtime(key, release_one=False)
++        except Exception as error:
++            failures.append(error)
++    if failures:
++        raise failures[0]
+
+
+ async def _joined_thread[**P, T](call: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+@@ -179,6 +200,17 @@ def _exclusive[**P, T](
+     return serialized
+
+
++def _operation[**P, T](
++    method: Callable[P, Coroutine[Any, Any, T]],
++) -> Callable[P, Coroutine[Any, Any, T]]:
++    @wraps(method)
++    async def admitted(*args: P.args, **kwargs: P.kwargs) -> T:
++        bridge = cast("HyMemoryBridge", args[0])
++        async with bridge.operation_access():
++            return await method(*args, **kwargs)
++    return admitted
++
++
+ class UnsupportedHyMemoryProviderError(HyMemoryBridgeError):
+     pass
+
+@@ -592,6 +624,11 @@ class HyMemoryBridge:
+         self._last_bindings: HyWriteBindings | None = None
+         self._access_lock = asyncio.Lock()
+         self._access_owner: asyncio.Task[Any] | None = None
++        self._readers: set[asyncio.Task[Any]] = set()
++        self._readers_idle = asyncio.Event()
++        self._readers_idle.set()
++        self._closing_client = False
++        self._client_close_failed = False
+
+     async def _permit_generation(
+         self,
+@@ -610,6 +647,43 @@ class HyMemoryBridge:
+             # Never expose callback text, input contents or persistence details.
+             raise _SdkGenerationNotPermitted("hy_memory_generation_not_permitted") from None
+
++    @asynccontextmanager
++    async def operation_access(self) -> AsyncIterator[None]:
++        """Shared admission preserves search concurrency and joins close readers."""
++        guard = self._operation_guard() if self._operation_guard is not None else nullcontext()
++        async with guard:
++            task = asyncio.current_task()
++            if task in self._readers:
++                yield
++                return
++            if self._closing_client or self._client_close_failed:
++                raise HyMemoryBridgeError("hy_memory_client_closing")
++            self._readers.add(task)
++            self._readers_idle.clear()
++            try:
++                yield
++            finally:
++                self._readers.remove(task)
++                if not self._readers:
++                    self._readers_idle.set()
++
++    @asynccontextmanager
++    async def quiesce_diagnostics(self, *, timeout: float | None = None) -> AsyncIterator[None]:
++        """Caller holds global SDK exclusive admission through the whole context."""
++        from hy_memory.utils.pipeline_log_lifecycle import quiesce_pipeline_logs
++
++        # A cold maintenance operation must not create an unpaused cache later.
++        client = await self._get_client()
++        cache = getattr(client, "_cache", None)
++        caches = [cache]  # Missing/unwrapped native caches fail the strict check.
++        key = str(self.data_dir.resolve())
++        with _HY_SHARED_RUNTIME_LOCK:
++            entry = _HY_SHARED_RUNTIMES.get(key)
++            if entry is not None and entry[0].cache is not cache:
++                caches.append(entry[0].cache)
++        async with quiesce_pipeline_logs(caches, timeout=timeout):
++            yield
++
+     @asynccontextmanager
+     async def exclusive_access(self) -> AsyncIterator[None]:
+         task = asyncio.current_task()
+@@ -943,6 +1017,7 @@ class HyMemoryBridge:
+             raise HyMemoryBridgeError("hy_memory_raw_list_shape_unknown")
+         return records, total
+
++    @_operation
+     async def search_sdk_raw(
+         self,
+         query: str,
+@@ -1382,6 +1457,7 @@ class HyMemoryBridge:
+             )
+         )
+
++    @_operation
+     async def search_memories(
+         self,
+         query: str,
+@@ -1397,10 +1473,8 @@ class HyMemoryBridge:
+         placed as a block ahead of everything the keyword lane found. The
+         score is what lets the two lanes be ranked against each other.
+
+-        Native search runs without a process-local write gate. MemHub expects
+-        concurrent read during precipitation; store work is a short burst after
+-        network-bound embed/LLM steps, and refusing reads with
+-        ``hy_memory_store_busy`` only pushed callers onto weaker fallbacks.
++        Shared admission permits concurrent reads during precipitation while
++        letting maintenance exclude new reads and join already-admitted readers.
+         """
+         client = await self._get_client()
+         try:
+@@ -1538,6 +1612,8 @@ class HyMemoryBridge:
+         )
+
+     async def _get_client(self) -> HyMemoryClientProtocol:
++        if self._client_close_failed:
++            raise HyMemoryBridgeError("hy_memory_client_closing")
+         if self._client is not None:
+             return self._client
+         async with self._client_lock:
+@@ -1589,11 +1665,25 @@ class HyMemoryBridge:
+
+     @_exclusive
+     async def close(self) -> None:
+-        async with self._client_lock:
+-            if self._client is None:
+-                return
+-            client, self._client = self._client, None
+-        await _joined_thread(client.close)
++        if asyncio.current_task() in self._readers:
++            raise HyMemoryBridgeError("hy_memory_client_close_upgrade_forbidden")
++        self._closing_client = True
++        try:
++            await self._readers_idle.wait()
++            async with self._client_lock:
++                if self._client is None:
++                    return
++                client = self._client
++            try:
++                await _joined_thread(client.close)
++            except BaseException:
++                self._client_close_failed = True
++                raise
++            async with self._client_lock:
++                self._client = None
++                self._client_close_failed = False
++        finally:
++            self._closing_client = False
+
+
+ def create_hy_memory_client(
+@@ -1633,16 +1723,23 @@ def create_hy_memory_client(
+     )
+     native_close = client.close
+     released = False
++    native_closed = False
++    release_lock = threading.Lock()
+
+     def close_leased_client() -> None:
+-        nonlocal released
+-        if released:
+-            return
+-        released = True
++        nonlocal released, native_closed
++        if not release_lock.acquire(blocking=False):
++            raise RuntimeError("hy_memory_client_closing")
+         try:
+-            native_close()
+-        finally:
++            if released:
++                return
++            if not native_closed:
++                native_close()
++                native_closed = True
+             _release_shared_hy_runtime(data_dir)
++            released = True
++        finally:
++            release_lock.release()
+
+     cast(Any, client).close = close_leased_client
+     # The pinned public SDK schedules duplicate cleanup after a search has already returned.
+diff --git a/memhub/apps/core/tests/test_hy_memory_bridge.py b/memhub/apps/core/tests/test_hy_memory_bridge.py
+index bd0f0b9..7e592ac 100644
+--- a/memhub/apps/core/tests/test_hy_memory_bridge.py
++++ b/memhub/apps/core/tests/test_hy_memory_bridge.py
+@@ -37,6 +37,148 @@ from one_memory.hy_runtime_config import (
+ from one_memory.model_profiles import ModelProfileSnapshot, ProviderKind
+
+
++def test_runtime_release_keeps_failed_last_reference_and_blocks_reborrow(tmp_path, monkeypatch):
++    from one_memory import hy_memory_bridge as bridge_module
++
++    key = str(tmp_path.resolve())
++    calls = []
++
++    def close():
++        calls.append("close")
++        if len(calls) == 1:
++            raise RuntimeError("synthetic-drain-timeout")
++
++    runtime = SimpleNamespace(close=close)
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIMES", {key: (runtime, 2)})
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIME_CLOSING", set())
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIME_CLOSE_FAILED", set())
++    bridge_module._release_shared_hy_runtime(tmp_path)
++    assert calls == []
++    with pytest.raises(RuntimeError, match="synthetic-drain-timeout"):
++        bridge_module._release_shared_hy_runtime(tmp_path)
++    assert bridge_module._HY_SHARED_RUNTIMES[key] == (runtime, 1)
++    with pytest.raises(RuntimeError, match="hy_memory_runtime_closing"):
++        bridge_module._shared_hy_runtime(object(), tmp_path)
++    bridge_module._release_shared_hy_runtime(tmp_path)
++    assert key not in bridge_module._HY_SHARED_RUNTIMES
++    assert not bridge_module._HY_SHARED_RUNTIME_CLOSE_FAILED
++    assert len(calls) == 2
++
++
++def test_close_all_runtimes_retains_only_failed_slots_for_retry(monkeypatch):
++    from one_memory import hy_memory_bridge as bridge_module
++
++    calls = []
++    failed = False
++
++    def unstable():
++        nonlocal failed
++        calls.append("unstable")
++        if not failed:
++            failed = True
++            raise RuntimeError("synthetic-runtime-close-failure")
++
++    runtime = SimpleNamespace(close=unstable)
++    steady = SimpleNamespace(close=lambda: calls.append("steady"))
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIMES", {"unstable": (runtime, 1), "steady": (steady, 1)})
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIME_CLOSING", set())
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIME_CLOSE_FAILED", set())
++    with pytest.raises(RuntimeError, match="synthetic-runtime-close-failure"):
++        bridge_module.close_shared_hy_runtimes()
++    assert tuple(bridge_module._HY_SHARED_RUNTIMES) == ("unstable",)
++    bridge_module.close_shared_hy_runtimes()
++    assert not bridge_module._HY_SHARED_RUNTIMES
++    assert calls.count("steady") == 1
++    assert calls.count("unstable") == 2
++
++
++def test_leased_client_retry_does_not_repeat_native_close_or_decrement_twice(tmp_path, monkeypatch):
++    from one_memory import hy_memory_bridge as bridge_module
++
++    class FakeRuntime:
++        closes = 0
++
++        @classmethod
++        async def create(cls, _config):
++            return cls()
++
++        def close(self):
++            self.closes += 1
++            if self.closes == 1:
++                raise RuntimeError("synthetic-runtime-close-failure")
++
++    class FakeClient:
++        def __init__(self, *, config, mode, runtime):
++            self.runtime = runtime
++            self.native_closes = 0
++
++        def close(self):
++            self.native_closes += 1
++
++    real_import = bridge_module.import_module
++
++    def fake_import(name):
++        if name == "hy_memory.client":
++            return SimpleNamespace(HyMemoryClient=FakeClient)
++        if name == "hy_memory.runtime":
++            return SimpleNamespace(SharedRuntime=FakeRuntime)
++        return real_import(name)
++
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIMES", {})
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIME_CLOSING", set())
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIME_CLOSE_FAILED", set())
++    monkeypatch.setattr(bridge_module, "import_module", fake_import)
++    monkeypatch.setattr(bridge_module, "reattach_legacy_vector_collection", lambda *_: None)
++    monkeypatch.setattr(bridge_module, "inspect_graph_width_mismatch", lambda *_: None)
++    monkeypatch.setattr("one_memory.hy_response_guard.install_hy_write_guards", lambda *_: None)
++    profile = snapshot(ProviderKind.OLLAMA, base_url="http://127.0.0.1:11434", has_api_key=False)
++    first = bridge_module.create_hy_memory_client(profile, api_key=None, data_dir=tmp_path)
++    second = bridge_module.create_hy_memory_client(profile, api_key=None, data_dir=tmp_path)
++    first.close()
++    with pytest.raises(RuntimeError, match="synthetic-runtime-close-failure"):
++        second.close()
++    assert first.native_closes == second.native_closes == 1
++    assert second.runtime.closes == 1
++    second.close()
++    first.close()
++    assert second.native_closes == 1
++    assert second.runtime.closes == 2
++    assert not bridge_module._HY_SHARED_RUNTIMES
++
++
++def test_cold_quiescence_initializes_then_pauses_native_cache(tmp_path, monkeypatch):
++    from hy_memory.utils.pipeline_log_lifecycle import PipelineLogWorkGroup
++    from one_memory import hy_memory_bridge as bridge_module
++
++    group = PipelineLogWorkGroup()
++
++    @group.admitted
++    async def store(**_kwargs):
++        return True
++
++    store.work_group = group
++    cache = SimpleNamespace(store_pipeline_log=store, _pipeline_log_work_group=group)
++    client = SimpleNamespace(_cache=cache)
++    calls = []
++
++    def create(*_args, **_kwargs):
++        calls.append("initialized")
++        return client
++
++    monkeypatch.setattr(bridge_module, "create_hy_memory_client", create)
++    monkeypatch.setattr(bridge_module, "_HY_SHARED_RUNTIMES", {})
++    bridge = HyMemoryBridge(profile=object(), api_key=None, data_dir=tmp_path)
++
++    async def scenario():
++        async with bridge.quiesce_diagnostics():
++            assert calls == ["initialized"]
++            assert not await cache.store_pipeline_log(request_id="maintenance")
++        assert await cache.store_pipeline_log(request_id="normal")
++        assert calls == ["initialized"]
++
++    asyncio.run(scenario())
++
++
+ class FakeHyMemoryClient:
+     def __init__(
+         self,
+diff --git a/tests/test_pipeline_log_lifecycle.py b/tests/test_pipeline_log_lifecycle.py
+new file mode 100644
+index 0000000..7a4ff90
+--- /dev/null
++++ b/tests/test_pipeline_log_lifecycle.py
+@@ -0,0 +1,484 @@
++"""Real final-I/O barriers, cancellation, cross-loop dispatch and close retry."""
++
++import asyncio
++import gc
++import threading
++from concurrent.futures import ThreadPoolExecutor
++from types import SimpleNamespace
++
++import pytest
++from hy_memory import HyMemoryClient, MemoryConfig, SharedRuntime
++from hy_memory.data import cache_sqlite
++from hy_memory.data.cache_sqlite import SqliteCache
++from hy_memory.metrics import MetricsCollector
++from hy_memory.utils import pipeline_observability as observability
++from hy_memory.utils.pipeline_log_lifecycle import (
++    PipelineLogDrainTimeout,
++    PipelineLogDrainUnavailable,
++    PipelineLogQuiescenceUnsupported,
++    PipelineLogWorkGroup,
++    quiesce_pipeline_logs,
++)
++from hy_memory.utils.pipeline_log_writer import PipelineLogWriter
++
++
++async def until(predicate):
++    async with asyncio.timeout(3):
++        while not predicate():
++            await asyncio.sleep(0.005)
++
++
++def config(tmp_path):
++    return MemoryConfig.from_dict({
++        "cache": {"backend": "sqlite", "sqlite_path": str(tmp_path / "cache.db")},
++        "history": {"enable": False},
++    })
++
++
++@pytest.fixture(autouse=True)
++def isolated_environment(monkeypatch, tmp_path):
++    monkeypatch.setenv("MEMORY_DATA_DIR", str(tmp_path))
++    monkeypatch.setenv("MEMORY_LOG_DIR", str(tmp_path / "logs"))
++    monkeypatch.setenv("MEMORY_LOG_LLM_CONTENT", "true")
++    monkeypatch.setenv("MEMORY_PIPELINE_TRACE_ENABLED", "true")
++    monkeypatch.setenv("MEMORY_PIPELINE_TRACE_TIMEOUT_SECONDS", "0.05")
++    MetricsCollector.reset()
++    yield
++    MetricsCollector.reset()
++
++
++async def cache_for(tmp_path):
++    cache = SqliteCache(config(tmp_path))
++    await cache.initialize()
++    observability.install_pipeline_observability(cache)
++    return cache
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("raise_after", [False, True])
++async def test_cancelled_jsonl_waits_for_real_thread_and_consumes_late_failure(
++    tmp_path, monkeypatch, raise_after,
++):
++    entered, release = threading.Event(), threading.Event()
++    native = PipelineLogWriter.write_step
++
++    def blocked(self, **kwargs):
++        entered.set()
++        assert release.wait(3)
++        native(self, **kwargs)
++        if raise_after:
++            raise RuntimeError("synthetic-thread-error-must-not-log-late")
++
++    monkeypatch.setattr(PipelineLogWriter, "write_step", blocked)
++    cache = await cache_for(tmp_path)
++    loop = asyncio.get_running_loop()
++    errors = []
++    old_handler = loop.get_exception_handler()
++    loop.set_exception_handler(lambda _loop, context: errors.append(context))
++    try:
++        assert await cache.store_pipeline_log(request_id="jsonl-target", prompt="synthetic-body")
++        await until(entered.is_set)
++        tasks = [t for t in observability._pending_log_tasks if t.get_coro().__name__ == "_persist_jsonl"]
++        for task in tasks:
++            task.cancel()
++            task.cancel()
++        await asyncio.gather(*tasks, return_exceptions=True)
++        with pytest.raises(PipelineLogDrainTimeout, match="^pipeline_log_drain_timeout$"):
++            async with quiesce_pipeline_logs([cache], timeout=0.02):
++                pytest.fail("real I/O is still blocked")
++        assert cache._pipeline_log_work_group.snapshot()["pending"] > 0
++        assert not cache._pipeline_log_work_group.snapshot()["paused"]
++        release.set()
++        async with quiesce_pipeline_logs([cache], timeout=2):
++            assert cache._pipeline_log_work_group.snapshot()["pending"] == 0
++            assert not await cache.store_pipeline_log(request_id="suppressed", prompt="must-not-buffer")
++            files = list((tmp_path / "logs").rglob("*.log"))
++            assert any("synthetic-body" in path.read_text() for path in files)
++            for path in files:
++                assert "must-not-buffer" not in path.read_text()
++                path.write_text("")
++        del tasks
++        gc.collect()
++        await asyncio.sleep(0.03)
++        assert not errors
++        assert all(not path.read_text() for path in files)
++    finally:
++        release.set()
++        await until(lambda: cache._pipeline_log_work_group.snapshot()["pending"] == 0)
++        await cache.close()
++        loop.set_exception_handler(old_handler)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("cancel", [False, True])
++async def test_native_sqlite_thread_outlives_trace_timeout_or_cancel(tmp_path, monkeypatch, cancel):
++    cache = await cache_for(tmp_path)
++    entered, release = threading.Event(), threading.Event()
++    pool = ThreadPoolExecutor(max_workers=1)
++
++    class BlockInsert:
++        def submit(self, function):
++            def execute():
++                if getattr(function, "__name__", "") == "_insert":
++                    entered.set()
++                    assert release.wait(3)
++                return function()
++            return pool.submit(execute)
++
++    monkeypatch.setattr(cache_sqlite, "_sqlite_executor", BlockInsert())
++    try:
++        await cache.store_pipeline_log(request_id="sql-target", prompt="synthetic-sql-body")
++        await until(entered.is_set)
++        if cancel:
++            tasks = [t for t in observability._pending_log_tasks if t.get_coro().__name__ == "_persist_trace"]
++            for task in tasks:
++                task.cancel()
++            await asyncio.gather(*tasks, return_exceptions=True)
++        else:
++            await asyncio.sleep(0.08)  # Real wrapper's 50ms wait_for has expired.
++        assert cache.store_pipeline_log.trace_stats()["pending"] == 0
++        assert cache._conn.execute("SELECT count(*) FROM pipeline_logs_v2").fetchone()[0] == 0
++        with pytest.raises(PipelineLogDrainTimeout):
++            async with quiesce_pipeline_logs([cache], timeout=0.02):
++                pytest.fail("SQLite's actual executor callable has not returned")
++        release.set()
++        async with quiesce_pipeline_logs([cache], timeout=2):
++            assert cache._conn.execute("SELECT count(*) FROM pipeline_logs_v2").fetchone()[0] == 1
++            cache._conn.execute("DELETE FROM pipeline_logs_v2 WHERE request_id='sql-target'")
++            cache._conn.commit()
++        await asyncio.sleep(0.03)
++        assert cache._conn.execute("SELECT count(*) FROM pipeline_logs_v2").fetchone()[0] == 0
++    finally:
++        release.set()
++        await until(lambda: cache._pipeline_log_work_group.snapshot()["pending"] == 0)
++        await cache.close()
++        pool.shutdown()
++
++
++@pytest.mark.asyncio
++async def test_cross_loop_trace_is_part_of_quiescence(tmp_path, monkeypatch):
++    monkeypatch.setenv("MEMORY_PIPELINE_TRACE_TIMEOUT_SECONDS", "2")
++    owner = asyncio.new_event_loop()
++    thread = threading.Thread(target=owner.run_forever)
++    thread.start()
++    entered, release = threading.Event(), threading.Event()
++    rows = []
++
++    async def store(**kwargs):
++        entered.set()
++        while not release.is_set():
++            await asyncio.sleep(0.005)
++        rows.append(kwargs["request_id"])
++
++    wrapped = observability.wrap_store_pipeline_log(
++        store, log_writer=PipelineLogWriter(str(tmp_path / "logs")),
++        trace_enabled=True, owner_loop=owner,
++    )
++    cache = SimpleNamespace(store_pipeline_log=wrapped, _pipeline_log_work_group=wrapped.work_group)
++    try:
++        await wrapped(request_id="cross-loop")
++        await until(entered.is_set)
++        with pytest.raises(PipelineLogDrainTimeout):
++            async with quiesce_pipeline_logs([cache], timeout=0.02):
++                pytest.fail("owner-loop task is not finished")
++        release.set()
++        async with quiesce_pipeline_logs([cache], timeout=2):
++            assert rows == ["cross-loop"]
++    finally:
++        release.set()
++        await until(lambda: wrapped.work_group.snapshot()["pending"] == 0)
++        owner.call_soon_threadsafe(owner.stop)
++        thread.join(3)
++        owner.close()
++
++
++def cache_with_group(group):
++    async def store(**kwargs):
++        return True
++    wrapper = group.admitted(store)
++    wrapper.work_group = group
++    return SimpleNamespace(store_pipeline_log=wrapper, _pipeline_log_work_group=group)
++
++
++@pytest.mark.asyncio
++async def test_pause_leases_nest_rollback_and_do_not_accept_missing_wrappers(monkeypatch):
++    first, second = PipelineLogWorkGroup(), PipelineLogWorkGroup()
++    a, b = cache_with_group(first), cache_with_group(second)
++    async with quiesce_pipeline_logs([a, a]):
++        async with quiesce_pipeline_logs([a]):
++            assert not await a.store_pipeline_log()
++        assert first.snapshot()["paused"]
++    assert await a.store_pipeline_log()
++    with pytest.raises(PipelineLogQuiescenceUnsupported):
++        async with quiesce_pipeline_logs([a, SimpleNamespace()]):
++            pass
++    assert not first.snapshot()["paused"]
++
++    def fail():
++        raise RuntimeError("synthetic-pause-failure")
++    monkeypatch.setattr(second, "pause", fail)
++    with pytest.raises(RuntimeError, match="synthetic-pause-failure"):
++        async with quiesce_pipeline_logs([a, b]):
++            pass
++    assert not first.snapshot()["paused"]
++
++
++@pytest.mark.asyncio
++async def test_cancelled_drain_keeps_work_and_restores_only_its_pause():
++    group = PipelineLogWorkGroup()
++    cache = cache_with_group(group)
++    ticket = group.reserve()
++    outer = group.pause()
++
++    async def maintain():
++        async with quiesce_pipeline_logs([cache]):
++            pytest.fail("work remains")
++
++    task = asyncio.create_task(maintain())
++    await asyncio.sleep(0.01)
++    task.cancel()
++    task.cancel()
++    with pytest.raises(asyncio.CancelledError):
++        await task
++    assert group.snapshot()["pending"] == 1
++    assert group.snapshot()["paused"]
++    group.resume(outer)
++    ticket.finish()
++    async with quiesce_pipeline_logs([cache], timeout=0):
++        pass
++
++
++@pytest.mark.asyncio
++async def test_stopped_owner_loop_is_not_discarded():
++    loop = asyncio.new_event_loop()
++    group = PipelineLogWorkGroup()
++    cache = cache_with_group(group)
++    ticket = group.reserve(loop=loop)
++    try:
++        with pytest.raises(PipelineLogDrainUnavailable):
++            async with quiesce_pipeline_logs([cache], timeout=0):
++                pass
++        assert group.snapshot()["pending"] == 1
++    finally:
++        ticket.finish()
++        loop.close()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("cancel", [False, True])
++async def test_runtime_close_failure_retains_resources_until_retry(tmp_path, monkeypatch, cancel):
++    entered, release = threading.Event(), threading.Event()
++    native = PipelineLogWriter.write_step
++
++    def blocked(self, **kwargs):
++        entered.set()
++        assert release.wait(3)
++        native(self, **kwargs)
++    monkeypatch.setattr(PipelineLogWriter, "write_step", blocked)
++    runtime = await SharedRuntime.create(config(tmp_path))
++    cache = runtime.cache
++    wrapper = cache.store_pipeline_log
++    try:
++        await wrapper(request_id="shutdown")
++        await until(entered.is_set)
++        if cancel:
++            task = asyncio.create_task(runtime.aclose())
++            await until(lambda: cache._pipeline_log_work_group.snapshot()["paused"])
++            task.cancel()
++            task.cancel()
++            with pytest.raises(asyncio.CancelledError):
++                await task
++        else:
++            with pytest.raises(PipelineLogDrainTimeout):
++                await runtime.aclose(diagnostic_timeout=0.02)
++        assert not runtime._closed
++        assert runtime.cache is cache
++        assert runtime.loop_thread._loop.is_running()
++        assert runtime.search_loop_thread._loop.is_running()
++        assert not cache._pipeline_log_work_group.snapshot()["sealed"]
++        assert not cache._pipeline_log_work_group.snapshot()["paused"]
++        release.set()
++        await runtime.aclose(diagnostic_timeout=2)
++        assert runtime._closed
++        assert not await wrapper(request_id="after-close")
++        assert cache._pipeline_log_work_group.snapshot()["sealed"]
++        await runtime.aclose()
++    finally:
++        release.set()
++        await runtime.aclose()
++
++
++@pytest.mark.asyncio
++async def test_partial_runtime_close_stays_sealed_and_is_retryable(tmp_path, monkeypatch):
++    runtime = await SharedRuntime.create(config(tmp_path))
++    cache = runtime.cache
++    native = cache.close
++    calls = 0
++
++    async def fail_after_native_close():
++        nonlocal calls
++        calls += 1
++        await native()
++        if calls == 1:
++            raise RuntimeError("synthetic-close-failure")
++    monkeypatch.setattr(cache, "close", fail_after_native_close)
++    with pytest.raises(RuntimeError, match="synthetic-close-failure"):
++        await runtime.aclose()
++    assert not runtime._closed
++    assert runtime.cache is cache
++    assert cache._pipeline_log_work_group.snapshot()["sealed"]
++    assert not await cache.store_pipeline_log(request_id="after-partial-close")
++    await runtime.aclose()
++    assert calls == 2 and runtime._closed
++
++
++@pytest.mark.asyncio
++async def test_dispatch_cancelled_before_first_coroutine_step_releases_ticket():
++    group = PipelineLogWorkGroup()
++    cache = cache_with_group(group)
++    entered = []
++
++    async def worker():
++        entered.append(True)
++
++    def cancel_immediately(task):
++        observability._track_task(task)
++        task.cancel()
++
++    group.dispatch(worker(), asyncio.get_running_loop(), track_task=cancel_immediately)
++    async with quiesce_pipeline_logs([cache], timeout=1):
++        assert group.snapshot()["pending"] == 0
++        assert not entered
++
++
++@pytest.mark.asyncio
++async def test_solo_close_timeout_keeps_both_loops_and_seals_only_on_success(tmp_path, monkeypatch):
++    entered, release = threading.Event(), threading.Event()
++    native = PipelineLogWriter.write_step
++
++    def blocked(self, **kwargs):
++        entered.set()
++        assert release.wait(3)
++        native(self, **kwargs)
++
++    monkeypatch.setattr(PipelineLogWriter, "write_step", blocked)
++    cfg = MemoryConfig.from_dict({
++        "cache": {"backend": "sqlite", "sqlite_path": str(tmp_path / "solo.db")},
++        "history": {"enable": False},
++        "vector_store": {"provider": "chroma", "collection_name": "quiescence_solo",
++                         "persist_directory": str(tmp_path / "chroma"), "embedding_dims": 32},
++    })
++    client = HyMemoryClient(cfg, mode="lite")
++    cache = client._cache
++    try:
++        await cache.store_pipeline_log(request_id="solo-close")
++        await until(entered.is_set)
++        with pytest.raises(PipelineLogDrainTimeout):
++            await asyncio.to_thread(client.close, diagnostic_timeout=0.02)
++        assert client._cache is cache and client._registry is not None
++        assert client._loop_thread._loop.is_running()
++        assert client._search_loop_thread._loop.is_running()
++        assert not cache._pipeline_log_work_group.snapshot()["sealed"]
++        release.set()
++        await until(lambda: cache._pipeline_log_work_group.snapshot()["pending"] == 0)
++        client.close(diagnostic_timeout=1)
++        assert client._loop_thread._loop.is_closed()
++        assert client._search_loop_thread._loop.is_closed()
++        assert not await cache.store_pipeline_log(request_id="old-wrapper")
++        client.close()
++    finally:
++        release.set()
++        await until(lambda: cache._pipeline_log_work_group.snapshot()["pending"] == 0)
++        client.close()
++
++
++@pytest.mark.asyncio
++async def test_runtime_refuses_self_close_without_stopping_its_loop(tmp_path):
++    runtime = await SharedRuntime.create(config(tmp_path))
++
++    async def on_owner():
++        with pytest.raises(RuntimeError, match="hy_memory_runtime_close_from_owned_loop"):
++            await runtime.aclose()
++
++    await runtime.loop_thread.run_async(on_owner())
++    assert runtime.loop_thread._loop.is_running()
++    await runtime.aclose()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("async_retry", [False, True])
++async def test_runtime_retry_after_stopped_owner_does_not_redispatch(tmp_path, monkeypatch, async_retry):
++    runtime = await SharedRuntime.create(config(tmp_path))
++    search = runtime.search_loop_thread
++    owner = runtime.loop_thread
++    stop_search = search.stop
++    monkeypatch.setattr(search, "stop", lambda: None)
++    with pytest.raises(RuntimeError, match="hy_memory_runtime_loop_still_running"):
++        await runtime.aclose()
++    assert runtime.cache is None and runtime.metrics is None
++    assert not runtime._closed
++    stop_search()
++    owner.stop()
++    monkeypatch.setattr(search, "stop", stop_search)
++
++    def forbidden(*args, **kwargs):
++        pytest.fail("retry dispatched to an already stopped owner loop")
++    monkeypatch.setattr(owner, "run", forbidden)
++    if async_retry:
++        await runtime.aclose()
++    else:
++        runtime.close()
++    assert runtime._closed
++
++
++@pytest.mark.asyncio
++async def test_sync_close_rejects_only_an_actual_current_loop_dependency(tmp_path):
++    runtime = await SharedRuntime.create(config(tmp_path))
++    cache = runtime.cache
++    try:
++        await cache.store_pipeline_log(request_id="current-loop-job")
++        with pytest.raises(RuntimeError, match="pipeline_log_sync_drain_requires_async"):
++            runtime.close()
++        assert not runtime._closed and runtime.cache is cache
++        async with quiesce_pipeline_logs([cache], timeout=2):
++            pass
++        # The same async caller may synchronously close once no work needs it.
++        runtime.close()
++        assert runtime._closed
++    finally:
++        await runtime.aclose()
++
++
++@pytest.mark.asyncio
++async def test_enqueue_pause_race_never_loses_admitted_work():
++    for _ in range(20):
++        group = PipelineLogWorkGroup()
++        barrier = threading.Barrier(2)
++        release = threading.Event()
++        entered = threading.Event()
++        results = []
++
++        @group.admitted
++        async def call(entered=entered, release=release):
++            entered.set()
++            while not release.is_set():
++                await asyncio.sleep(0.001)
++            return True
++
++        def producer(barrier=barrier, results=results, call=call):
++            barrier.wait()
++            results.append(asyncio.run(call()))
++
++        thread = threading.Thread(target=producer)
++        thread.start()
++        barrier.wait()
++        lease = group.pause()
++        # An admitted request remains counted; a rejected request never runs.
++        await until(lambda entered=entered, results=results: entered.is_set() or bool(results))
++        assert group.snapshot()["pending"] == (1 if entered.is_set() else 0)
++        assert not await call()
++        release.set()
++        await asyncio.to_thread(thread.join, 2)
++        assert not thread.is_alive()
++        assert group.snapshot()["pending"] == 0
++        group.resume(lease)

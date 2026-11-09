@@ -109,6 +109,11 @@
       "path": "patches/0021-sdk-write-effect-observation.patch",
       "scope": "bounded_native_write_observation_without_governance_authority",
       "digest": "sha256:ac1e75c0c3d44aefe2496e27f21ebd082ebd093c3ef6749dbf38a5e11fe3144a"
+    },
+    {
+      "path": "patches/0022-diagnostic-write-quiescence.patch",
+      "scope": "strict_pipeline_diagnostic_quiescence_and_retryable_runtime_shutdown",
+      "digest": "sha256:af81b44174884d718b1e6d210516ef112606ee138a883ca75443fc4394992656"
     }
   ]
 }
