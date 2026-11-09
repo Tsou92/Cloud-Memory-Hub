@@ -110,3 +110,17 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 旧文件检查继续复用固定源码的 PipelineLogWriter、SingleLineFormatter、JsonLineFormatter 和 0023 的封闭投影知识；使用这些实际 emitter 生成合成正反例。上游没有治理范围内的具体记录授权与文件恢复协调，因此 Hub 增加只读 record/domain inventory，复用现有 inflight 请求证书并提取无 witness 更新的证明接口。不新增日志后端或上游补丁，不把 request 字段语法当逐行来源签名。物理记录的精确摘要、覆盖预算与后续恢复合同见 [ADR-0042](../adr/0042-diagnostic-file-governance.md)；当前前置接口不执行文件删除。
 
 0024 继续复用固定日志 factory、原 handler 和轮转状态。真实实验证明：文件替换不更新已打开流，标准 handler 关闭后又可能自动打开旧路径；固定上游没有受控的同步维护与失败重绑定合同。因此只新增共享租约、失败封闭状态及流接管，原有 formatter/filters/level 保留。Hub 复用已有只读目录扫描、主签名意图、准入证明与存储租约，增加独立持久执行组件和 staging 恢复，不重建日志服务。原生 192 项、Core 39 项回归通过；范围与兼容性见 [ADR-0043](../adr/0043-diagnostic-physical-execution.md)。产品物理确认与完整恢复路由仍待接通。
+
+## 2026-11-10 Core 历史文件合同只读调查
+
+以下为固定上游加 0025 后的源码映射，未据此执行 Core 历史正文清理，也不是新增测试通过的证据。下一步沿 [ADR-0046](../adr/0046-governance-runtime-and-output-coverage.md) 扩展现有文件引擎，不另建清理后端。
+
+| 实际入口 | 可复用与必须补齐的边界 |
+| --- | --- |
+| `one_memory/log_file.py` 的严格处理器 | 与 SDK 共用 `StrictDiagnosticFormatter`，可提取复用现有封闭字段、枚举、源码位置与安全栈校验；单凭 `content_omitted=true` 不能证明无正文。 |
+| `hy_memory/utils/diagnostic_policy.py` 的 `project_core_diagnostic` | 结构化 Core 使用独立的 `schema_version/timestamp/service/component/event/outcome` 合同，需要独立封闭分类器；旧 details 中的任意短字符串不自动视为安全。 |
+| `one_memory/diagnostic_log.py` 的旧 JSONL | 原物理行摘要必须以原字节计算；审阅及跨项目冲突检查复用原始/内嵌 JSON 解码视图，未找到其他项目标记不等于来源已证明。 |
+| Core API 请求事件与旧 `core.log` | 真实事件可只有 trace/instance 标识，没有 SDK request ID；旧文本模板没有请求槽，且允许自由文本、多行和异常栈。不能伪造 SDK 请求身份，也不能按时间戳猜测续行归属；需要明确的无请求物理授权及有界分帧/审阅语义。 |
+| `data/logs` 下的两个 Core 文件族 | `core.log`、`diagnostic-core.jsonl` 及各自 `.1/.2/.3` 与现有 SDK 日期轮转不同。扫描白名单、文件键、manifest、完成验证须共同版本化扩展，旧两域 verified 不升级为全部输出已覆盖。 |
+
+可继续原样复用无符号链接目录遍历、文件身份快照、总预算、原字节保留、临时文件证明、同步替换、原处理器重绑定，以及本轮实际 Core 写者维护。新合同的重点是分类/分帧、物理授权、覆盖域版本和父操作归属；跨项目混合旧内容仍按未确认范围拒绝。

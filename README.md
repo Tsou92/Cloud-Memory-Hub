@@ -26,6 +26,8 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 
 当前继续接入联合文件恢复：真实父删除与多份 repair 的授权合并检查，文件 pass 冻结贡献者，旧临时文件共同证明后才处理；旧 memory-only 删除可进入只读维护预览。`bcef154` 完整 Hub 1507 项通过、5 项跳过，同一镜像本地/NAS 各 11 项安装探针通过，常驻服务未升级；普通服务尚未启用新执行格式，见 [ADR-0045](docs/adr/0045-diagnostic-recovery-graph.md) 和[验证记录](docs/reviews/2026-11-10-diagnostic-recovery.md)。
 
+后续已统一业务与恢复状态读取，并接入真实终端审阅/签名组件及 Core 写者维护。`e537cba` 完整 Hub 1585 项通过、5 项跳过，同一镜像本地/NAS 各 12 项安装验收通过，102 个生产代码文件逐项核对一致，常驻服务未升级。Core 历史正文、Docker 日志覆盖和完整运行协调仍待接通，普通服务继续拒绝新执行格式；见 [ADR-0046](docs/adr/0046-governance-runtime-and-output-coverage.md) 和[验证记录](docs/reviews/2026-11-10-runtime-binding-and-core-maintenance.md)。
+
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
 本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。Claude 每轮在线召回已在隔离的实际 CLI 中验证；日常客户端安装、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md)、[授权读取接口](docs/remote-read.md) 和 [Claude 召回](docs/agent-recall.md)。
@@ -90,6 +92,7 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 | 诊断物理执行组件 | [持久状态、同步文件替换与停服维护](docs/adr/0043-diagnostic-physical-execution.md) · [验证记录](docs/reviews/2026-11-10-diagnostic-file-execution.md)；产品执行路由未启用 |
 | 恢复故障隔离 | [SDK 许可与 Core 输出屏障](docs/adr/0044-governance-runtime-recovery-fence.md) · [验证记录](docs/reviews/2026-11-10-runtime-recovery-fence.md) |
 | 联合文件恢复 | [真实父子图与冻结贡献者](docs/adr/0045-diagnostic-recovery-graph.md) · [验证记录](docs/reviews/2026-11-10-diagnostic-recovery.md) |
+| 执行视图、终端审阅与 Core 维护 | [完整接线设计](docs/adr/0046-governance-runtime-and-output-coverage.md) · [同镜像安装与 NAS 验证](docs/reviews/2026-11-10-runtime-binding-and-core-maintenance.md)；完整输出覆盖与正式入口仍待接通 |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
