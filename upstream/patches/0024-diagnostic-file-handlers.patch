@@ -1,0 +1,1240 @@
+diff --git a/hy_memory/utils/diagnostic_policy.py b/hy_memory/utils/diagnostic_policy.py
+index f0d55a9..c1cb374 100644
+--- a/hy_memory/utils/diagnostic_policy.py
++++ b/hy_memory/utils/diagnostic_policy.py
+@@ -24,6 +24,7 @@ MAX_ITEMS = 128
+ MAX_DEPTH = 4
+ _LOCK = threading.RLock()
+ _STRICT = False
++_FILE_MAINTENANCE_OWNER: int | None = None
+ _RESOURCES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+ _KNOWN_SOURCES: dict[str, str] = {}
+
+@@ -84,12 +85,14 @@ def _handler_lock(handler):
+ def enable_strict_diagnostics() -> None:
+     """Irreversibly opt in; busy legacy resources/emitters require a retry."""
+     global _STRICT, _KNOWN_SOURCES
++    require_diagnostic_setup_available()
+     # Reject same-thread re-entry BEFORE taking policy lock: another activator
+     # must never wait for the handler lock held by this legacy formatter.
+     for handler in _owned_handlers():
+         if not _protected(handler) and _handler_lock(handler)._is_owned():
+             raise DiagnosticPolicyError("diagnostic_policy_logging_active")
+     with _LOCK:
++        require_diagnostic_setup_available()
+         core = sys.modules.get("one_memory.diagnostic_log")
+         core_lock = getattr(core, "_diagnostic_resource_lock", _LOCK)
+         with core_lock:
+@@ -568,11 +571,18 @@ def project_memory_operation(**fields):
+     return result
+
+
++def require_diagnostic_setup_available() -> None:
++    """Called under _LOCK; reject same-thread maintenance re-entry."""
++    if _FILE_MAINTENANCE_OWNER is not None:
++        raise DiagnosticPolicyError("diagnostic_file_logging_busy")
++
++
+ def locked_diagnostic_setup(method):
+     """Setup/attachment and activation must be one atomic handler transition."""
+     @wraps(method)
+     def guarded(*args, **kwargs):
+         with _LOCK:
++            require_diagnostic_setup_available()
+             return method(*args, **kwargs)
+     return guarded
+
+diff --git a/hy_memory/utils/file_log_lifecycle.py b/hy_memory/utils/file_log_lifecycle.py
+new file mode 100644
+index 0000000..315f36e
+--- /dev/null
++++ b/hy_memory/utils/file_log_lifecycle.py
+@@ -0,0 +1,430 @@
++"""Synchronous maintenance of SDK-owned file handlers (ADR-0043).
++
++This is an I/O coordination gate, not record deletion authority. The caller
++must hold SDK admission and drain pipeline work before entering, and must keep
++its entire file transaction on this thread. Arbitrary later Python logging
++configuration/raw file opens are outside the dedicated-process contract.
++"""
++
++from __future__ import annotations
++
++import io
++import logging
++import os
++import stat
++import threading
++import weakref
++from contextlib import contextmanager
++from dataclasses import dataclass
++from logging.handlers import TimedRotatingFileHandler
++from pathlib import Path
++from typing import TextIO
++
++try:
++    import fcntl
++except ImportError:  # Normal SDK logging still works on non-POSIX platforms.
++    fcntl = None
++
++from . import diagnostic_policy as policy
++
++_BUSY = "diagnostic_file_logging_busy"
++_UNSUPPORTED = "diagnostic_file_logging_unsupported"
++_MISMATCH = "diagnostic_file_logging_mismatch"
++_REOPEN = "diagnostic_file_logging_reopen_required"
++
++
++@dataclass
++class _SinkState:
++    sealed: bool = False
++    needs_rebind: bool = False
++
++
++# Membership comes only from our factory; public ownership flags are not proof.
++_SINKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
++
++
++class _ManagedTimedRotatingFileHandler(TimedRotatingFileHandler):
++    def emit(self, record):
++        state = _SINKS.get(self)
++        if state is not None and state.sealed:
++            return
++        super().emit(record)
++
++
++@policy.locked_diagnostic_setup
++def _create_sdk_file_handler(**kwargs):
++    path = Path(os.path.abspath(kwargs["filename"]))
++    if any(state.needs_rebind and _filename(h) == path for h, state in _SINKS.items()):
++        _fail(_REOPEN)
++    handler = _ManagedTimedRotatingFileHandler(**kwargs)
++    _SINKS[handler] = _SinkState()
++    return handler
++
++
++@dataclass(frozen=True)
++class StreamRequest:
++    """Ephemeral stream token; never persist it in the cleanup manifest."""
++
++    token: int
++    mode: str
++    encoding: str | None
++    errors: str | None
++
++
++def _fail(code):
++    raise policy.DiagnosticPolicyError(code) from None
++
++
++def _path(value):
++    if not isinstance(value, Path) or not value.is_absolute():
++        _fail(_UNSUPPORTED)
++    return Path(os.path.abspath(value))
++
++
++def _inside(path, roots):
++    return any(path == root or root in path.parents for root in roots)
++
++
++def _stream_identity(stream):
++    if type(stream) is not io.TextIOWrapper:
++        _fail(_UNSUPPORTED)
++    try:
++        info = os.fstat(stream.fileno())
++    except (OSError, ValueError):
++        _fail(_MISMATCH)
++    if not stat.S_ISREG(info.st_mode):
++        _fail(_UNSUPPORTED)
++    return info
++
++
++@contextmanager
++def _registry():
++    lock = logging._lock
++    if lock._is_owned() or not lock.acquire(False):
++        _fail(_BUSY)
++    try:
++        yield
++    finally:
++        lock.release()
++
++
++def _handlers(detached):
++    # Called with the registry lock. Retain strong references until exit.
++    result = {h for ref in logging._handlerList if (h := ref()) is not None}
++    result.update(logging.root.handlers)
++    for logger in logging.root.manager.loggerDict.values():
++        if isinstance(logger, logging.Logger):
++            result.update(logger.handlers)
++    result.update(detached)
++    result.update(_SINKS)
++    return tuple(result)
++
++
++def _filename(handler):
++    value = vars(handler).get("baseFilename")
++    if type(value) is not str:
++        _fail(_UNSUPPORTED)
++    return _path(Path(value))
++
++
++def _lock(handler):
++    lock = vars(handler).get("lock")
++    if not callable(getattr(lock, "_is_owned", None)):
++        _fail(_UNSUPPORTED)
++    if lock._is_owned() or not lock.acquire(False):
++        _fail(_BUSY)
++    return lock
++
++
++class FileHandlerLease:
++    """Only the context manager creates active leases; not an authorization."""
++
++    def __init__(self, roots, detached):
++        self._roots = roots
++        self._detached = detached
++        self._thread = threading.get_ident()
++        self._active = False
++        self._handlers = ()
++        self._locks = []
++        self._initial = {}
++        self._suspended = {}
++        self._adopted = set()
++        self._verified = False
++        self._bound = {}
++
++    def _check(self):
++        if not self._active or self._thread != threading.get_ident():
++            _fail(_UNSUPPORTED)
++
++    def _snapshot(self, identities=()):
++        handlers = _handlers(self._detached)
++        targets = []
++        for handler in handlers:
++            if not isinstance(handler, logging.FileHandler):
++                self._check_stream_handler(handler, identities)
++                continue
++            path = _filename(handler)
++            relevant = _inside(path, self._roots)
++            stream = vars(handler).get("stream")
++            # Outside-root aliases are checked against the engine's inventory.
++            if not relevant and identities and stream is not None:
++                if type(stream) is not io.TextIOWrapper:
++                    _fail(_UNSUPPORTED)
++                if not stream.closed:
++                    try:
++                        info = os.fstat(stream.fileno())
++                    except (OSError, ValueError):
++                        _fail(_MISMATCH)
++                    relevant = (
++                        stat.S_ISREG(info.st_mode)
++                        and (info.st_dev, info.st_ino) in identities
++                    )
++            if not relevant:
++                continue
++            if (
++                handler in self._detached
++                or not _inside(path, self._roots)
++                or type(handler) is not _ManagedTimedRotatingFileHandler
++                or handler not in _SINKS
++            ):
++                _fail(_UNSUPPORTED)
++            targets.append(handler)
++        return tuple(sorted(targets, key=lambda h: (_filename(h), id(h))))
++
++    def _check_stream_handler(self, handler, identities):
++        # A plain StreamHandler can also own a real file descriptor. Inspect
++        # standard streams only; do not execute arbitrary caller fileno/repr.
++        stream = vars(handler).get("stream")
++        if type(stream) is not io.TextIOWrapper or stream.closed:
++            return
++        try:
++            info = os.fstat(stream.fileno())
++        except (OSError, ValueError):
++            _fail(_MISMATCH)
++        if not stat.S_ISREG(info.st_mode):
++            return
++        name = stream.name
++        path_hit = type(name) is str and _inside(
++            Path(os.path.abspath(name)), self._roots
++        )
++        if path_hit or (info.st_dev, info.st_ino) in identities:
++            _fail(_UNSUPPORTED)
++
++    def _enter(self):
++        if (
++            not policy._LOCK._is_owned()
++            or policy._FILE_MAINTENANCE_OWNER != threading.get_ident()
++        ):
++            _fail(_UNSUPPORTED)
++        self._active = True
++        with _registry():
++            self._handlers = self._snapshot()
++            for handler in self._handlers:
++                self._locks.append(_lock(handler))
++                if (
++                    handler.mode != "a"
++                    or handler.namer is not None
++                    or handler.rotator is not None
++                ):
++                    _fail(_UNSUPPORTED)
++                if handler.stream is not None and not handler.stream.closed:
++                    _stream_identity(handler.stream)
++            for handler in self._handlers:
++                state = _SINKS[handler]
++                self._initial[handler] = state.sealed
++                state.sealed = True
++
++    def _files(self, files):
++        if type(files) is not tuple or len(files) > 4096:
++            _fail(_UNSUPPORTED)
++        result = {}
++        for item in files:
++            if type(item) is not tuple or len(item) != 3:
++                _fail(_UNSUPPORTED)
++            path, device, inode = item
++            path = _path(path)
++            if (
++                not _inside(path, self._roots)
++                or type(device) is not int
++                or type(inode) is not int
++                or device < 0
++                or inode <= 0
++            ):
++                _fail(_UNSUPPORTED)
++            result.setdefault(path, set()).add((device, inode))
++        return result
++
++    def _recheck(self, files):
++        identities = {identity for values in files.values() for identity in values}
++        with _registry():
++            if self._snapshot(identities) != self._handlers:
++                _fail(_MISMATCH)
++
++    def require_bound(self, files: tuple[tuple[Path, int, int], ...]) -> None:
++        """Reject aliases/uncontrolled sinks before any destructive I/O."""
++        self._check()
++        expected = self._files(files)
++        self._recheck(expected)
++        for handler in self._handlers:
++            stream = handler.stream
++            if stream is None or stream.closed:
++                if _SINKS[handler].needs_rebind:
++                    continue  # A previous failed maintenance can be repaired.
++                if handler._closed:
++                    continue  # Dormant; future emit will open the current name.
++                _fail(_MISMATCH)
++            info = _stream_identity(stream)
++            if (info.st_dev, info.st_ino) not in expected.get(_filename(handler), ()):
++                _fail(_MISMATCH)
++        self._bound = expected
++
++    def suspend(self, path: Path) -> tuple[StreamRequest, ...]:
++        """Flush/close streams, preserving handler identity and rollover state."""
++        self._check()
++        path = _path(path)
++        if path not in self._bound or path in self._suspended:
++            _fail(_UNSUPPORTED)
++        self._recheck({})
++        handlers = tuple(
++            h
++            for h in self._handlers
++            if _filename(h) == path
++            and (not h._closed or h.stream is not None or _SINKS[h].needs_rebind)
++        )
++        self._suspended[path] = handlers
++        self._verified = False
++        for handler in handlers:
++            _SINKS[handler].needs_rebind = True
++        try:
++            for handler in handlers:
++                stream = handler.stream
++                if stream is not None:
++                    if not stream.closed:
++                        _stream_identity(stream)
++                        stream.flush()
++                        stream.close()
++                    handler.stream = None
++        except Exception:
++            _fail(_REOPEN)
++        return tuple(
++            StreamRequest(id(h), h.mode, h.encoding, h.errors) for h in handlers
++        )
++
++    def adopt(
++        self, path: Path, replacements: dict[int, TextIO], *, identity: tuple[int, int]
++    ) -> None:
++        """Validate ALL streams before taking ownership. Never opens a path."""
++        self._check()
++        path = _path(path)
++        handlers = self._suspended.get(path)
++        if (
++            handlers is None
++            or path in self._adopted
++            or type(replacements) is not dict
++            or set(replacements) != {id(h) for h in handlers}
++            or type(identity) is not tuple
++            or len(identity) != 2
++            or any(type(v) is not int for v in identity)
++        ):
++            _fail(_UNSUPPORTED)
++        self._recheck({path: {identity}})
++        if fcntl is None:
++            _fail(_UNSUPPORTED)
++        streams = []
++        for handler in handlers:
++            stream = replacements[id(handler)]
++            info = _stream_identity(stream)
++            if (
++                handler.stream is not None
++                or (info.st_dev, info.st_ino) != identity
++                or info.st_nlink != 1
++                or not stream.writable()
++                or not (fcntl.fcntl(stream.fileno(), fcntl.F_GETFL) & os.O_APPEND)
++                or stream.encoding != handler.encoding
++                or stream.errors != (handler.errors or "strict")
++            ):
++                _fail(_MISMATCH)
++            if stream in streams:
++                _fail(_MISMATCH)
++            streams.append(stream)
++        for handler, stream in zip(handlers, streams):
++            handler.stream = stream
++        self._adopted.add(path)
++
++    def verify_bound(self, files: tuple[tuple[Path, int, int], ...]) -> None:
++        """Verify the current inode set before the caller completes its pass."""
++        self._check()
++        if set(self._suspended) != self._adopted:
++            _fail(_REOPEN)
++        repaired = {h for handlers in self._suspended.values() for h in handlers}
++        if any(_SINKS[h].needs_rebind and h not in repaired for h in self._handlers):
++            _fail(_REOPEN)
++        expected = self._files(files)
++        if any(len(values) != 1 for values in expected.values()):
++            _fail(_MISMATCH)
++        for path, handlers in self._suspended.items():
++            if path not in expected:
++                _fail(_MISMATCH)
++            for handler in handlers:
++                if handler.stream is None or handler.stream.closed:
++                    _fail(_REOPEN)
++                if _stream_identity(handler.stream).st_nlink != 1:
++                    _fail(_MISMATCH)
++        self.require_bound(files)
++        self._verified = True
++
++    def _leave(self, successful):
++        incomplete = bool(self._suspended) and not self._verified
++        for handler, initially_sealed in self._initial.items():
++            state = _SINKS[handler]
++            touched = any(handler in hs for hs in self._suspended.values())
++            if touched:
++                if successful and self._verified:
++                    state.needs_rebind = False
++                    state.sealed = False
++                else:
++                    state.sealed = True
++            else:
++                state.sealed = initially_sealed
++        self._active = False
++        for lock in reversed(self._locks):
++            lock.release()
++        if successful and incomplete:
++            _fail(_REOPEN)
++
++
++@contextmanager
++def diagnostic_file_maintenance(*, roots: tuple[Path, ...], detached_handlers=()):
++    """Try-lock native setup + related handler I/O, entirely on one thread.
++
++    The registry lock is held only for snapshots; it is never retained while
++    the engine performs SQL/file I/O. Unknown/detached file sinks fail closed.
++    This does not control arbitrary concurrent third-party FileHandler creation.
++    """
++    if type(roots) is not tuple or not roots or len(roots) > 16:
++        _fail(_UNSUPPORTED)
++    normalized = tuple(sorted(set(_path(root) for root in roots)))
++    if type(detached_handlers) not in (tuple, list, set, frozenset):
++        _fail(_UNSUPPORTED)
++    detached = tuple(detached_handlers)
++    if len(detached) > 4096 or any(
++        not isinstance(h, logging.Handler) for h in detached
++    ):
++        _fail(_UNSUPPORTED)
++    lock = policy._LOCK
++    if lock._is_owned() or not lock.acquire(False):
++        _fail(_BUSY)
++    lease = FileHandlerLease(normalized, detached)
++    succeeded = False
++    try:
++        policy.require_diagnostic_setup_available()
++        policy._FILE_MAINTENANCE_OWNER = threading.get_ident()
++        lease._enter()
++        yield lease
++        succeeded = True
++    finally:
++        try:
++            lease._leave(succeeded)
++        finally:
++            policy._FILE_MAINTENANCE_OWNER = None
++            lock.release()
+diff --git a/hy_memory/utils/log_setup.py b/hy_memory/utils/log_setup.py
+index 396e4a8..ca422a8 100644
+--- a/hy_memory/utils/log_setup.py
++++ b/hy_memory/utils/log_setup.py
+@@ -21,10 +21,10 @@ import contextvars
+ import logging
+ import os
+ import sys
+-from logging.handlers import TimedRotatingFileHandler
+ from pathlib import Path
+ from typing import Optional
+ from .diagnostic_policy import locked_diagnostic_setup
++from .file_log_lifecycle import _create_sdk_file_handler
+
+ # ================================================================
+ # request_id 上下文变量 (协程安全)
+@@ -240,7 +240,7 @@ def setup_logging(
+
+     # ---- 文件 Handler ----
+     log_file = os.path.join(resolved_dir, "hy_memory.log")
+-    file_handler = TimedRotatingFileHandler(
++    file_handler = _create_sdk_file_handler(
+         filename=log_file,
+         when="midnight",
+         interval=1,
+diff --git a/memhub/apps/core/src/one_memory/log_file.py b/memhub/apps/core/src/one_memory/log_file.py
+index 5cad5a8..94f3e94 100644
+--- a/memhub/apps/core/src/one_memory/log_file.py
++++ b/memhub/apps/core/src/one_memory/log_file.py
+@@ -1,8 +1,9 @@
+ import logging
++from functools import wraps
+ from logging.handlers import RotatingFileHandler
+ from pathlib import Path
+-from functools import wraps
+-from one_memory.diagnostic_log import _strict_policy, _diagnostic_policy, _diagnostic_resource_lock
++
++from one_memory.diagnostic_log import _diagnostic_policy, _diagnostic_resource_lock, _strict_policy
+
+ # Enough history to cover the run before the one being complained about,
+ # capped so that a machine left running for months does not fill up.
+@@ -20,6 +21,8 @@ def _locked_setup(method):
+         policy = _diagnostic_policy()
+         lock = policy._LOCK if policy else _diagnostic_resource_lock
+         with lock, _diagnostic_resource_lock:
++            if policy:
++                policy.require_diagnostic_setup_available()
+             return method(*args, **kwargs)
+     return guarded
+
+diff --git a/tests/test_file_log_lifecycle.py b/tests/test_file_log_lifecycle.py
+new file mode 100644
+index 0000000..0ba0d56
+--- /dev/null
++++ b/tests/test_file_log_lifecycle.py
+@@ -0,0 +1,702 @@
++"""Actual native handler/file maintenance, using synthetic content only."""
++
++from __future__ import annotations
++
++import gc
++import io
++import json
++import logging
++import os
++import threading
++import time
++import weakref
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++
++import pytest
++
++from hy_memory.utils import diagnostic_policy as policy
++from hy_memory.utils import file_log_lifecycle as lifecycle
++from hy_memory.utils import log_setup
++
++
++@pytest.fixture(autouse=True)
++def isolation(tmp_path, monkeypatch):
++    logger = logging.getLogger("hy_memory")
++    old = logger.handlers[:], logger.level, logger.propagate
++    root_handlers = logging.root.handlers[:]
++    before = {h for ref in logging._handlerList if (h := ref()) is not None}
++    monkeypatch.setattr(log_setup, "_logging_configured", False)
++    monkeypatch.setattr(policy, "_STRICT", False)
++    monkeypatch.setattr(policy, "_RESOURCES", weakref.WeakKeyDictionary())
++    monkeypatch.setattr(policy, "_KNOWN_SOURCES", {})
++    monkeypatch.setenv("MEMORY_LOG_DIR", str(tmp_path / "logs"))
++    logger.handlers = []
++    yield
++    assert policy._FILE_MAINTENANCE_OWNER is None
++    logger.handlers, logger.level, logger.propagate = old
++    logging.root.handlers = root_handlers
++    for ref in logging._handlerList[:]:
++        handler = ref()
++        if handler is not None and handler not in before:
++            handler.close()
++    gc.collect()
++
++
++def native(tmp_path):
++    log_setup.setup_logging(str(tmp_path / "logs"))
++    logger = logging.getLogger("hy_memory")
++    return next(h for h in logger.handlers if isinstance(h, logging.FileHandler))
++
++
++def identity(path):
++    info = path.stat()
++    return info.st_dev, info.st_ino
++
++
++def files(path):
++    return ((path, *identity(path)),)
++
++
++def gate(path, **extra):
++    return lifecycle.diagnostic_file_maintenance(roots=(path.parent,), **extra)
++
++
++def emit(handler, text="synthetic-after"):
++    record = logging.LogRecord(
++        "hy_memory.test", logging.INFO, __file__, 1, text, (), None
++    )
++    handler.handle(record)
++
++
++def streams(path, requests):
++    return {
++        r.token: path.open(r.mode, encoding=r.encoding, errors=r.errors)
++        for r in requests
++    }
++
++
++def replace(lease, path, content=b"retained\n"):
++    requested = lease.suspend(path)
++    stage = path.with_suffix(".stage")
++    stage.write_bytes(content)
++    os.replace(stage, path)
++    lease.adopt(path, streams(path, requested), identity=identity(path))
++    lease.verify_bound(files(path))
++
++
++def test_real_replace_preserves_handler_configuration_and_writes_new_inode(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    emit(handler, "synthetic-before")
++    before_identity = identity(path)
++    state = (
++        id(handler),
++        handler.formatter,
++        handler.filters[:],
++        handler.level,
++        handler.rolloverAt,
++        handler.mode,
++        handler.encoding,
++        handler.errors,
++    )
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        replace(lease, path)
++    assert identity(path) != before_identity
++    assert (
++        id(handler),
++        handler.formatter,
++        handler.filters[:],
++        handler.level,
++        handler.rolloverAt,
++        handler.mode,
++        handler.encoding,
++        handler.errors,
++    ) == state
++    assert identity(path) == (
++        os.fstat(handler.stream.fileno()).st_dev,
++        os.fstat(handler.stream.fileno()).st_ino,
++    )
++    emit(handler)
++    assert b"synthetic-before" not in path.read_bytes()
++    assert b"retained\n" in path.read_bytes()
++    assert b"synthetic-after" in path.read_bytes()
++
++
++def test_no_handlers_pipeline_only_is_supported(tmp_path):
++    path = tmp_path / "pipeline.log"
++    path.write_bytes(b"synthetic-before\n")
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        replace(lease, path)
++    assert path.read_bytes() == b"retained\n"
++
++
++@pytest.mark.parametrize("detached", [False, True])
++def test_unowned_file_handler_rejected_before_any_stream_changes(tmp_path, detached):
++    native_handler = native(tmp_path)
++    path = Path(native_handler.baseFilename)
++    caller = logging.FileHandler(path)
++    caller._hy_memory_diagnostic_handler = True  # Forging this must not help.
++    if not detached:
++        logging.getLogger("hy_memory").addHandler(caller)
++    old_fd = caller.stream.fileno()
++    before = path.read_bytes()
++    with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++        with gate(path, detached_handlers=(caller,) if detached else ()):
++            pytest.fail("uncontrolled handler accepted")
++    assert caller.stream.fileno() == old_fd
++    assert path.read_bytes() == before
++    emit(native_handler)
++    assert b"synthetic-after" in path.read_bytes()
++
++
++def test_detached_native_handler_is_not_silently_adopted(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++        with gate(path, detached_handlers=(handler,)):
++            pass
++    assert not handler.stream.closed
++
++
++def test_outside_alias_rejected_by_inventory_inode(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    alias = tmp_path / "alias.log"
++    os.link(path, alias)
++    caller = logging.FileHandler(alias)
++    old_stream = caller.stream
++    with gate(path) as lease:
++        with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++            lease.require_bound(files(path))
++    assert caller.stream is old_stream and not old_stream.closed
++
++
++def test_unknown_handler_added_during_gate_is_rejected(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        caller = logging.FileHandler(path)
++        with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++            lease.suspend(path)
++        assert not caller.stream.closed and not handler.stream.closed
++
++
++def test_busy_actual_native_emit_is_retryable_without_changes(tmp_path, monkeypatch):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    started, release = threading.Event(), threading.Event()
++    original = logging.StreamHandler.emit
++
++    def delayed(self, record):
++        if self is handler:
++            started.set()
++            assert release.wait(3)
++        return original(self, record)
++
++    monkeypatch.setattr(logging.StreamHandler, "emit", delayed)
++    with ThreadPoolExecutor(1) as pool:
++        future = pool.submit(emit, handler)
++        assert started.wait(3)
++        old_stream = handler.stream
++        try:
++            with pytest.raises(policy.DiagnosticPolicyError, match="busy"):
++                with gate(path):
++                    pass
++            assert handler.stream is old_stream
++        finally:
++            release.set()
++        future.result(3)
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        replace(lease, path)
++
++
++def test_factory_in_open_before_attach_blocks_gate(tmp_path, monkeypatch):
++    started, release = threading.Event(), threading.Event()
++    original = lifecycle._ManagedTimedRotatingFileHandler._open
++
++    def delayed(self):
++        stream = original(self)
++        started.set()
++        assert release.wait(3)
++        return stream
++
++    monkeypatch.setattr(lifecycle._ManagedTimedRotatingFileHandler, "_open", delayed)
++    path = tmp_path / "logs" / "hy_memory.log"
++    with ThreadPoolExecutor(1) as pool:
++        future = pool.submit(native, tmp_path)
++        assert started.wait(3)
++        try:
++            with pytest.raises(policy.DiagnosticPolicyError, match="busy"):
++                with gate(path):
++                    pass
++        finally:
++            release.set()
++        handler = future.result(3)
++    assert not handler.stream.closed
++
++
++def test_factory_waits_before_open_and_binds_replacement(tmp_path, monkeypatch):
++    path = tmp_path / "logs" / "hy_memory.log"
++    path.parent.mkdir()
++    path.write_bytes(b"before\n")
++    entered, opened = threading.Event(), threading.Event()
++    original = lifecycle._ManagedTimedRotatingFileHandler._open
++
++    def observed(self):
++        opened.set()
++        return original(self)
++
++    monkeypatch.setattr(lifecycle._ManagedTimedRotatingFileHandler, "_open", observed)
++
++    def start():
++        entered.set()
++        return native(tmp_path)
++
++    with ThreadPoolExecutor(1) as pool:
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            future = pool.submit(start)
++            assert entered.wait(3)
++            assert not opened.wait(0.05)
++            replace(lease, path)
++        handler = future.result(3)
++    assert opened.is_set()
++    assert os.fstat(handler.stream.fileno()).st_ino == path.stat().st_ino
++
++
++@pytest.mark.parametrize("factory", ["sdk", "core", "activation"])
++def test_same_thread_factory_reentry_rejected_before_open(tmp_path, factory):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with gate(path):
++        with pytest.raises(policy.DiagnosticPolicyError, match="busy"):
++            if factory == "sdk":
++                log_setup.setup_logging(str(tmp_path / "new"))
++            elif factory == "core":
++                from one_memory.log_file import start_logging_to_file
++
++                start_logging_to_file(tmp_path / "core")
++            else:
++                policy.enable_strict_diagnostics()
++    assert not (tmp_path / "new").exists()
++    assert not (tmp_path / "core").exists()
++
++
++@pytest.mark.parametrize("lock_name", ["registry", "policy", "handler"])
++def test_same_thread_lock_reentry_rejected_and_other_locks_released(
++    tmp_path, lock_name
++):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    lock = {"registry": logging._lock, "policy": policy._LOCK, "handler": handler.lock}[
++        lock_name
++    ]
++    with lock:
++        with pytest.raises(policy.DiagnosticPolicyError, match="busy"):
++            with gate(path):
++                pass
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++
++
++def test_two_owned_handlers_same_path_both_rebound(tmp_path, monkeypatch):
++    first = native(tmp_path)
++    monkeypatch.setattr(log_setup, "_logging_configured", False)
++    log_setup.setup_logging(str(tmp_path / "logs"))
++    handlers = [
++        h
++        for h in logging.getLogger("hy_memory").handlers
++        if isinstance(h, logging.FileHandler)
++    ]
++    assert len(handlers) == 2
++    path = Path(first.baseFilename)
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        replace(lease, path)
++    for index, handler in enumerate(handlers):
++        assert os.fstat(handler.stream.fileno()).st_ino == path.stat().st_ino
++        emit(handler, f"synthetic-{index}")
++    assert b"synthetic-0" in path.read_bytes() and b"synthetic-1" in path.read_bytes()
++
++
++def test_reopen_failure_seals_native_auto_open_until_repaired(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with pytest.raises(OSError, match="synthetic-open-failure"):
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            lease.suspend(path)
++            path.write_bytes(b"retained\n")
++            raise OSError("synthetic-open-failure")
++    assert handler.stream is None
++    emit(handler, "must-not-open")
++    assert handler.stream is None and path.read_bytes() == b"retained\n"
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        requested = lease.suspend(path)
++        lease.adopt(path, streams(path, requested), identity=identity(path))
++        lease.verify_bound(files(path))
++    emit(handler)
++    assert b"synthetic-after" in path.read_bytes()
++
++
++def test_second_invalid_stream_does_not_partially_transfer_ownership(
++    tmp_path, monkeypatch
++):
++    first = native(tmp_path)
++    monkeypatch.setattr(log_setup, "_logging_configured", False)
++    log_setup.setup_logging(str(tmp_path / "logs"))
++    path = Path(first.baseFilename)
++    with pytest.raises(policy.DiagnosticPolicyError, match="reopen_required"):
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            requested = lease.suspend(path)
++            replacements = streams(path, requested)
++            replacements[requested[-1].token].close()
++            with pytest.raises(policy.DiagnosticPolicyError, match="mismatch"):
++                lease.adopt(path, replacements, identity=identity(path))
++            assert all(
++                h.stream is None
++                for h in lifecycle._SINKS
++                if Path(h.baseFilename) == path
++            )
++            assert not replacements[requested[0].token].closed
++            for stream in replacements.values():
++                stream.close()
++    emit(first)
++    assert first.stream is None
++
++
++def test_missing_verify_leaves_sealed_and_retry_can_complete(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with pytest.raises(policy.DiagnosticPolicyError, match="reopen_required"):
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            requested = lease.suspend(path)
++            lease.adopt(path, streams(path, requested), identity=identity(path))
++    before = path.read_bytes()
++    emit(handler)
++    assert path.read_bytes() == before
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        replace(lease, path)
++    emit(handler)
++    assert b"synthetic-after" in path.read_bytes()
++
++
++def test_concurrent_close_waits_for_gate_then_closes_current_inode(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    started = threading.Event()
++
++    def close():
++        started.set()
++        handler.close()
++
++    with ThreadPoolExecutor(1) as pool:
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            future = pool.submit(close)
++            assert started.wait(3)
++            time.sleep(0.03)
++            assert not future.done()
++            replace(lease, path)
++        future.result(3)
++    assert handler.stream is None
++
++
++def test_rollover_after_replacement_uses_current_stream(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    handler.rolloverAt = int(time.time()) - 1
++    rollover = handler.rolloverAt
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        replace(lease, path)
++        assert handler.rolloverAt == rollover
++    emit(handler)
++    rotated = list(path.parent.glob("hy_memory.log.*"))
++    assert len(rotated) == 1 and rotated[0].read_bytes() == b"retained\n"
++    assert b"synthetic-after" in path.read_bytes()
++    assert os.fstat(handler.stream.fileno()).st_ino == path.stat().st_ino
++
++
++def test_lease_rejects_cross_thread_and_after_exit(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with gate(path) as lease, ThreadPoolExecutor(1) as pool:
++        future = pool.submit(lease.require_bound, files(path))
++        with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++            future.result(3)
++    with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++        lease.require_bound(files(path))
++
++
++def test_unregistered_same_class_with_owned_flag_is_rejected(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    forged = lifecycle._ManagedTimedRotatingFileHandler(path)
++    forged._hy_memory_diagnostic_handler = True
++    with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++        with gate(path):
++            pass
++    assert not forged.stream.closed
++
++
++@pytest.mark.parametrize(
++    "defect", ["not_append", "wrong_inode", "wrong_encoding", "hardlink"]
++)
++def test_bad_replacement_stream_is_not_owned(tmp_path, defect):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with pytest.raises(policy.DiagnosticPolicyError, match="reopen_required"):
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            (request,) = lease.suspend(path)
++            target = path
++            if defect == "wrong_inode":
++                target = tmp_path / "unrelated.log"
++            if defect == "hardlink":
++                os.link(path, tmp_path / "alias.log")
++            stream = target.open(
++                "r+" if defect == "not_append" else "a",
++                encoding="ascii" if defect == "wrong_encoding" else request.encoding,
++            )
++            try:
++                with pytest.raises(policy.DiagnosticPolicyError, match="mismatch"):
++                    lease.adopt(path, {request.token: stream}, identity=identity(path))
++                assert handler.stream is None and not stream.closed
++            finally:
++                stream.close()
++
++
++def test_verification_rejects_ambiguous_current_set_and_can_retry(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    old_identity = identity(path)
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        requested = lease.suspend(path)
++        stage = path.with_suffix(".stage")
++        stage.write_bytes(b"retained\n")
++        os.replace(stage, path)
++        lease.adopt(path, streams(path, requested), identity=identity(path))
++        with pytest.raises(policy.DiagnosticPolicyError, match="mismatch"):
++            lease.verify_bound(files(path) + ((path, *old_identity),))
++        lease.verify_bound(files(path))
++
++
++def test_retry_accepts_registered_old_identity_but_requires_new_at_finish(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    before = identity(path)
++    # Simulate a prior replace interruption while the live descriptor is old.
++    stage = path.with_suffix(".stage")
++    stage.write_bytes(b"retained\n")
++    os.replace(stage, path)
++    assert os.fstat(handler.stream.fileno()).st_ino != path.stat().st_ino
++    with gate(path) as lease:
++        with pytest.raises(policy.DiagnosticPolicyError, match="mismatch"):
++            lease.require_bound(files(path))
++        lease.require_bound(files(path) + ((path, *before),))
++        requested = lease.suspend(path)
++        lease.adopt(path, streams(path, requested), identity=identity(path))
++        lease.verify_bound(files(path))
++    assert os.fstat(handler.stream.fileno()).st_ino == path.stat().st_ino
++
++
++def test_setup_cannot_bypass_failed_rebind_with_new_handler(tmp_path, monkeypatch):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with pytest.raises(policy.DiagnosticPolicyError, match="reopen_required"):
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            lease.suspend(path)
++    monkeypatch.setattr(log_setup, "_logging_configured", False)
++    with pytest.raises(policy.DiagnosticPolicyError, match="reopen_required"):
++        log_setup.setup_logging(str(path.parent))
++    assert handler.stream is None
++
++
++def test_suspend_requires_successful_inode_inventory(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with gate(path) as lease:
++        with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++            lease.suspend(path)
++    assert not handler.stream.closed
++
++
++def test_busy_registry_on_another_thread_is_nonblocking(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    started, release = threading.Event(), threading.Event()
++
++    def hold():
++        with logging._lock:
++            started.set()
++            assert release.wait(3)
++
++    with ThreadPoolExecutor(1) as pool:
++        future = pool.submit(hold)
++        assert started.wait(3)
++        try:
++            start = time.monotonic()
++            with pytest.raises(policy.DiagnosticPolicyError, match="busy"):
++                with gate(path):
++                    pass
++            assert time.monotonic() - start < 1
++        finally:
++            release.set()
++        future.result(3)
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++
++
++@pytest.mark.parametrize("stage", ["flush", "close"])
++def test_actual_stream_failure_remains_sealed_and_repairable(tmp_path, stage):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    handler.stream.close()
++
++    class FaultingFile(io.FileIO):
++        fail = True
++
++        def flush(self):
++            if stage == "flush" and self.fail:
++                raise OSError("synthetic-private-io-detail")
++            return super().flush()
++
++        def close(self):
++            if stage == "close" and self.fail:
++                raise OSError("synthetic-private-io-detail")
++            return super().close()
++
++    raw = FaultingFile(path, "ab")
++    stream = io.TextIOWrapper(raw, encoding=handler.encoding)
++    handler.stream = stream
++    with pytest.raises(
++        policy.DiagnosticPolicyError, match="^diagnostic_file_logging_reopen_required$"
++    ):
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            lease.suspend(path)
++    assert not stream.closed
++    before = path.read_bytes()
++    emit(handler, "must-remain-sealed")
++    assert path.read_bytes() == before
++    raw.fail = False
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        requested = lease.suspend(path)
++        assert stream.closed
++        lease.adopt(path, streams(path, requested), identity=identity(path))
++        lease.verify_bound(files(path))
++    emit(handler)
++    assert b"synthetic-after" in path.read_bytes()
++
++
++def test_strict_native_setup_keeps_policy_after_rebinding(tmp_path):
++    policy.enable_strict_diagnostics()
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    formatter = handler.formatter
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        replace(lease, path, b"")
++    emit(handler, "synthetic-private-prose")
++    assert handler.formatter is formatter
++    text = path.read_text()
++    assert "synthetic-private-prose" not in text
++    assert json.loads(text)["content_omitted"] is True
++
++
++def test_gate_does_not_hold_registry_across_engine_work(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++
++    def read_registry():
++        with logging._lock:
++            return True
++
++    with gate(path) as lease, ThreadPoolExecutor(1) as pool:
++        lease.require_bound(files(path))
++        assert pool.submit(read_registry).result(1)
++        replace(lease, path)
++
++
++def test_previously_closed_handler_is_not_resurrected_by_maintenance(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    handler.close()
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        assert lease.suspend(path) == ()
++        lease.adopt(path, {}, identity=identity(path))
++        lease.verify_bound(files(path))
++    assert handler.stream is None and handler._closed
++
++
++def test_constructing_a_lease_does_not_acquire_the_gate(tmp_path):
++    lease = lifecycle.FileHandlerLease((tmp_path,), ())
++    with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++        lease.require_bound(())
++
++
++@pytest.mark.parametrize("detached", [False, True])
++def test_plain_stream_handler_with_target_fd_is_rejected_without_closing_it(
++    tmp_path, detached
++):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    # fdopen gives an integer stream.name: inode matching is essential.
++    stream = os.fdopen(os.open(path, os.O_WRONLY | os.O_APPEND), "a", encoding="utf-8")
++    caller = logging.StreamHandler(stream)
++    try:
++        if not detached:
++            logging.getLogger("hy_memory").addHandler(caller)
++        with gate(path, detached_handlers=(caller,) if detached else ()) as lease:
++            with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++                lease.require_bound(files(path))
++        assert not stream.closed and not handler.stream.closed
++    finally:
++        logging.getLogger("hy_memory").removeHandler(caller)
++        stream.close()
++
++
++@pytest.mark.parametrize("attribute", ["namer", "rotator"])
++def test_custom_rotation_callbacks_are_refused_before_io(tmp_path, attribute):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    calls = []
++
++    def unexpected(*args):
++        calls.append(args)
++        raise AssertionError("custom rotation callback must not run")
++
++    setattr(handler, attribute, unexpected)
++    before = path.read_bytes()
++    with pytest.raises(policy.DiagnosticPolicyError, match="unsupported"):
++        with gate(path):
++            pass
++    assert not calls and not handler.stream.closed and path.read_bytes() == before
++
++
++def test_verification_cannot_skip_a_previously_failed_sink(tmp_path):
++    handler = native(tmp_path)
++    path = Path(handler.baseFilename)
++    with pytest.raises(policy.DiagnosticPolicyError, match="reopen_required"):
++        with gate(path) as lease:
++            lease.require_bound(files(path))
++            lease.suspend(path)
++    with gate(path) as lease:
++        lease.require_bound(files(path))
++        with pytest.raises(policy.DiagnosticPolicyError, match="reopen_required"):
++            lease.verify_bound(files(path))
++    assert handler.stream is None

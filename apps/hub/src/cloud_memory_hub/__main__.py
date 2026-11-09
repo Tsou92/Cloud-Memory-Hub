@@ -1,6 +1,7 @@
 """Headless deployment entry, including explicit non-overwriting initialization."""
 
 import argparse
+import json
 import logging
 import os
 import secrets
@@ -56,13 +57,14 @@ def _main() -> None:
     parser = argparse.ArgumentParser(prog="cloud-memory-hub")
     parser.add_argument(
         "command",
-        choices=["serve", "init", "migrate-governance", "migrate-originals"],
+        choices=["serve", "init", "migrate-governance", "migrate-originals", "diagnostic-preview"],
         nargs="?",
         default="serve",
     )
     parser.add_argument("--config-dir", type=Path)
     parser.add_argument("--governance-dir", type=Path)
     parser.add_argument("--writers-stopped", action="store_true")
+    parser.add_argument("--operation-id")
     args = parser.parse_args()
     config_dir = args.config_dir or Path(os.environ.get("CMH_CONFIG_DIR", "/config"))
     governance_dir = args.governance_dir or Path(
@@ -71,6 +73,31 @@ def _main() -> None:
     require_separate_directory(
         governance_dir, config_dir, Path(os.environ.get("CMH_DATA_DIR", "/data"))
     )
+    if args.operation_id and args.command != "diagnostic-preview":
+        parser.error("--operation-id is only valid for diagnostic-preview")
+    if args.command == "diagnostic-preview":
+        if not args.writers_stopped or not args.operation_id:
+            parser.error("diagnostic-preview requires --writers-stopped and --operation-id")
+        from cloud_memory_hub.governance_diagnostic_maintenance import preview_diagnostic_repair
+        from cloud_memory_hub.governance_journal import GovernanceError
+        from cloud_memory_hub.remote_access import AccessError
+
+        config = HubConfig(
+            Path(os.environ.get("CMH_DATA_DIR", "/data")),
+            config_dir,
+            "http://localhost:8800",
+            read_private_file(config_dir / "admin-token").decode("ascii").strip(),
+            read_private_file(config_dir / "encryption-key").strip(),
+            governance_dir=governance_dir,
+        )
+        try:
+            result = preview_diagnostic_repair(config, args.operation_id)
+        except (GovernanceError, AccessError):
+            # Never serialize an unexpected exception or partially observed grant set.
+            print(json.dumps({"error": "diagnostic_preview_unavailable"}))
+            raise SystemExit(2) from None
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return
     if args.command == "init":
         initialize(config_dir, governance_dir=governance_dir)
         print("Private configuration and governance authority initialized.")

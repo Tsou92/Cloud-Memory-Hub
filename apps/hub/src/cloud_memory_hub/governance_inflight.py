@@ -214,9 +214,12 @@ class InflightGovernance:
         inspected = self._inspect(scope, signed=signed, anchored_only=completed)
         inventory, inputs, _targets, dispositions = inspected
         try:
-            with self.admissions.access._connection(writing=True) as db:
+            # Stopped maintenance has a process/storage lease and a genuinely
+            # read-only access store. Normal proof/apply retains its writer CAS.
+            writing = refresh_witness or not self.admissions.access.read_only
+            with self.admissions.access._connection(writing=writing) as db:
                 if not refresh_witness:
-                    # Keep the writer exclusion, but fail any attempted row mutation.
+                    # Also guard when borrowing an ordinary writable connection.
                     db.execute("PRAGMA query_only=ON")
                 self._prove_live(
                     db, inventory, inputs, dispositions, refresh_witness=refresh_witness

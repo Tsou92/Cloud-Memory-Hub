@@ -7,12 +7,14 @@ a process whose other applications require a different logging policy.
 import logging
 import sys
 import threading
+from contextlib import contextmanager
 
 _LOCK = threading.RLock()
 _OWNED = ("_hy_memory_diagnostic_handler", "_one_memory_diagnostic_handler")
 # logging itself keeps only weak references. Retain detached caller objects so
 # removing their last logger owner cannot indirectly close a caller's stream.
 _detached_handlers = set()
+_maintenance_thread = None
 
 
 class _BootstrapFormatter(logging.Formatter):
@@ -77,6 +79,10 @@ def initialize_diagnostics():
     is opened. The bootstrap still protects the resulting startup diagnostic.
     """
     with _LOCK:
+        if _maintenance_thread == threading.get_ident():
+            from hy_memory.utils.diagnostic_policy import DiagnosticPolicyError
+
+            raise DiagnosticPolicyError("diagnostic_file_logging_busy")
         _route(_BootstrapFormatter())
         from hy_memory.utils.diagnostic_policy import (
             StrictDiagnosticFormatter,
@@ -85,6 +91,29 @@ def initialize_diagnostics():
 
         enable_strict_diagnostics()
         _route(StrictDiagnosticFormatter())
+
+
+@contextmanager
+def diagnostic_file_maintenance(*, roots):
+    """Synchronous routing/native-handler exclusion; caller owns worker draining.
+
+    Hold this context through the entire joined file thread, never across await.
+    Retained caller handlers remain caller-owned and are passed for conflict
+    detection only, including descriptors detached during strict initialization.
+    """
+    from hy_memory.utils.diagnostic_policy import DiagnosticPolicyError
+    from hy_memory.utils.file_log_lifecycle import diagnostic_file_maintenance as native_gate
+
+    global _maintenance_thread
+    if _LOCK._is_owned() or not _LOCK.acquire(blocking=False):
+        raise DiagnosticPolicyError("diagnostic_file_logging_busy")
+    try:
+        _maintenance_thread = threading.get_ident()
+        with native_gate(roots=roots, detached_handlers=tuple(_detached_handlers)) as lease:
+            yield lease
+    finally:
+        _maintenance_thread = None
+        _LOCK.release()
 
 
 def install_process_exception_hooks():

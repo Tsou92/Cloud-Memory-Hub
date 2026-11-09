@@ -214,11 +214,12 @@ class AdmissionJournal(GovernanceJournal):
 
 
 class WriteAdmissions:
-    def __init__(self, access, main_journal):
+    def __init__(self, access, main_journal, *, read_only: bool = False):
         self.access, self.main = access, main_journal
+        self.read_only = read_only
         if access.schema_version != 3 or main_journal.schema_version != 2:
             raise GovernanceError("governance_admission_migration_required")
-        self.journal = self._open_journal(main_journal)
+        self.journal = self._open_journal(main_journal, read_only=read_only)
         self.verify_all()
 
     @staticmethod
@@ -226,7 +227,7 @@ class WriteAdmissions:
         return hmac.digest(main._key, b"cmh-sdk-admissions/v1", hashlib.sha256)
 
     @classmethod
-    def _open_journal(cls, main):
+    def _open_journal(cls, main, *, read_only=False):
         expected = main.admissions_ledger_id()
         if expected is None:
             raise GovernanceError("governance_admission_binding_mismatch")
@@ -234,6 +235,7 @@ class WriteAdmissions:
             main.path.with_name("admissions.sqlite3"),
             instance_id=main.instance_id,
             key=cls._key(main),
+            read_only=read_only,
         )
         if journal.ledger_id != expected:
             raise GovernanceError("governance_admission_binding_mismatch")
@@ -242,6 +244,8 @@ class WriteAdmissions:
     @classmethod
     def activate(cls, access, main_journal):
         """Explicit stopped-service migration; never replace a bound missing log."""
+        if access.read_only or main_journal.read_only:
+            raise GovernanceError("governance_admission_read_only")
         if access.instance_id != main_journal.instance_id or access.schema_version not in {2, 3}:
             raise GovernanceError("governance_admission_migration_required")
         if access.schema_version == 3:
@@ -303,6 +307,7 @@ class WriteAdmissions:
             raise GovernanceError("governance_admission_binding_mismatch")
 
     def _witness(self, db, proof, checkpoints, *, refresh_witness=True):
+        refresh_witness = refresh_witness and not self.read_only
         binding = proof.binding
         row = db.execute(
             "SELECT * FROM cmh_admission_witnesses WHERE event_key=?", (binding.event_key,)
@@ -389,6 +394,8 @@ class WriteAdmissions:
     @_safe_storage
     def enroll_in(self, db, event, prepare, rule_targets):
         """Borrow the caller's access BEGIN IMMEDIATE; no nested write checkout."""
+        if self.read_only:
+            raise GovernanceError("governance_admission_read_only")
         self._binding(db)
         event = EventEnvelope.model_validate(
             event.model_dump() if isinstance(event, EventEnvelope) else event
@@ -478,6 +485,8 @@ class WriteAdmissions:
     @_safe_storage
     def permit_once(self, actual, *, require_allowed):
         """Returning successfully is a new permission, only after both commits."""
+        if self.read_only:
+            raise GovernanceError("governance_admission_read_only")
         refusal = None
         try:
             with self.access._connection(writing=True) as db:
@@ -507,7 +516,9 @@ class WriteAdmissions:
     @_safe_storage
     def verify_all(self):
         try:
-            with self.access._connection(writing=True) as db:
+            with self.access._connection(writing=not self.read_only) as db:
+                if self.read_only:
+                    db.execute("PRAGMA query_only=ON")
                 self._binding(db)
                 for row in db.execute("SELECT event_key FROM cmh_admission_witnesses"):
                     if self._lookup(db, row[0]) is None:

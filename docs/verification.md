@@ -85,6 +85,8 @@
 
 旧文件范围前置检查新增 `test_diagnostic_selectors.py`、`test_diagnostic_records.py`、`test_diagnostic_inventory.py`、`test_diagnostic_inventory_probe.py` 与 `make probe-diagnostic-inventory`：真实已接纳任务的无行写入证明、精确物理行 grants、原生三种旧格式及 strict 元数据、实际共根和分根布局、未选/读取/未知拒绝、路径/预算/并发变化、完整数据库与文件字节不变。关联 FR-10、FR-11、ENG-01，见 [ADR-0042](adr/0042-diagnostic-file-governance.md) 与[本步记录](reviews/2026-11-10-diagnostic-inventory.md)。这是只读前置检查，尚未接通物理清理、签名范围预览和恢复完成条件。
 
+物理执行组件新增只读 Authority/Admissions/Ingest、精确确认、ExecutionStore2、实际文件替换、真实 handler gate 与停服 CLI 测试，以及 `make probe-diagnostic-file-execution`。覆盖原样/旧进度恢复、新 strict 尾行、正常轮转、真实进程中断、逐文件替换失败、阶段文件损坏、迁移提交间隙及实际旧制品 capability 拒绝。关联 FR-10、FR-11、ENG-01，见 [ADR-0043](adr/0043-diagnostic-physical-execution.md) 与[本步记录](reviews/2026-11-10-diagnostic-file-execution.md)。独立组件测试不得作为公开执行接口或全部副作用域完成证据。
+
 2026-11-07 治理执行增加 test_governance_execution.py 和 make probe-governance-execution，关联 FR-09、FR-10、FR-11、FR-12。覆盖忘记的范围、抑制、幂等、崩溃续做和篡改拒绝，彻底删除的逐字节核验、无关数据保留、中断续做与恢复旧数据后重新清理；已知 HNSW 预分配缺口单独固定。见 [ADR-0032](adr/0032-governance-execution.md) 与[验证记录](reviews/2026-11-07-governance-execution.md)。
 
 2026-11-09 稳定来源屏蔽补充：上述治理测试和跨进程探针新增原文删除后新修订被拒绝、队列未新增任务、恢复旧业务数据后规则仍有效、旧操作兼容和屏蔽行缺失拒绝。关联 FR-10、FR-11；设计与验收边界见 [ADR-0033](adr/0033-durable-source-suppression.md)。

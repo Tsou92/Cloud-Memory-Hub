@@ -10,7 +10,7 @@ import hashlib
 import os
 import re
 import stat
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -119,8 +119,21 @@ def _valid_date(value):
 
 
 class _Scan:
-    def __init__(self, stack, inspector, budget):
+    def __init__(
+        self,
+        stack,
+        inspector,
+        budget,
+        *,
+        on_record=None,
+        on_file=None,
+        artifact=None,
+        artifact_limit=0,
+    ):
         self.stack, self.inspector, self.budget = stack, inspector, budget
+        self.on_record, self.on_file, self.artifact = on_record, on_file, artifact
+        self.locations = {}
+        self.artifact_limit = artifact_limit
         self.links = []
         self.missing = []
         self.directories = []
@@ -158,7 +171,7 @@ class _Scan:
         result = {}
         with os.scandir(descriptor) as entries:
             for entry in entries:
-                if len(result) >= self.budget.max_files + 1:
+                if len(result) >= self.budget.max_files + self.artifact_limit + 1:
                     raise GovernanceError("diagnostic_inventory_budget_exceeded")
                 result[entry.name] = _snapshot(entry.stat(follow_symlinks=False))
         return result
@@ -175,13 +188,29 @@ class _Scan:
         if descriptor is None:
             return DomainObservation(domain, path, False)
         info = os.fstat(descriptor)
+        if domain == "sdk" or shared:
+            self.locations[("sdk", "")] = descriptor
         entries = self.remember_directory(descriptor)
         for name, identity in sorted(entries.items()):
+            if (
+                (domain == "sdk" or shared)
+                and name.startswith(".cmh-cleanup-")
+                and self.artifact is not None
+                and self.artifact("sdk", descriptor, name, identity, info.st_dev)
+            ):
+                continue
             if domain == "pipeline" and name == "default":
                 if not stat.S_ISDIR(identity[2]) or identity[0] != info.st_dev:
                     raise GovernanceError("diagnostic_inventory_path_unsafe")
                 child = self.open_directory(name, parent=descriptor)
+                self.locations[("pipeline", "default")] = child
                 for filename, file_identity in sorted(self.remember_directory(child).items()):
+                    if (
+                        filename.startswith(".cmh-cleanup-")
+                        and self.artifact is not None
+                        and self.artifact("pipeline", child, filename, file_identity, info.st_dev)
+                    ):
+                        continue
                     if not filename.endswith(".log") or not _valid_date(filename[:-4]):
                         raise GovernanceError("diagnostic_inventory_unsupported")
                     self.scan_file(
@@ -233,28 +262,31 @@ class _Scan:
                     if decision.action not in counts:
                         raise GovernanceError("diagnostic_inventory_unavailable")
                     counts[decision.action] += 1
+                    if self.on_record is not None:
+                        self.on_record(domain, key, raw, decision.action)
                     if decision.grant is not None:
                         self.grants.add(decision.grant)
                         if len(self.grants) > self.budget.max_grants:
                             raise GovernanceError("diagnostic_inventory_budget_exceeded")
             if _snapshot(os.fstat(descriptor)) != expected or size != before.st_size:
                 raise GovernanceError("diagnostic_inventory_changed")
-            self.files.append(
-                FileObservation(
-                    domain,
-                    key,
-                    before.st_dev,
-                    before.st_ino,
-                    size,
-                    before.st_mtime_ns,
-                    before.st_ctime_ns,
-                    digest.hexdigest(),
-                    sum(counts.values()),
-                    counts["keep"],
-                    counts["candidate"],
-                    counts["remove"],
-                )
+            observation = FileObservation(
+                domain,
+                key,
+                before.st_dev,
+                before.st_ino,
+                size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+                digest.hexdigest(),
+                sum(counts.values()),
+                counts["keep"],
+                counts["candidate"],
+                counts["remove"],
             )
+            self.files.append(observation)
+            if self.on_file is not None:
+                self.on_file(observation, directory, name, expected)
         finally:
             os.close(descriptor)
 
@@ -266,6 +298,10 @@ class _Scan:
                 or _snapshot(os.fstat(descriptor)) != before
             ):
                 raise GovernanceError("diagnostic_inventory_changed")
+        self.verify_paths()
+
+    def verify_paths(self):
+        """Recheck anchored directory identities without rejecting owned replacements."""
         for parent, name, identity in self.links:
             if _identity(os.stat(name, dir_fd=parent, follow_symlinks=False))[:3] != identity:
                 raise GovernanceError("diagnostic_inventory_changed")
@@ -277,7 +313,25 @@ class _Scan:
             raise GovernanceError("diagnostic_inventory_changed")
 
 
-def inspect_diagnostic_files(
+@contextmanager
+def _scan_errors():
+    """Translate scan failures without intercepting a session consumer's work."""
+    try:
+        yield
+    except GovernanceError:
+        raise
+    except OSError as error:
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise GovernanceError("diagnostic_inventory_path_unsafe") from None
+        if error.errno == errno.ENOENT:
+            raise GovernanceError("diagnostic_inventory_changed") from None
+        raise GovernanceError("diagnostic_inventory_unavailable") from None
+    except ValueError:
+        raise GovernanceError("diagnostic_inventory_unavailable") from None
+
+
+@contextmanager
+def _inspection(
     *,
     data_root: Path,
     sdk_log_root: Path,
@@ -285,11 +339,17 @@ def inspect_diagnostic_files(
     mode: Literal["propose", "authorized"],
     grants: tuple[RecordGrant, ...] = (),
     budget: InventoryBudget | None = None,
-) -> DiagnosticInventory:
-    """Inspect current files only; absent domains do not prove absent global copies."""
+    on_record=None,
+    on_file=None,
+    artifact=None,
+    artifact_limit=0,
+):
+    """Private shared scan session; callbacks do not weaken the public inventory."""
     data_root, sdk_log_root = _path(data_root), _path(sdk_log_root)
     budget = InventoryBudget() if budget is None else budget
     if not isinstance(budget, InventoryBudget):
+        raise GovernanceError("diagnostic_inventory_budget_invalid")
+    if type(artifact_limit) is not int or not 0 <= artifact_limit <= budget.max_files:
         raise GovernanceError("diagnostic_inventory_budget_invalid")
     try:
         inspector = RecordInspector(
@@ -297,9 +357,17 @@ def inspect_diagnostic_files(
         )
     except (ValueError, TypeError):
         raise GovernanceError("diagnostic_inventory_selection_invalid") from None
-    try:
-        with ExitStack() as stack:
-            scan = _Scan(stack, inspector, budget)
+    with ExitStack() as stack:
+        with _scan_errors():
+            scan = _Scan(
+                stack,
+                inspector,
+                budget,
+                on_record=on_record,
+                on_file=on_file,
+                artifact=artifact,
+                artifact_limit=artifact_limit,
+            )
             pipeline = data_root.joinpath(*_PIPELINE)
             data_fd = scan.open_path(data_root)
             pipeline_fd = data_fd
@@ -327,20 +395,35 @@ def inspect_diagnostic_files(
                 else scan.scan_domain("sdk", sdk_log_root, sdk_fd)
             )
             scan.verify_unchanged()
-            return DiagnosticInventory(
+            result = DiagnosticInventory(
                 (first, second),
                 tuple(scan.files),
                 tuple(sorted(scan.grants)),
                 scan.bytes,
                 scan.records,
             )
-    except GovernanceError:
-        raise
-    except OSError as error:
-        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
-            raise GovernanceError("diagnostic_inventory_path_unsafe") from None
-        if error.errno == errno.ENOENT:
-            raise GovernanceError("diagnostic_inventory_changed") from None
-        raise GovernanceError("diagnostic_inventory_unavailable") from None
-    except ValueError:
-        raise GovernanceError("diagnostic_inventory_unavailable") from None
+        yield result, scan
+
+
+def inspect_diagnostic_files(
+    *,
+    data_root: Path,
+    sdk_log_root: Path,
+    requests: tuple[WriteRequest, ...],
+    mode: Literal["propose", "authorized"],
+    grants: tuple[RecordGrant, ...] = (),
+    budget: InventoryBudget | None = None,
+) -> DiagnosticInventory:
+    """Inspect current files only; absent domains do not prove absent global copies."""
+    with (
+        _scan_errors(),
+        _inspection(
+            data_root=data_root,
+            sdk_log_root=sdk_log_root,
+            requests=requests,
+            mode=mode,
+            grants=grants,
+            budget=budget,
+        ) as (result, _),
+    ):
+        return result

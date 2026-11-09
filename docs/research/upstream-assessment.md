@@ -106,3 +106,5 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 0023 实施上述新输出策略：复用原 wrapper、直接 SQLite/JSONL 入口、SDK 三个 handlers、Core 结构化诊断与文件处理器，在固定入口使用同一封闭元数据投影；不新增日志存储，不改业务正文/模型调用。原有内容开关和 0017 不能防自由字段及异常泄漏，故需要独立且不可降级的 Hub opt-in。SDK legacy 默认、原日志测试及 Core HTTP 日志兼容仍保留。新增真实文件/缓存、handler 并发、活动资源拒绝、初始化中途模块、异常及旧正文恢复负例；详情见 [ADR-0041](../adr/0041-strict-diagnostic-content-policy.md) 和[验证记录](../reviews/2026-11-10-diagnostic-content.md)。已有物理文件的定向清理仍是独立未完成项。
 
 旧文件检查继续复用固定源码的 PipelineLogWriter、SingleLineFormatter、JsonLineFormatter 和 0023 的封闭投影知识；使用这些实际 emitter 生成合成正反例。上游没有治理范围内的具体记录授权与文件恢复协调，因此 Hub 增加只读 record/domain inventory，复用现有 inflight 请求证书并提取无 witness 更新的证明接口。不新增日志后端或上游补丁，不把 request 字段语法当逐行来源签名。物理记录的精确摘要、覆盖预算与后续恢复合同见 [ADR-0042](../adr/0042-diagnostic-file-governance.md)；当前前置接口不执行文件删除。
+
+0024 继续复用固定日志 factory、原 handler 和轮转状态。真实实验证明：文件替换不更新已打开流，标准 handler 关闭后又可能自动打开旧路径；固定上游没有受控的同步维护与失败重绑定合同。因此只新增共享租约、失败封闭状态及流接管，原有 formatter/filters/level 保留。Hub 复用已有只读目录扫描、主签名意图、准入证明与存储租约，增加独立持久执行组件和 staging 恢复，不重建日志服务。原生 192 项、Core 39 项回归通过；范围与兼容性见 [ADR-0043](../adr/0043-diagnostic-physical-execution.md)。产品物理确认与完整恢复路由仍待接通。

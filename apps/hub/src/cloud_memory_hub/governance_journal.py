@@ -84,7 +84,10 @@ class GovernanceJournal:
     initial_version = 1
     requires_admissions_binding = True
 
-    def __init__(self, path: Path, *, instance_id: str, key: bytes):
+    def __init__(self, path: Path, *, instance_id: str, key: bytes, read_only: bool = False):
+        if type(read_only) is not bool:
+            raise GovernanceError("governance_mode_invalid")
+        self.read_only = read_only
         self.path = path.absolute()
         self.instance_id = self._instance(instance_id)
         if not isinstance(key, bytes) or len(key) != 32:
@@ -169,13 +172,18 @@ class GovernanceJournal:
 
     @contextmanager
     def _connection(self, *, writing=False):
+        if writing and self.read_only:
+            raise GovernanceError("governance_journal_read_only")
         try:
             DeviceAccessStore._check_private(self.path.parent, directory=True)
             DeviceAccessStore._check_private(self.path)
-            db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=5)
+            mode = "ro" if self.read_only else "rw"
+            db = sqlite3.connect(self.path.as_uri() + "?mode=" + mode, uri=True, timeout=5)
             db.row_factory = sqlite3.Row
             try:
                 db.execute("PRAGMA synchronous=FULL")
+                if self.read_only:
+                    db.execute("PRAGMA query_only=ON")
                 db.execute("BEGIN IMMEDIATE" if writing else "BEGIN")
                 version = db.execute("PRAGMA user_version").fetchone()[0]
                 row = db.execute("SELECT * FROM binding WHERE id=1").fetchone()
@@ -216,30 +224,73 @@ class GovernanceJournal:
             "value TEXT NOT NULL, signature TEXT NOT NULL)"
         )
 
-    def _admissions_binding(self, db):
+    def _capabilities(self, db):
         if self.schema_version == 1:
-            return None
+            return {}
         rows = db.execute("SELECT * FROM capabilities").fetchall()
-        if not rows:
-            if self.requires_admissions_binding:
+        if not self.requires_admissions_binding:
+            if rows:
                 raise GovernanceError("governance_capability_invalid")
-            return None
-        if len(rows) != 1:
-            raise GovernanceError("governance_capability_invalid")
-        row = rows[0]
-        value = canonical_uuid(row["value"])
-        if row["name"] != "admissions_ledger_id" or not hmac.compare_digest(
-            row["signature"], self._mac("capability", ["admissions_ledger_id", value])
+            return {}
+        names = {row["name"] for row in rows}
+        if len(names) != len(rows) or names not in (
+            {"admissions_ledger_id"},
+            {"admissions_ledger_id", "execution_store_v2"},
         ):
             raise GovernanceError("governance_capability_invalid")
-        return value
+        result = {}
+        for row in rows:
+            try:
+                value = canonical_uuid(row["value"])
+                valid = hmac.compare_digest(
+                    row["signature"], self._mac("capability", [row["name"], value])
+                )
+            except (ValueError, TypeError, AttributeError):
+                valid = False
+            if not valid:
+                raise GovernanceError("governance_capability_invalid")
+            result[row["name"]] = value
+        return result
+
+    def _admissions_binding(self, db):
+        return self._capabilities(db).get("admissions_ledger_id")
 
     def admissions_ledger_id(self):
         with self._connection() as db:
             return self._admissions_binding(db)
 
+    def execution_store_id(self):
+        with self._connection() as db:
+            return self._capabilities(db).get("execution_store_v2")
+
+    def bind_execution_store(self, store_id: str) -> None:
+        """Explicit activation after stopped-writer execution-store validation.
+
+        This capability binds metadata, not a claim of completed deletion.
+        It does not rewrite any intent, head or existing checkpoint.
+        """
+        if self.read_only:
+            raise GovernanceError("governance_journal_read_only")
+        identity = self._instance(store_id)
+        with self._connection(writing=True) as db:
+            self._verify(db)
+            capabilities = self._capabilities(db)
+            if not capabilities.get("admissions_ledger_id"):
+                raise GovernanceError("governance_admissions_binding_required")
+            current = capabilities.get("execution_store_v2")
+            if current is not None:
+                if current != identity:
+                    raise GovernanceError("governance_capability_mismatch")
+                return
+            db.execute(
+                "INSERT INTO capabilities VALUES ('execution_store_v2',?,?)",
+                (identity, self._mac("capability", ["execution_store_v2", identity])),
+            )
+
     def upgrade_v2(self, admissions_ledger_id: str) -> None:
         """Explicit stopped-writer upgrade; preserve every old intent and checkpoint."""
+        if self.read_only:
+            raise GovernanceError("governance_journal_read_only")
         identity = self._instance(admissions_ledger_id)
         with self._connection(writing=True) as db:
             self._verify(db)
@@ -349,6 +400,8 @@ class GovernanceJournal:
         """Typed journals may impose additional transitions inside this transaction."""
 
     def append(self, intent: Intent) -> Checkpoint:
+        if self.read_only:
+            raise GovernanceError("governance_journal_read_only")
         try:
             intent = self.entry_model.model_validate(intent)
         except ValueError:
