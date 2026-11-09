@@ -12,10 +12,15 @@ import importlib
 import json
 import logging
 import os
+import pty
+import select
 import shutil
 import socket
 import subprocess
 import sys
+import termios
+import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import mkdtemp
@@ -65,9 +70,13 @@ def forbid_network():
 def require_installed_sources():
     for name in (
         "cloud_memory_hub.governance_execution_store",
+        "cloud_memory_hub.governance_execution_binding",
+        "cloud_memory_hub.governance_sources",
         "cloud_memory_hub.governance_diagnostic_files",
         "cloud_memory_hub.governance_diagnostic_confirmation",
         "cloud_memory_hub.governance_diagnostic_recovery",
+        "cloud_memory_hub.governance_diagnostic_review",
+        "cloud_memory_hub.governance_diagnostic_requests",
         "cloud_memory_hub.governance_diagnostic_maintenance",
         "cloud_memory_hub.governance_diagnostic_inventory",
         "hy_memory.client",
@@ -539,6 +548,159 @@ def changed_record_phase(root):
         assert (files_at(logs(root)), store.cleanup(state["repair"])) == before
 
 
+def execution_binding_phase(root):
+    from cloud_memory_hub.config import HubConfig
+    from cloud_memory_hub.governance_authority import open_authority
+    from cloud_memory_hub.governance_journal import GovernanceError
+    from cloud_memory_hub.governance_sources import SourceSuppression
+    from cloud_memory_hub.storage_lease import StorageLease
+
+    config, saved = HubConfig.from_environment(), load_state(root)
+    with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        authority = open_authority(config)
+        binding = authority.execution
+        before = binding.read_state()
+        assert binding.version == 2 and len(before.operations) == 3
+        assert before.business_plans == (saved["parent"],)
+        parent = before.operations[saved["parent"]]
+        rules = SourceSuppression(binding)
+        assert rules.execution is binding
+        assert rules.targets(saved["scope"]) == {
+            target
+            for target in parent.intent.targets
+            if target.kind in {"source_record", "content"}
+        }, "probe_repair_polluted_business_rules"
+        pending, planned = authority._pending()
+        assert {item.operation_id for item in pending} == set(before.operations) - {saved["parent"]}
+        assert planned[saved["parent"]][0] == "completed"
+        assert binding.read_state() == before, "probe_binding_read_mutated_progress"
+        try:
+            authority.require_ready()
+        except GovernanceError as error:
+            assert str(error) == "governance_execution_runtime_unsupported"
+        else:
+            raise AssertionError("probe_incomplete_runtime_was_enabled")
+
+
+def _confirm_synthetic_terminal(review, parent_id):
+    """Drive a real PTY for this probe's known synthetic records only."""
+    from cloud_memory_hub.governance_diagnostic_review import confirm_diagnostic_review_tty
+
+    master, slave = pty.openpty()
+    settings = termios.tcgetattr(slave)
+    settings[3] &= ~termios.ECHO
+    termios.tcsetattr(slave, termios.TCSANOW, settings)
+    reader = os.fdopen(os.dup(slave), "r", encoding="utf-8")
+    writer = os.fdopen(os.dup(slave), "w", encoding="utf-8", buffering=1)
+    done, failures = threading.Event(), []
+
+    def drive():
+        output, cursor = bytearray(), 0
+        deadline = time.monotonic() + 20
+        try:
+            while not done.is_set() and time.monotonic() < deadline:
+                if not select.select([master], [], [], 0.05)[0]:
+                    continue
+                output.extend(os.read(master, 65536))
+                assert len(output) < 1024 * 1024, "probe_terminal_output_unbounded"
+                text = output.decode("utf-8", errors="replace")
+                while True:
+                    prompts = (
+                        (text.find("输入 n 查看", cursor), "n"),
+                        (text.find("整条仅属于哪个父操作？", cursor), parent_id),
+                        (text.find("输入 CONFIRM 提交", cursor), "CONFIRM"),
+                    )
+                    available = [(start, answer) for start, answer in prompts if start >= 0]
+                    if not available:
+                        break
+                    start, answer = min(available)
+                    end = text.find("：", start)
+                    if end < 0:
+                        break
+                    cursor = end + 1
+                    os.write(master, (answer + "\n").encode())
+            if not done.is_set():
+                raise AssertionError("probe_terminal_timeout")
+        except BaseException as error:
+            failures.append(type(error).__name__)
+            os.write(master, b"q\n")
+
+    thread = threading.Thread(target=drive, daemon=True)
+    thread.start()
+    try:
+        result = confirm_diagnostic_review_tty(review, reader=reader, writer=writer)
+    finally:
+        done.set()
+        thread.join(timeout=2)
+        reader.close()
+        writer.close()
+        os.close(slave)
+        os.close(master)
+    assert not thread.is_alive() and not failures, "probe_terminal_driver_failed"
+    return result
+
+
+def review_submit_phase(root):
+    from cloud_memory_hub.config import HubConfig
+    from cloud_memory_hub.governance_authority import open_authority
+    from cloud_memory_hub.governance_diagnostic_confirmation import cleanup_to_dict
+    from cloud_memory_hub.governance_diagnostic_review import (
+        review_diagnostic_repairs_locked,
+        submit_diagnostic_repairs_locked,
+    )
+    from cloud_memory_hub.storage_lease import StorageLease
+
+    config, saved = HubConfig.from_environment(), load_state(root)
+    with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        put_files(logs(root), files_at(root / "legacy-fixture"))
+        path = logs(root) / "hy_memory.log"
+        path.write_bytes(path.read_bytes().replace(b"Synthetic", b"Reviewed", 1))
+        authority = open_authority(config)
+        before = authority.execution.read_state()
+        review = review_diagnostic_repairs_locked(config, (saved["parent"],))
+        assert len(review.records) == 6 and not review.origin_proven
+        approval = _confirm_synthetic_terminal(review, saved["parent"])
+        assert len(approval.requests) == 1
+        result = submit_diagnostic_repairs_locked(config, approval.requests, approval=approval)
+        assert len(result) == 1 and result[0].state == "signed"
+        assert result[0].cleanup_state == "pending"
+        after = authority.execution.read_state()
+        assert len(after.operations) == 4
+        assert all(after.operations[key] == value for key, value in before.operations.items())
+        request = approval.requests[0]
+        saved["review_request"] = {
+            "operation_id": request.operation_id,
+            "scope_id": request.scope_id,
+            "selection": cleanup_to_dict(request.selection),
+            "review_digest": request.review_digest,
+        }
+        save_state(root, saved)
+        # Change the physical view after the signed submission. A fresh-process
+        # retry must verify its original immutable request, not demand old bytes.
+        with path.open("ab") as stream:
+            stream.write((root / "safe-tail.bin").read_bytes())
+
+
+def review_retry_phase(root):
+    from cloud_memory_hub.config import HubConfig
+    from cloud_memory_hub.governance_authority import open_authority
+    from cloud_memory_hub.governance_diagnostic_confirmation import cleanup_from_dict
+    from cloud_memory_hub.governance_diagnostic_requests import RepairRequest
+    from cloud_memory_hub.governance_diagnostic_review import submit_diagnostic_repairs_locked
+    from cloud_memory_hub.storage_lease import StorageLease
+
+    config, saved = HubConfig.from_environment(), load_state(root)
+    values = saved["review_request"]
+    request = RepairRequest(**{**values, "selection": cleanup_from_dict(values["selection"])})
+    with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        authority = open_authority(config)
+        before = authority.execution.read_state(), authority.journal.head(saved["scope"])
+        result = submit_diagnostic_repairs_locked(config, (request,))
+        assert result[0].operation_id == request.operation_id and result[0].state == "signed"
+        assert result[0].cleanup_state == "pending"
+        assert (authority.execution.read_state(), authority.journal.head(saved["scope"])) == before
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--installed", action="store_true")
@@ -557,6 +719,9 @@ def main():
             "batch-recover",
             "batch-restore",
             "batch-recover-restored",
+            "execution-binding",
+            "review-submit",
+            "review-retry",
         ),
     )
     parser.add_argument("--root", type=Path)
@@ -587,6 +752,9 @@ def main():
                 "batch-recover-restored": lambda: execute_phase(
                     args.root, restored=True, batch=True
                 ),
+                "execution-binding": lambda: execution_binding_phase(args.root),
+                "review-submit": lambda: review_submit_phase(args.root),
+                "review-retry": lambda: review_retry_phase(args.root),
             }
             actions[args.phase]()
         if args.installed:
@@ -657,6 +825,9 @@ def main():
             "batch-recover",
             "batch-restore",
             "batch-recover-restored",
+            "execution-binding",
+            "review-submit",
+            "review-retry",
         ):
             phase(name)
         print(
@@ -677,6 +848,8 @@ def main():
                     "signed_multi_repair_recovery": True,
                     "legacy_parent_authority_unchanged": True,
                     "batch_interruption_and_restore": True,
+                    "repair_aware_execution_binding": True,
+                    "real_terminal_review_and_signed_retry": True,
                     "whole_purge_completed": False,
                     "external_models": False,
                 },
