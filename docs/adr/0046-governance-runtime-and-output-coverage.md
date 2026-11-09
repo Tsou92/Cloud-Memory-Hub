@@ -12,6 +12,8 @@
 
 增加薄的版本选择与验证视图，复用现有签名校验。Authority、应用抑制读取和 Executor 使用同一选择合同。无 capability 的 schema1 保持原格式；缺库且空主链保持惰性，不创建 schema2。已存在 capability 必须与真实 schema2 binding 精确匹配，缺库、错版本、错 UUID 不回退。schema2 迁移已提交而主 capability 未提交只允许显式维护续做，不放行业务启动。
 
+只有完整核验成功的迁移间隙返回 `governance_execution_migration_required`，替代原启动路径笼统的 `governance_execution_version_unsupported`；损坏库继续返回实际完整性错误。两种情况均不补 capability、不改主链、执行行或身份 witness，不启动 Core。该错误合同变化需同时覆盖合法及损坏间隙的精确码与零写入回归。
+
 每次视图读取均重新核验真实状态，不跨请求缓存已验证摘要。区分两种业务集合：抑制读取保留全部已验证普通计划，包括实际丢弃前的 orphan；恢复执行仅使用实际 committed 的业务操作。repair 不进入业务内容规则、旧任务业务证明或 Purger。原旧 purge 缺失的业务内容证明不能因为排除 repair 而被绕过。
 
 pending 必须包含业务未完成、cleanup 未验证、orphan 和无计划主意图。结构读取不依赖临时运行故障，避免恢复自锁；领取、SDK 写许可及未经过逐记录抑制的 Core 输出继续沿 ADR-0044 阻断。健康例行核验不得抢 SDK 独占、阻断已有 worker 或反复使正常读取失败。
