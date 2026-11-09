@@ -1,6 +1,6 @@
 # ADR-0041：Hub 诊断只输出封闭元数据
 
-日期：2026-11-10。状态：本地实现、回归与独立审查完成，安装/NAS 待执行，见[验证记录](../reviews/2026-11-10-diagnostic-content.md)。关联 FR-10、FR-11、ENG-01；承接 [ADR-0040](0040-diagnostic-write-quiescence.md)。
+日期：2026-11-10。状态：本地实现、独立审查及本地/NAS 隔离安装验收完成，见[验证记录](../reviews/2026-11-10-diagnostic-content.md)。关联 FR-10、FR-11、ENG-01；承接 [ADR-0040](0040-diagnostic-write-quiescence.md)。
 
 ## 问题、复用与边界
 
@@ -51,6 +51,8 @@ Hub 是拥有进程日志配置的独立服务；create_hub 直接调用同样�
 SQLite memory_operations 的 content/reason 同样省略；system_metrics 保留 sys1/sys2 started/completed/failed、vdb/graph 操作计数与 sum_ms，以及原有两类 timing_sums 的闭集。分钟键只允许规范日期时间，合并旧行后再次投影；不修改 write_outcomes、episode_state 等业务恢复内容。可选旧 RequestTracer 直写文件入口在 strict 下明确拒绝，不关闭默认的安全 pipeline 诊断。
 
 旧 tracer 的 span/finish(False) 在进入受控 sink 前仍可能对调用者对象作 str/repr；这沿用原返回/异常行为，不在本补丁改写其业务 trace 结构。严格投影、formatter 与 Core 异常处理自身不执行这些方法；不能把此保证扩称为全部上游调用链均不预渲染任意对象。
+
+Core 结构化 sink 的 strict 入口当前直接投影并入队，未复用旧采样的自由 source/state 组合键。因此显式启用该 sink 后，原三类高频事件会逐条输出，暂不生成旧 300 秒窗口的聚合 count/summed_ms。原队列容量、丢弃报告、轮转、总字节和过期清理仍保留；Hub 默认未配置这个独立 sink。正式启用为日常运行前，应以投影后的封闭键补回采样，并验证计数/耗时聚合；不能宣称严格模式与旧模式日志量相同。
 
 策略激活必须先于加载业务数据；初始化失败保留明确且无正文的错误。缓存资源不能在策略不一致时重复使用。已排入的旧任务不靠重新设置环境变量处理，使用 ADR-0040 的真实任务排空与生命周期边界。
 
