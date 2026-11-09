@@ -120,8 +120,10 @@ async def unrelated_uploads_remain_allowed(app, web, config, headers, event, sou
     unrelated = reimport(event, source, text="Unrelated synthetic project work remains allowed.")
     reply = await web.post("/hub/v1/events", headers=headers, json=unrelated)
     assert reply.status_code == 202, reply.text
-    request_id = f"cmh:{unrelated['instance_id']}:{unrelated['device_id']}:{unrelated['event_id']}"
-    assert app.core.state.memory_write_queue.get(request_id) is not None
+    queue = app.core.state.memory_write_queue
+    frozen = queue.payload_for(reply.json()["receipt_id"])
+    assert frozen is not None
+    assert queue.get(frozen.idempotency_key) is not None
     _, other_headers, _, other = await provision(web, config)
     other["content"] = copy.deepcopy(event["content"])
     reply = await web.post("/hub/v1/events", headers=other_headers, json=other)

@@ -180,7 +180,11 @@ def test_receipt_transaction_failure_replay_recovers_the_same_job_and_original(t
                 assert failed.status_code == 503
                 assert receipt_rows(config) == []
                 queue = app.core.state.memory_write_queue
-                request_id = f"cmh:{raw['instance_id']}:{raw['device_id']}:{raw['event_id']}"
+                with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
+                    request_id = db.execute(
+                        "SELECT idempotency_key FROM memory_write_jobs"
+                    ).fetchone()[0]
+                assert request_id.startswith("cmh2:")
                 job = queue.get(request_id)
                 assert job is not None
                 # Even if Core has already finished and reaped its input, the client

@@ -7,8 +7,14 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from cloud_memory_hub.events import EventEnvelope
 from cloud_memory_hub.governance_inventory import observe_inventory
-from cloud_memory_hub.input_context import InputContext, capture_context, stored_context
+from cloud_memory_hub.input_context import (
+    InputContext,
+    capture_context,
+    context_parents,
+    stored_context,
+)
 from cloud_memory_hub.output_lineage import OutputLineage
 from cloud_memory_hub.productivity_read import record_id
 from cloud_memory_hub.reconcile_graph import stage_id
@@ -24,6 +30,44 @@ from test_output_lineage import accepted, db_rows, fixture, read_memory
 from test_remote_ingest import provision
 from test_remote_read import grant_reads
 from test_sdk_reconcile import sdk_request, seed_sdk
+
+
+@pytest.mark.parametrize("prior_version,current_version", [(1, 1), (1, 2), (2, 1), (2, 2)])
+def test_context_resolves_exact_receipt_birth_and_preserves_legacy(
+    tmp_path, monkeypatch, prior_version, current_version
+):
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            ingest = app.core.state.cmh_ingest
+            enroll = ingest.enroll_request
+            jobs, identities, events = [], [], []
+            for version in (prior_version, current_version):
+                monkeypatch.setattr(ingest, "enroll_request", enroll if version == 2 else None)
+                current = {**event, "event_id": str(uuid4()), "record_id": str(uuid4())}
+                job = await accepted(web, headers, current)
+                frozen = app.core.state.memory_write_queue.payload_for(job)
+                assert frozen.idempotency_key.startswith("cmh2:" if version == 2 else "cmh:")
+                jobs.append(job)
+                identities.append(frozen.idempotency_key)
+                events.append(EventEnvelope.model_validate(current))
+            context = InputContext("productivity", "captured", (identities[0],), "captured", ())
+            with ingest._database() as db:
+                assert context_parents(db, context, events[1]) == {"cmhe:" + jobs[0]}
+                with pytest.raises(ValueError, match="^lineage_context_self_reference$"):
+                    context_parents(
+                        db, replace(context, history_request_ids=(identities[1],)), events[1]
+                    )
+                prior = events[0]
+                alternate = f"cmh2:{prior.instance_id}:{uuid4()}:{prior.device_id}:{prior.event_id}"
+                with pytest.raises(ValueError, match="^lineage_context_original_missing$"):
+                    context_parents(
+                        db, replace(context, history_request_ids=(alternate,)), events[1]
+                    )
+
+    asyncio.run(scenario())
 
 
 def test_actual_history_survives_trace_queue_cleanup_and_process_reopen(tmp_path, monkeypatch):

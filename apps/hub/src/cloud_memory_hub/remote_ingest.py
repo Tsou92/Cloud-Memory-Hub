@@ -21,6 +21,7 @@ from cloud_memory_hub.events import (
     EventError,
     canonical_uuid,
     require_current_filter,
+    require_event_request_identity,
 )
 from cloud_memory_hub.original_archive import (
     ARCHIVE_VERSION,
@@ -74,7 +75,7 @@ class Operation(BaseModel):
     metadata: dict[str, JsonValue] = Field(default_factory=dict, repr=False)
 
 
-def write_request(event: EventEnvelope) -> WriteRequest:
+def write_request(event: EventEnvelope, *, request_id: str | None = None) -> WriteRequest:
     """Deterministic SDK inputs: retry timestamps must never change the job."""
     if event.kind == "conversation_turn":
         content = Conversation.model_validate(event.content)
@@ -86,7 +87,12 @@ def write_request(event: EventEnvelope) -> WriteRequest:
     observed = event.occurred_at or datetime(1970, 1, 1, tzinfo=UTC)
     source = SOURCE_PREFIX + event.source_id
     namespace = f"cmh:{event.instance_id}:{event.scope_id}"
-    request_id = f"cmh:{event.instance_id}:{event.device_id}:{event.event_id}"
+    request_id = require_event_request_identity(
+        f"cmh:{event.instance_id}:{event.device_id}:{event.event_id}"
+        if request_id is None
+        else request_id,
+        event,
+    )
     identity = event.model_dump(mode="json", exclude={"content"})
     records = []
     for index, message in enumerate(messages):
@@ -150,6 +156,7 @@ class RemoteIngest:
         self.suppressed = lambda scope: {}
         self.require_source_allowed = lambda event: None
         self.require_source_rules = lambda scope: None
+        self.enroll_request = None
         with access._connection(writing=True) as db:
             extension = db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='cmh_ingest_schema'"
@@ -358,6 +365,8 @@ class RemoteIngest:
             ):
                 raise AccessError("governance_source_suppressed", 409)
             try:
+                if self.enroll_request is not None:
+                    request = self.enroll_request(db, event)
                 job = queue.submit(request)
             except ValueError:
                 raise AccessError("event_identity_conflict", 409) from None

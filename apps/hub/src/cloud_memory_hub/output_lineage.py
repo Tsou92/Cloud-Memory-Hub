@@ -130,7 +130,7 @@ class OutputLineage:
             if row is None:
                 raise ValueError("lineage_original_missing")
             event = validate_original(row, self.ingest.access.instance_id)
-            rebuilt = write_request(event)
+            rebuilt = write_request(event, request_id=row["request_id"])
             if frozen is not None and frozen.model_dump(
                 exclude=_IGNORED_REQUEST_FIELDS
             ) != rebuilt.model_dump(exclude=_IGNORED_REQUEST_FIELDS):
@@ -177,7 +177,7 @@ class OutputLineage:
             ).fetchone():
                 raise ValueError("lineage_snapshot_purged")
             commit_context(db, job_id, context, event)
-            rebuilt = write_request(event)
+            rebuilt = write_request(event, request_id=row["request_id"])
             request = MemoryTaskRunner.request_for(rebuilt.idempotency_key, rebuilt.input_records)
             commit_inputs(db, job_id, inputs, request)
             commit_chat(db, job_id, chat, request)
@@ -187,7 +187,7 @@ class OutputLineage:
     async def observe(self, job_id, frozen):
         # Core can also hold non-Hub jobs. Only our own instance's events have archives.
         if frozen is not None and not frozen.idempotency_key.startswith(
-            f"cmh:{self.ingest.access.instance_id}:"
+            (f"cmh:{self.ingest.access.instance_id}:", f"cmh2:{self.ingest.access.instance_id}:")
         ):
             return
         if version("hy-memory") != "2.0.5.dev3":

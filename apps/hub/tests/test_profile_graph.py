@@ -81,12 +81,20 @@ async def produce(app, web, config, monkeypatch, *, observe=True):
     return jobs, requests, results, headers, event
 
 
-def test_profile_only_writes_cross_agent_ancestry_restart_and_scope(tmp_path, monkeypatch):
+@pytest.mark.parametrize("version", [1, 2])
+def test_profile_only_writes_cross_agent_ancestry_restart_and_scope(tmp_path, monkeypatch, version):
     config = config_for(tmp_path)
 
     async def scenario():
         async with fixture(config) as (app, web):
+            if version == 1:
+                # Seed authentic pre-admission receipts through the legacy intake path.
+                monkeypatch.setattr(app.core.state.cmh_ingest, "enroll_request", None)
             jobs, requests, results, headers, event = await produce(app, web, config, monkeypatch)
+            assert all(
+                request.request_id.startswith("cmh2:" if version == 2 else "cmh:")
+                for request in requests
+            )
             assert len({request.agent_id for request in requests}) == 3
             assert len({request.user_id for request in requests}) == 1
             with app.core.state.cmh_ingest._database() as db:
@@ -163,7 +171,8 @@ def test_backfill_preserves_old_output_digest_and_does_not_rewrite(tmp_path, mon
 
 
 @pytest.mark.parametrize(
-    "damage", ["origin", "content", "scope", "self", "output", "index", "unavailable", "live"]
+    "damage",
+    ["origin", "birth", "content", "scope", "self", "output", "index", "unavailable", "live"],
 )
 def test_profile_proof_damage_fails_closed(tmp_path, monkeypatch, damage):
     config = config_for(tmp_path)
@@ -176,10 +185,15 @@ def test_profile_proof_damage_fails_closed(tmp_path, monkeypatch, damage):
                 value = copy.deepcopy(stored_profile(db, jobs[1], requests[1]))
             capture = value["capture"]
             item = capture["stages"][0]["inputs"][0]
-            if damage in {"origin", "self"}:
+            if damage in {"origin", "birth", "self"}:
                 item["record"]["origin_request_id"] = (
                     "unknown" if damage == "origin" else requests[1].request_id
                 )
+                if damage == "birth":
+                    parts = requests[0].request_id.split(":")
+                    assert parts[0] == "cmh2"
+                    parts[2] = str(uuid4())
+                    item["record"]["origin_request_id"] = ":".join(parts)
                 item["record"]["origin_digest"] = record_digest("profile", item["record"])
             elif damage == "content":
                 item["record"]["custom"]["basic_info_kv"]["age"] = 99

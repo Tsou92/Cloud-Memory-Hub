@@ -80,6 +80,10 @@ def _json(value):
 
 
 class GovernanceJournal:
+    entry_model = Intent
+    initial_version = 1
+    requires_admissions_binding = True
+
     def __init__(self, path: Path, *, instance_id: str, key: bytes):
         self.path = path.absolute()
         self.instance_id = self._instance(instance_id)
@@ -87,6 +91,7 @@ class GovernanceJournal:
             raise GovernanceError("governance_key_invalid")
         self._key = key
         self.ledger_id = None
+        self.schema_version = None
         with self._connection() as db:
             self._verify(db)
 
@@ -104,7 +109,10 @@ class GovernanceJournal:
             raise GovernanceError("governance_key_invalid")
         path = path.absolute()
         ledger_id = str(uuid4())
-        signature = cls._sign(key, "binding", [instance_id, ledger_id, 1])
+        version = cls.initial_version
+        if version not in {1, 2}:
+            raise GovernanceError("governance_version_unsupported")
+        signature = cls._sign(key, "binding", [instance_id, ledger_id, version])
         try:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             DeviceAccessStore._check_private(path.parent, directory=True)
@@ -133,6 +141,9 @@ class GovernanceJournal:
                 db.execute(
                     "INSERT INTO binding VALUES (1,?,?,?)", (instance_id, ledger_id, signature)
                 )
+                if version == 2:
+                    cls._create_capabilities(db)
+                    db.execute("PRAGMA user_version=2")
                 db.commit()
             # Persist the new directory entry, not just SQLite's journal transaction.
             directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -168,7 +179,7 @@ class GovernanceJournal:
                 db.execute("BEGIN IMMEDIATE" if writing else "BEGIN")
                 version = db.execute("PRAGMA user_version").fetchone()[0]
                 row = db.execute("SELECT * FROM binding WHERE id=1").fetchone()
-                if version != 1:
+                if version not in {1, 2} or self.schema_version not in (None, version):
                     raise GovernanceError("governance_version_unsupported")
                 if (
                     row is None
@@ -176,11 +187,14 @@ class GovernanceJournal:
                     or (self.ledger_id is not None and row["ledger_id"] != self.ledger_id)
                     or not hmac.compare_digest(
                         row["signature"],
-                        self._sign(self._key, "binding", [self.instance_id, row["ledger_id"], 1]),
+                        self._sign(
+                            self._key, "binding", [self.instance_id, row["ledger_id"], version]
+                        ),
                     )
                 ):
                     raise GovernanceError("governance_binding_mismatch")
                 self.ledger_id = canonical_uuid(row["ledger_id"])
+                self.schema_version = version
                 yield db
                 db.commit()
             except BaseException:
@@ -194,6 +208,58 @@ class GovernanceJournal:
             raise GovernanceError("governance_store_unavailable") from None
         except (ValueError, TypeError, KeyError):
             raise GovernanceError("governance_store_corrupt") from None
+
+    @staticmethod
+    def _create_capabilities(db):
+        db.execute(
+            "CREATE TABLE capabilities (name TEXT PRIMARY KEY, "
+            "value TEXT NOT NULL, signature TEXT NOT NULL)"
+        )
+
+    def _admissions_binding(self, db):
+        if self.schema_version == 1:
+            return None
+        rows = db.execute("SELECT * FROM capabilities").fetchall()
+        if not rows:
+            if self.requires_admissions_binding:
+                raise GovernanceError("governance_capability_invalid")
+            return None
+        if len(rows) != 1:
+            raise GovernanceError("governance_capability_invalid")
+        row = rows[0]
+        value = canonical_uuid(row["value"])
+        if row["name"] != "admissions_ledger_id" or not hmac.compare_digest(
+            row["signature"], self._mac("capability", ["admissions_ledger_id", value])
+        ):
+            raise GovernanceError("governance_capability_invalid")
+        return value
+
+    def admissions_ledger_id(self):
+        with self._connection() as db:
+            return self._admissions_binding(db)
+
+    def upgrade_v2(self, admissions_ledger_id: str) -> None:
+        """Explicit stopped-writer upgrade; preserve every old intent and checkpoint."""
+        identity = self._instance(admissions_ledger_id)
+        with self._connection(writing=True) as db:
+            self._verify(db)
+            bound = self._admissions_binding(db)
+            if bound is not None:
+                if bound != identity:
+                    raise GovernanceError("governance_capability_mismatch")
+                return
+            if self.schema_version == 1:
+                self._create_capabilities(db)
+            db.execute(
+                "INSERT INTO capabilities VALUES ('admissions_ledger_id',?,?)",
+                (identity, self._mac("capability", ["admissions_ledger_id", identity])),
+            )
+            db.execute(
+                "UPDATE binding SET signature=? WHERE id=1",
+                (self._sign(self._key, "binding", [self.instance_id, self.ledger_id, 2]),),
+            )
+            db.execute("PRAGMA user_version=2")
+        self.schema_version = 2
 
     def target(self, scope_id, kind: TargetKind, identity: str) -> Target:
         scope_id = self._scope(scope_id)
@@ -216,7 +282,7 @@ class GovernanceJournal:
         return Checkpoint(ledger_id=self.ledger_id, sequence=0, digest=self._mac("zero", [scope]))
 
     def _decode(self, row):
-        intent = Intent.model_validate_json(row["payload"])
+        intent = self.entry_model.model_validate_json(row["payload"])
         payload = _json(intent.model_dump(mode="json"))
         digest = self._mac("intent", [row["sequence"], row["previous_digest"], payload])
         if (
@@ -262,6 +328,7 @@ class GovernanceJournal:
                 raise GovernanceError("governance_head_invalid")
         if count != db.execute("SELECT COUNT(*) FROM intents").fetchone()[0]:
             raise GovernanceError("governance_orphan_intent")
+        self._admissions_binding(db)
 
     def head(self, scope_id):
         scope = self._scope(scope_id)
@@ -278,9 +345,12 @@ class GovernanceJournal:
                 )
             )
 
+    def _check_append(self, db, entry, existing):
+        """Typed journals may impose additional transitions inside this transaction."""
+
     def append(self, intent: Intent) -> Checkpoint:
         try:
-            intent = Intent.model_validate(intent)
+            intent = self.entry_model.model_validate(intent)
         except ValueError:
             raise GovernanceError("governance_intent_invalid") from None
         payload = _json(intent.model_dump(mode="json"))
@@ -288,6 +358,7 @@ class GovernanceJournal:
             existing = db.execute(
                 "SELECT * FROM intents WHERE operation_id=?", (intent.operation_id,)
             ).fetchone()
+            self._check_append(db, intent, existing)
             if existing is not None:
                 self._decode(existing)
                 if existing["payload"] != payload:

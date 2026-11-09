@@ -5,7 +5,7 @@ import json
 from one_memory.memory_server.contracts import WriteRequest
 from one_memory.memory_server.durable_queue import DurableWriteQueue
 
-from cloud_memory_hub.events import EventEnvelope
+from cloud_memory_hub.events import EventEnvelope, require_event_request_identity
 from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.remote_access import AccessError
 
@@ -16,11 +16,11 @@ _IGNORED_REQUEST_FIELDS = {"event_at", "time_quality", "priority"}
 def validate_original(row, instance_id):
     try:
         event = EventEnvelope.model_validate_json(row["payload_json"])
+        require_event_request_identity(row["request_id"], event)
         if (
             event.instance_id != instance_id
             or event.canonical_payload() != row["payload_json"]
             or event.payload_digest() != row["payload_digest"]
-            or row["request_id"] != f"cmh:{instance_id}:{event.device_id}:{event.event_id}"
             or any(
                 getattr(event, key) != row[key]
                 for key in (
@@ -53,7 +53,7 @@ def require_frozen_match(event: EventEnvelope, request: WriteRequest | None) -> 
     try:
         if not isinstance(request, WriteRequest) or not request.input_records:
             raise ValueError("missing_frozen_inputs")
-        rebuilt = write_request(event)
+        rebuilt = write_request(event, request_id=request.idempotency_key)
         if rebuilt.model_dump(exclude=_IGNORED_REQUEST_FIELDS) != request.model_dump(
             exclude=_IGNORED_REQUEST_FIELDS
         ):
@@ -111,6 +111,8 @@ def _recover_original(request, row, instance_id):
     # Missing optional empty objects cannot be guessed. Only exact equality proves
     # recovery; an unprovable old representation requires an original source replay.
     validate_original({**dict(row), "payload_json": event.canonical_payload()}, instance_id)
+    if request.idempotency_key != row["request_id"]:
+        raise AccessError("original_migration_source_unproven", 409)
     require_frozen_match(event, request)
     return event.canonical_payload()
 

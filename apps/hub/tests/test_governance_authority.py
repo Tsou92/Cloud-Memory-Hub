@@ -67,7 +67,7 @@ def test_explicit_migration_preserves_identity_grants_and_credentials(tmp_path):
     authority = activate_authority(config.config_dir, config.governance_dir, config.encryption_key)
     assert authority.access.instance_id == old.instance_id
     assert authority.access.authenticate(credential) == before
-    assert authority.access.schema_version == 2
+    assert authority.access.schema_version == 3
     assert authority.verify() == {}
     # A process that opened version 1 before migration also refuses new operations.
     with pytest.raises(AccessError, match="access_store_changed"):
@@ -136,6 +136,8 @@ def test_partial_initialization_can_resume_only_with_explicit_migration(tmp_path
     with sqlite3.connect(path) as db:
         db.execute("DROP TABLE cmh_governance_binding")
         db.execute("DROP TABLE cmh_governance_floors")
+        db.execute("DROP TABLE cmh_admission_witnesses")
+        db.execute("DROP TABLE cmh_admission_binding")
         db.execute("PRAGMA user_version=1")
     original = (config.governance_dir / "journal.sqlite3").read_bytes()
     with pytest.raises(GovernanceError, match="migration_required"):

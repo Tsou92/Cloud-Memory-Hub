@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from cloud_memory_hub.events import canonical_uuid
+from cloud_memory_hub.events import canonical_uuid, split_request_identity
 from cloud_memory_hub.governance_journal import GovernanceError
 
 
@@ -15,6 +15,7 @@ class RequestIdentity:
     device_id: str
     scope_id: str
     event_id: str
+    birth_id: str | None = None
 
 
 def _uuid(value):
@@ -39,14 +40,11 @@ def verify_request_owner(job, source, *, instance_id, scope_id) -> RequestIdenti
         if source["scope_id"] != scope_id or job["source_key"] != "cmh:" + source_id:
             raise ValueError("source_owner_mismatch")
         request_id = job["idempotency_key"]
-        if not isinstance(request_id, str):
-            raise ValueError("invalid_request_identifier")
-        parts = request_id.split(":")
-        if len(parts) != 4 or parts[:3] != ["cmh", instance_id, device_id]:
+        actual_instance, actual_device, event_id, birth_id = split_request_identity(request_id)
+        if (actual_instance, actual_device) != (instance_id, device_id):
             raise ValueError("request_owner_mismatch")
-        event_id = _uuid(parts[3])
         return RequestIdentity(
-            job_id, request_id, instance_id, source_id, device_id, scope_id, event_id
+            job_id, request_id, instance_id, source_id, device_id, scope_id, event_id, birth_id
         )
     except (ValueError, TypeError, KeyError, IndexError):
         raise GovernanceError("governance_request_owner_unproven") from None
