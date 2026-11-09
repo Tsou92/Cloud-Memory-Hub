@@ -366,18 +366,23 @@ def test_two_request_targets_count_toward_the_existing_total_budget(
     async def scenario():
         async with fixture(config) as (app, web):
             admin, body, _, results, _, _ = await prepare(app, web, config, monkeypatch)
-            capture = governance_execution.capture_sources
+            executor = app.core.state.cmh_executor
+            prepare_inflight = executor.inflight.prepare
 
-            def near_limit(journal, ingest, scope, records):
-                targets = capture(journal, ingest, scope, records)
+            def near_limit(scope):
+                targets = prepare_inflight(scope)
+                # Reserve the two request identity targets while counting the
+                # real in-flight certificates in the same total budget.
+                non_request_count = len(scope.records) + len(scope.rule_targets) + len(targets) - 2
                 return targets + tuple(
-                    journal.target(scope, "source_record", f"synthetic-budget-{index}")
-                    for index in range(before_request_count - len(records) - len(targets))
+                    executor.authority.journal.target(
+                        scope.scope_id, "source_record", f"synthetic-budget-{index}"
+                    )
+                    for index in range(before_request_count - non_request_count)
                 )
 
-            monkeypatch.setattr(governance_execution, "capture_sources", near_limit)
+            monkeypatch.setattr(executor.inflight, "prepare", near_limit)
             reply = await web.post(EXECUTE, headers=admin, json=body)
-            executor = app.core.state.cmh_executor
             if before_request_count == 9998:
                 assert reply.status_code == 200, reply.text
                 assert len(executor.store.operations()[body["operation_id"]][1].targets) == 10_000

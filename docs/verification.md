@@ -85,6 +85,8 @@
 
 同日后续 [内容及任务协调验证](reviews/2026-11-09-content-quiescence.md) 新增内容规则/真实治理、底层 Drain 和 Hub 生命周期测试；G-B 两项已验证修复，预期失败减为 6 项。跨进程治理探针增加换来源与全部 ID、混合消息整事件拒绝，另有独立安装队列合同探针；各自的模拟范围和未完成清扫边界单列。
 
+2026-11-10 在途执行增加 `test_governance_inflight.py`、`test_governance_inflight_integration.py`、`test_inflight_execution_recovery.py`、`test_purge_legacy_targets.py`、`test_purge_request_budget.py` 和 `make probe-inflight-governance`，关联 FR-10、FR-11、ENG-01。原 G-A/G-C 六个预期失败转为实际成功断言；新增非空 SDK 对照、同意图恢复、旧终态兼容、累计正文预算和独立进程仅队列恢复。当前证据及未覆盖旧／已许可任务的限制见[在途执行记录](reviews/2026-11-10-inflight-execution.md)。
+
 同日治理请求重试与实体恢复增加 `test_governance_request_identity.py`、`test_entity_inventory_guard.py`，并扩展安装治理探针的来源修订和同 UUID 重试验证。关联 FR-10、FR-11、ENG-01；请求冲突、日志前后中断、旧操作兼容、实体开关关闭后残留以及旧 planned/completed 操作恢复边界见[本轮记录](reviews/2026-11-09-governance-retry-and-entities.md)。
 
 同轮补充 `test_forget_recovery.py` 9 项与 `test_productivity_forget_guard.py` 20 项：真实旧业务恢复后的下一轮 SDK 提炼输入不再使用已忘记普通原文；生产力范围暂不能停止内部合并输入，须在新执行、重试及旧操作恢复时明确拒绝。安装探针分别覆盖实体副本、生产力拒绝和跨进程组合恢复；保护性拒绝不计作 FR-10 完整能力通过。

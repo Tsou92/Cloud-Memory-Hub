@@ -1,7 +1,8 @@
 """FR-10/FR-11: bounded, read-only queue observations, never SDK effect proof.
 
 The caller supplies an internally verified scope while holding governance,
-drain and intake exclusion. This module has no HTTP or execution integration.
+drain and intake exclusion. The executor consumes these observations, but this
+module neither mutates the queue nor authorizes cancellation.
 Limits bound returned rows and bytes, not SQLite scan time or internal I/O.
 """
 
@@ -163,6 +164,7 @@ class Candidate:
     revision: int | None
     reasons: tuple[str, ...]
     input_digest: str
+    updated_at: str
     sdk_effect: Literal["not_checked"] = field(default="not_checked", init=False)
 
 
@@ -174,6 +176,7 @@ class CandidateInventory:
     ownership_coverage: Literal["complete", "incomplete"]
     usage: CandidateUsage
     scope_nonterminal_job_ids: tuple[str, ...]
+    unmatched_nonterminal_candidates: tuple[Candidate, ...]
 
 
 class _Budget:
@@ -249,12 +252,14 @@ def _reaped_digest(payload):
 
 
 class _Collector:
-    def __init__(self, ingest, scope, journal, budget, db, jobs):
+    def __init__(self, ingest, scope, journal, budget, db, jobs, inputs=None, anchored_only=False):
         self.ingest, self.scope, self.journal = ingest, scope, journal
         self.budget, self.db, self.jobs = _Budget(budget), db, jobs
         self.sources, self.receipts, self.selected = {}, {}, {}
         self.receipts_by_request = {}
         self.blockers, self.confirmed, self.rules = set(), [], []
+        self.unmatched, self.inputs = [], inputs
+        self.anchored_only = anchored_only
         self.nonterminal_jobs = set()
         self.coverage = True
         self.targets = frozenset(scope.rule_targets)
@@ -330,6 +335,9 @@ class _Collector:
     def enumerate(self):
         if content_policy_target(self.journal, self.scope.scope_id) not in self.targets:
             self.block("governance_candidate_rules_unavailable")
+        if self.anchored_only:
+            self.enumerate_anchors()
+            return
         for source in self.rows(
             self.db,
             "cmh_sources",
@@ -345,23 +353,7 @@ class _Collector:
                 self.block("governance_candidate_owner_unproven", ownership=True)
                 continue
             self.sources[source["source_id"]] = source
-        for receipt in self.rows(
-            self.db,
-            "cmh_event_receipts",
-            _RECEIPT,
-            "scope_id=?",
-            (self.scope.scope_id,),
-        ):
-            self.budget.add("receipts")
-            try:
-                canonical_uuid(receipt["receipt_id"])
-                if not isinstance(receipt["request_id"], str):
-                    raise ValueError
-            except (ValueError, TypeError, AttributeError):
-                self.block("governance_candidate_original_unproven", ownership=True)
-                continue
-            self.receipts[receipt["receipt_id"]] = receipt
-            self.receipts_by_request.setdefault(receipt["request_id"], []).append(receipt)
+        self.read_receipts("scope_id=?", (self.scope.scope_id,))
         own_sources = sorted(key for key, row in self.sources.items() if row is not None)
         for offset in range(0, len(own_sources), BATCH_SIZE):
             keys = ["cmh:" + key for key in own_sources[offset : offset + BATCH_SIZE]]
@@ -391,6 +383,41 @@ class _Collector:
             owner = self.owner(job)
             if owner is not None and owner[0].scope_id == self.scope.scope_id:
                 self.select(job)
+
+    def read_receipts(self, where, params):
+        for receipt in self.rows(self.db, "cmh_event_receipts", _RECEIPT, where, params):
+            if receipt["receipt_id"] in self.receipts:
+                continue
+            self.budget.add("receipts")
+            try:
+                canonical_uuid(receipt["receipt_id"])
+                if not isinstance(receipt["request_id"], str):
+                    raise ValueError
+            except (ValueError, TypeError, AttributeError):
+                self.block("governance_candidate_original_unproven", ownership=True)
+                continue
+            self.receipts[receipt["receipt_id"]] = receipt
+            self.receipts_by_request.setdefault(receipt["request_id"], []).append(receipt)
+
+    def enumerate_anchors(self):
+        """Completed replay checks only its signed jobs, not later scope activity."""
+        anchors = {key[len(PREFIX) :] for key in self.scope.records if key.startswith(PREFIX)}
+        self.exact_jobs("job_id", anchors)
+        for column, identities in (
+            ("receipt_id", anchors),
+            (
+                "request_id",
+                {
+                    job["idempotency_key"]
+                    for job in self.selected.values()
+                    if isinstance(job["idempotency_key"], str)
+                },
+            ),
+        ):
+            identities = sorted(identities)
+            for offset in range(0, len(identities), BATCH_SIZE):
+                chunk = identities[offset : offset + BATCH_SIZE]
+                self.read_receipts(f"{column} IN ({','.join('?' * len(chunk))})", chunk)
 
     def exact_jobs(self, column, values):
         values = sorted(values)
@@ -452,6 +479,7 @@ class _Collector:
         except (ValueError, TypeError, AccessError):
             self.block("governance_candidate_original_unproven", identity.job_id)
             return
+        retained_original = event
         state = job["state"]
         if state not in _VALID_JOB_STATES or state in {UNKNOWN, "accepted"}:
             self.block("governance_candidate_state_unproven", identity.job_id)
@@ -460,6 +488,10 @@ class _Collector:
         if type(job["hy_invoked"]) is not int or job["hy_invoked"] not in {0, 1}:
             self.block("governance_candidate_state_unproven", identity.job_id)
             return
+        if not isinstance(job["updated_at"], str) or not job["updated_at"]:
+            self.block("governance_candidate_state_unproven", identity.job_id)
+            return
+        request = None
         try:
             payload = _payload(self.jobs, "memory_write_jobs", job["scan_rowid"], self.budget)
             reaped = _reaped_digest(payload)
@@ -502,7 +534,7 @@ class _Collector:
                 reasons.add("source_record")
             if text_rules & self.targets:
                 reasons.add("content")
-        if not reasons:
+        if not reasons and state in _TERMINAL_WRITE_STATES:
             return
         candidate = Candidate(
             job_id=identity.job_id,
@@ -520,8 +552,17 @@ class _Collector:
             revision=event.revision if event else None,
             reasons=tuple(sorted(reasons)),
             input_digest=digest,
+            updated_at=job["updated_at"],
         )
-        (self.confirmed if confirmed else self.rules).append(candidate)
+        destination = self.confirmed if confirmed else self.rules if reasons else self.unmatched
+        destination.append(candidate)
+        if self.inputs is not None:
+            if event is not None and request is not None:
+                self.inputs[candidate.job_id] = (event, request)
+            elif retained_original is not None:
+                # A validated receipt can supply residual-text checks after
+                # reaping, but without frozen input it is no admission proof.
+                self.inputs[candidate.job_id] = (retained_original, None)
 
     def check_rules(self, event, job_id):
         expected = {source_target(self.journal, event), *content_targets(self.journal, event)}
@@ -539,11 +580,30 @@ class _Collector:
             "complete" if self.coverage else "incomplete",
             CandidateUsage(**self.budget.values),
             tuple(sorted(self.nonterminal_jobs)),
+            tuple(self.unmatched),
         )
 
 
 def collect_inflight_candidates(ingest, scope, *, journal, budget=None):
     """Observe only; the caller establishes scope authority and writer exclusion."""
+    return _collect(ingest, scope, journal=journal, budget=budget)
+
+
+def collect_inflight_evidence(ingest, scope, *, journal, budget=None, anchored_only=False):
+    """Internal planner input: retain only already-budgeted, validated frozen inputs.
+
+    The separate ephemeral mapping is never part of CandidateInventory or a
+    response. Its caller must discard it after verifying admission; this does
+    not turn queue ownership into SDK-effect proof.
+    """
+    inputs = {}
+    inventory = _collect(
+        ingest, scope, journal=journal, budget=budget, inputs=inputs, anchored_only=anchored_only
+    )
+    return inventory, inputs
+
+
+def _collect(ingest, scope, *, journal, budget=None, inputs=None, anchored_only=False):
     if budget is None:
         budget = CandidateBudget()
     if not isinstance(scope, ConfirmedScope) or not isinstance(budget, CandidateBudget):
@@ -555,7 +615,9 @@ def collect_inflight_candidates(ingest, scope, *, journal, budget=None):
             with main_database(queue.database_path).read(row_factory=sqlite3.Row) as jobs:
                 jobs.execute("BEGIN")
                 try:
-                    return _Collector(ingest, scope, journal, budget, db, jobs).collect()
+                    return _Collector(
+                        ingest, scope, journal, budget, db, jobs, inputs, anchored_only
+                    ).collect()
                 finally:
                     jobs.rollback()
     except (sqlite3.Error, AccessError, OSError):

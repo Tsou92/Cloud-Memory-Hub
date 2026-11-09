@@ -16,6 +16,7 @@ from hy_memory.data.vector_store_chroma import _run_in_vdb_pool
 from one_memory.hy_memory_bridge import _joined_thread
 from pydantic import ConfigDict, Field, ValidationError, field_validator
 
+from cloud_memory_hub.governance_candidates import ConfirmedScope
 from cloud_memory_hub.governance_inventory import observe_inventory, require_modeled_scope
 from cloud_memory_hub.governance_journal import GovernanceError, Intent
 from cloud_memory_hub.governance_plan import PreviewRequest, plan_relations
@@ -164,6 +165,12 @@ class ExecutionStore:
             for row in self._rows("SELECT * FROM suppressed WHERE operation_id=?", (operation_id,))
         )
 
+    def record_kinds(self, operation_id):
+        return {
+            row["record_id"]: row["kind"]
+            for row in self._rows("SELECT * FROM suppressed WHERE operation_id=?", (operation_id,))
+        }
+
     def plan(self, intent, records):
         payload = intent.model_dump_json()
         with self._connection(writing=True) as db:
@@ -215,7 +222,7 @@ class ExecutionStore:
 
 def pending_operations(journal, store):
     """Journal intents the execution store has not finished."""
-    done = {key: state for key, (state, _) in store.operations().items()}
+    operations = store.operations()
     pending = []
     for scope in journal.scopes():
         cursor = None
@@ -223,7 +230,10 @@ def pending_operations(journal, store):
             page = journal.changes(scope, after=cursor, limit=1000)
             for entry in page["entries"]:
                 intent = Intent.model_validate(entry["intent"])
-                if done.get(intent.operation_id) != "completed":
+                known = operations.get(intent.operation_id)
+                if known is not None and known[1] != intent:
+                    raise GovernanceError("governance_execution_tampered")
+                if known is None or known[0] != "completed":
                     pending.append(intent)
             cursor = page["cursor"]
             if not page["has_more"]:
@@ -233,10 +243,20 @@ def pending_operations(journal, store):
 
 class GovernanceExecutor:
     def __init__(
-        self, authority, bridge, previews, admission, lineage=None, purger=None, drain=None
+        self,
+        authority,
+        bridge,
+        previews,
+        admission,
+        lineage=None,
+        purger=None,
+        drain=None,
+        *,
+        inflight,
     ):
         self.purger = purger
         self.drain = drain
+        self.inflight = inflight
         self.ready = False
         self._replayed = False
         self._resume_lock = asyncio.Lock()
@@ -274,6 +294,7 @@ class GovernanceExecutor:
                 "governance_operation_request_unproven": 409,
                 "governance_reference_unresolved": 409,
                 "governance_scan_limit": 409,
+                "governance_inflight_preview_changed": 409,
             }.get(code, 503)
             raise AccessError(code, status) from None
         except AccessError:
@@ -318,19 +339,67 @@ class GovernanceExecutor:
         except Exception:
             raise GovernanceError("governance_suppression_incomplete") from None
 
+    def _operation_scope(self, intent):
+        # A signed execution plan alone may have been persisted before append.
+        # Verify the actual journal entry and its exact confirmed ID set before
+        # using it as authority to cancel or erase a queue input.
+        self.authority.verify()
+        journal = self.authority.journal
+        with journal._connection() as db:
+            row = db.execute(
+                "SELECT * FROM intents WHERE operation_id=?", (intent.operation_id,)
+            ).fetchone()
+            if row is None or journal._decode(row) != intent:
+                raise GovernanceError("governance_operation_uncommitted")
+        records = self.store.record_kinds(intent.operation_id)
+        expected = {target for target in intent.targets if target.kind in {"raw", "memory"}}
+        actual = {
+            journal.target(intent.scope_id, kind, identity) for identity, kind in records.items()
+        }
+        if actual != expected:
+            raise GovernanceError("governance_execution_tampered")
+        return ConfirmedScope(
+            intent.scope_id,
+            intent.action,
+            records,
+            intent.targets,
+            "operation",
+            operation_id=intent.operation_id,
+        )
+
+    def _apply_inflight(self, intent, *, completed=False):
+        scope = self._operation_scope(intent)
+        try:
+            return self.inflight.apply(scope, completed=completed)
+        except GovernanceError as error:
+            if str(error) != "governance_inflight_legacy_unavailable":
+                raise
+        # Older completed operations have no birth/digest certificate. Keep
+        # their original scope and normal terminal-only retention semantics;
+        # never manufacture a new cancellation proof or touch nonterminal work.
+        targets = self.purger.legacy_terminal_targets(scope.records, scope_id=intent.scope_id)
+        if not completed and len(targets) != sum(
+            identity.startswith("cmhe:") for identity in scope.records
+        ):
+            raise GovernanceError("governance_inflight_effect_unproven")
+        return targets
+
     async def _finish(self, intent, records, contents=()):
         if intent.action == "forget":
             require_forget_supported(records)
         await require_modeled_scope(
             self.bridge(), f"cmh:{self.authority.access.instance_id}:{intent.scope_id}"
         )
+        payload_targets = await _joined_thread(self._apply_inflight, intent)
         native = [i for i in records if not i.startswith(RESERVED_PREFIXES)]
         if intent.action == "purge":
             # Suppression rows stay: they are the durable rule that blocks
             # re-extraction and re-import after the content itself is gone.
             # contents is only available in the executing process; a resumed
             # purge is verified by ID absence through the same idempotent steps.
-            await self.purger.run(records, contents, scope_id=intent.scope_id)
+            await self.purger.run(
+                records, contents, scope_id=intent.scope_id, payload_targets=payload_targets
+            )
         else:
             # Hub-owned identities (originals, input snapshots) have no SDK node;
             # the Hub suppression table alone governs them.
@@ -338,6 +407,21 @@ class GovernanceExecutor:
                 await self.bridge()._get_client(), native, scope_id=intent.scope_id
             )
         await _joined_thread(self.store.complete, intent)
+
+    async def _replay_completed(self, intent, records):
+        payload_targets = await _joined_thread(self._apply_inflight, intent, completed=True)
+        if intent.action == "forget":
+            native = [
+                identity for identity in records if not identity.startswith(RESERVED_PREFIXES)
+            ]
+            await self._suppress_sdk(
+                await self.bridge()._get_client(), native, scope_id=intent.scope_id
+            )
+        elif self.purger is not None:
+            if payload_targets or await self.purger.present(records, scope_id=intent.scope_id):
+                await self.purger.run(
+                    records, (), scope_id=intent.scope_id, payload_targets=payload_targets
+                )
 
     async def replay_purges(self):
         """Reapply completed forgets and purges after business restores (ADR-0032).
@@ -374,14 +458,7 @@ class GovernanceExecutor:
                 if state != "completed":
                     continue
                 records = await _joined_thread(self.store.records, operation_id)
-                if intent.action == "forget":
-                    native = [i for i in records if not i.startswith(RESERVED_PREFIXES)]
-                    await self._suppress_sdk(
-                        await self.bridge()._get_client(), native, scope_id=intent.scope_id
-                    )
-                elif self.purger is not None:
-                    if await self.purger.present(records, scope_id=intent.scope_id):
-                        await self.purger.run(records, (), scope_id=intent.scope_id)
+                await self._replay_completed(intent, records)
             if self.purger is not None:
                 self._replayed = True
 
@@ -394,6 +471,21 @@ class GovernanceExecutor:
             self.ready = True
 
     async def _resume(self):
+        planned = await _joined_thread(self.store.operations)
+        if any(state == "planned" for state, _ in planned.values()):
+            # Orphan plans never became deletion authority. Remove them before
+            # observing SDK stores; an unsupported old scope cannot trap an
+            # uncommitted plan in startup forever.
+            async with self._exclusive():
+                pending = {
+                    intent.operation_id
+                    for intent in await _joined_thread(
+                        pending_operations, self.authority.journal, self.store
+                    )
+                }
+                for operation_id, (state, _) in planned.items():
+                    if state == "planned" and operation_id not in pending:
+                        await _joined_thread(self.store.discard, operation_id)
         await self.replay_purges()
         planned = await _joined_thread(self.store.operations)
         if all(state == "completed" for state, _ in planned.values()):
@@ -439,6 +531,12 @@ class GovernanceExecutor:
                     records = await _joined_thread(self.store.records, intent.operation_id)
                     if intent.action == "forget":
                         require_forget_supported(records)
+                    async with self._exclusive():
+                        await require_modeled_scope(
+                            self.bridge(),
+                            f"cmh:{self.authority.access.instance_id}:{intent.scope_id}",
+                        )
+                        await self._replay_completed(intent, records)
                     return {
                         "operation_id": intent.operation_id,
                         "scope_id": intent.scope_id,
@@ -481,6 +579,17 @@ class GovernanceExecutor:
                 capture_sources, journal, self.lineage.ingest, request.scope_id, records
             )
             rules = sources + request_targets(journal, request, actor_id)
+            rules += await _joined_thread(
+                self.inflight.prepare,
+                ConfirmedScope(
+                    request.scope_id,
+                    request.action,
+                    records,
+                    rules,
+                    "preview",
+                    view_digest=request.expected_view,
+                ),
+            )
             if len(records) + len(rules) > MAX_TARGETS:
                 raise GovernanceError("governance_scan_limit")
             intent = Intent(
