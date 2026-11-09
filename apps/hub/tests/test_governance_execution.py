@@ -1,6 +1,7 @@
 """Forget execution (ADR-0032 slice 1) on the real SDK, Hub stores and HTTP."""
 
 import asyncio
+import json
 import sqlite3
 from uuid import uuid4
 
@@ -11,11 +12,20 @@ from cloud_memory_hub.governance_execution import ExecutionStore, pending_operat
 from cloud_memory_hub.governance_journal import GovernanceError, Intent
 from hy_memory.agent.mem_agent import AgentResult, MemAgent
 from one_memory.api import _sdk_library_bridge
-from one_memory.hy_memory_bridge import _joined_thread
+from one_memory.hy_memory_bridge import HyMemoryIngestResult, HyMemoryOutput, _joined_thread
+from one_memory.memory_server.durable_queue import (
+    CANCELLED,
+    COMPLETED,
+    PENDING,
+    RUNNING,
+    DurableWriteDrain,
+)
 from test_chat_graph import produce
 from test_original_archive import config_for
-from test_output_lineage import fixture
+from test_output_lineage import accepted, fixture
+from test_remote_ingest import provision
 from test_remote_read import grant_reads
+from test_sdk_reconcile import sdk_request
 
 PREVIEW, EXECUTE = "/hub/v1/governance/preview", "/hub/v1/governance/execute"
 
@@ -586,6 +596,321 @@ def test_restored_old_data_replays_completed_purge_before_serving(tmp_path, monk
             assert (await read(web, headers, scope, "memories", fact)).status_code == 404
             assert (await read(web, headers, scope, "history", last)).status_code == 404
         assert scan(tmp_path, "Synthetic fact 3") == []
+
+    asyncio.run(scenario())
+
+
+class InflightResurrection(AssertionError):
+    """Only the confirmed ADR-0034 gap is an expected failure."""
+
+
+async def inflight_writer(app, monkeypatch):
+    """Real SDK/queue/observer; replace model and profile-dependent supervisor only.
+
+    The drain's production source authorization and durable invocation marker
+    still run. This is not a paid-model or full supervisor integration test.
+    """
+    queue = app.core.state.memory_write_queue
+    bridge = _sdk_library_bridge(app.core)
+    sdk = await bridge._get_client()
+    outputs = []
+
+    async def agent(self, **kwargs):
+        return AgentResult(
+            success=True,
+            extracted_info={"memory": [{"content": "Synthetic inflight resurrection fact"}]},
+        )
+
+    async def process(records, *, request_id, before_hy_invocation):
+        async with bridge.exclusive_access():
+            await before_hy_invocation()
+            job = queue.get(request_id)
+            request = sdk_request(queue.payload_for(job.job_id))
+            result = await _joined_thread(
+                sdk.add,
+                [turn.model_dump() for turn in request.turns],
+                user_id=request.user_id,
+                agent_id=request.agent_id,
+                session_id=request.session_id,
+                source=request.source_id,
+                request_id=request.request_id,
+                scene="chat",
+            )
+            assert result["success"] and len(result["memory_ids"]) == 1
+            outputs.extend(result["memory_ids"])
+            return HyMemoryIngestResult(
+                success=True,
+                raw_ids=(result["memory_id"],),
+                memories=tuple(
+                    HyMemoryOutput(
+                        memory_id=identity, content="Synthetic inflight resurrection fact"
+                    )
+                    for identity in result["memory_ids"]
+                ),
+            )
+
+    monkeypatch.setattr(MemAgent, "process_add", agent)
+    monkeypatch.setattr("hy_memory.pipelines.writer._RECONCILE_ENABLED", False)
+    monkeypatch.setattr(app.core.state.memory_processing_supervisor, "process_sdk_job", process)
+    return outputs
+
+
+async def assert_inflight_is_not_extracted(app, monkeypatch, job):
+    """The final assertion alone is expected to fail while ADR-0034 is open."""
+    queue = app.core.state.memory_write_queue
+    frozen = queue.payload_for(job)
+    outputs = await inflight_writer(app, monkeypatch)
+    assert queue.get(frozen.idempotency_key).state == PENDING
+    queue.settle(job, state=RUNNING, hy_invoked=False)
+    await app.core.state.memory_write_drain.execute(job)
+    # Check real stored SDK nodes, not just the synthetic model invocation.
+    for identity in outputs:
+        assert await sdk_status(app, identity) == ("active", True)
+    state = queue.get(frozen.idempotency_key).state
+    print(f"ADR-0034 drain outcome: state={state}, active_sdk_memories={len(outputs)}")
+    if outputs:
+        raise InflightResurrection("ADR-0034: governed pending job wrote active SDK memory")
+
+
+@pytest.mark.xfail(strict=True, raises=InflightResurrection, reason="ADR-0034 G-A: pending job")
+@pytest.mark.parametrize("action", ["forget", "purge"])
+@pytest.mark.parametrize("revision", [1, 2])
+def test_inflight_pending_job_survives_completed_governance(
+    tmp_path, monkeypatch, action, revision
+):
+    """V1/G-A: exact original and a same-source, out-of-scope revision."""
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            admin, headers, _, event = await provision(web, config)
+            await grant_reads(
+                web, admin, event, permissions=("events:write", "memory:read", "history:read")
+            )
+            first = await accepted(web, headers, event)
+            job = first
+            if revision == 2:
+                job = await accepted(
+                    web, headers, {**event, "event_id": str(uuid4()), "revision": 2}
+                )
+            body = {
+                "scope_id": event["scope_id"],
+                "action": action,
+                "record_ids": ["cmhe:" + first],
+            }
+            view = await web.post(PREVIEW, headers=admin, json=body)
+            assert view.status_code == 200, view.text
+            if revision == 2:
+                assert "cmhe:" + job not in {item["record_id"] for item in view.json()["items"]}
+            reply = await web.post(
+                EXECUTE, headers=admin, json={**body, "expected_view": view.json()["view_digest"]}
+            )
+            assert reply.status_code == 200, reply.text
+            assert reply.json()["state"] == "completed"
+            if action == "purge" and revision == 1:
+                assert (
+                    await read(web, headers, event["scope_id"], "history", "cmhe:" + job)
+                ).status_code == 404
+                # Purge currently claims completion while queue plaintext survives.
+                with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
+                    payload = db.execute(
+                        "SELECT payload_json FROM memory_write_jobs WHERE job_id=?", (job,)
+                    ).fetchone()[0]
+                stored = json.loads(payload)
+                assert (
+                    event["content"]["messages"][0]["text"]
+                    in stored["input_records"][0]["verbatim"]
+                )
+            await assert_inflight_is_not_extracted(app, monkeypatch, job)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.xfail(strict=True, raises=InflightResurrection, reason="ADR-0034 G-B: admission race")
+@pytest.mark.parametrize("action", ["forget", "purge"])
+def test_inflight_acceptance_between_source_capture_and_plan(tmp_path, monkeypatch, action):
+    """V2/G-B: actual HTTP admission while execution owns the SDK barrier."""
+    from cloud_memory_hub import governance_execution
+
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            admin, headers, _, event = await provision(web, config)
+            first = await accepted(web, headers, event)
+            body = {
+                "scope_id": event["scope_id"],
+                "action": action,
+                "record_ids": ["cmhe:" + first],
+            }
+            view = await web.post(PREVIEW, headers=admin, json=body)
+            assert view.status_code == 200, view.text
+            loop = asyncio.get_running_loop()
+            capture = governance_execution.capture_sources
+            admitted = []
+
+            def capture_then_accept(*args):
+                targets = capture(*args)
+                revised = {**event, "event_id": str(uuid4()), "revision": 2}
+                # capture_sources runs in a thread; HTTP runs on the owning loop.
+                admitted.append(
+                    asyncio.run_coroutine_threadsafe(accepted(web, headers, revised), loop).result(
+                        10
+                    )
+                )
+                return targets
+
+            monkeypatch.setattr(governance_execution, "capture_sources", capture_then_accept)
+            reply = await web.post(
+                EXECUTE, headers=admin, json={**body, "expected_view": view.json()["view_digest"]}
+            )
+            assert reply.status_code == 200, reply.text
+            assert reply.json()["state"] == "completed" and len(admitted) == 1
+            # Control: an admission after the plan is rejected, not queued.
+            denied = await web.post(
+                "/hub/v1/events",
+                headers=headers,
+                json={**event, "event_id": str(uuid4()), "revision": 3},
+            )
+            assert (denied.status_code, denied.json()["detail"]) == (
+                409,
+                "governance_source_suppressed",
+            )
+            await assert_inflight_is_not_extracted(app, monkeypatch, admitted[0])
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.xfail(strict=True, raises=InflightResurrection, reason="ADR-0034 G-C: restored queue")
+@pytest.mark.parametrize("action", ["forget", "purge"])
+def test_inflight_old_queue_backup_survives_governance_restart(tmp_path, monkeypatch, action):
+    """V3/G-C: restore only the business SQLite queue, retain newer governance."""
+    config = config_for(tmp_path)
+
+    async def scenario(backup):
+        async with fixture(config) as (app, web):
+            admin, headers, _, event = await provision(web, config)
+            first = await accepted(web, headers, event)
+            body = {
+                "scope_id": event["scope_id"],
+                "action": action,
+                "record_ids": ["cmhe:" + first],
+            }
+            with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as source:
+                source.backup(backup)
+            view = await web.post(PREVIEW, headers=admin, json=body)
+            assert view.status_code == 200, view.text
+            reply = await web.post(
+                EXECUTE, headers=admin, json={**body, "expected_view": view.json()["view_digest"]}
+            )
+            assert reply.status_code == 200, reply.text
+            operation = reply.json()["operation_id"]
+        # Closed service; no file deletion, WAL copying or Chroma cache reset.
+        with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as restored:
+            backup.backup(restored)
+        async with fixture(config) as (app, web):
+            await app.core.state.cmh_executor.resume()
+            store = app.core.state.cmh_executor.store
+            assert store.operations()[operation][0] == "completed"
+            await assert_inflight_is_not_extracted(app, monkeypatch, first)
+
+    with sqlite3.connect(":memory:") as backup:
+        asyncio.run(scenario(backup))
+
+
+@pytest.mark.parametrize("state", [PENDING, "waiting_for_permission", "waiting_for_model", RUNNING])
+def test_inflight_upstream_ownerless_settle_cancels_uninvoked_jobs(tmp_path, state):
+    """ADR-0034 upstream contract, including a genuinely leased running row."""
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            queue = app.core.state.memory_write_queue
+            request_id = queue.payload_for(job).idempotency_key
+            # Contract test isolates claim/lease SQL from model-profile readiness.
+            drain = DurableWriteDrain(
+                queue,
+                execute=app.core.state.memory_write_drain.execute,
+                source_writes_permitted=lambda source: True,
+                source_claim_enabled=lambda source: True,
+            )
+            owner = drain.owner
+            if state == RUNNING:
+                claimed = drain.claim(limit=1)
+                assert claimed == (job,)
+            else:
+                queue.settle(job, state=state, hy_invoked=False)
+            with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
+                before = db.execute(
+                    "SELECT state,hy_invoked,lease_owner FROM memory_write_jobs WHERE job_id=?",
+                    (job,),
+                ).fetchone()
+            assert before[:2] == (state, 0)
+            if state == RUNNING:
+                assert before[2] == owner
+            queue.settle(
+                job, state=CANCELLED, error_code="governance_source_suppressed", hy_invoked=False
+            )
+            assert queue.get(request_id).state == CANCELLED
+            # Stale worker cannot overwrite cancellation or cross invocation marker.
+            assert not queue.mark_invoked(job, owner=owner)
+            queue.settle(job, state=COMPLETED, owner=owner)
+            assert queue.get(request_id).state == CANCELLED
+            assert queue.clear_terminal_payloads() == 1
+            assert queue.payload_for(job) is None
+            print(f"ADR-0034 settle: {before} -> cancelled; payload cleared")
+
+    asyncio.run(scenario())
+
+
+def test_inflight_worker_during_sdk_exclusive_records_actual_outcome(tmp_path, monkeypatch):
+    """Pin observed behavior, not the ADR's unverified pending assumption."""
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            _, headers, _, event = await provision(web, config)
+            job = await accepted(web, headers, event)
+            queue = app.core.state.memory_write_queue
+            request_id = queue.payload_for(job).idempotency_key
+            supervisor = app.core.state.memory_processing_supervisor
+            bridge = _sdk_library_bridge(app.core)
+            sdk = await bridge._get_client()
+            calls = []
+
+            def no_model(*args, **kwargs):
+                calls.append(True)
+                pytest.fail("maintenance must stop before any SDK write")
+
+            async def credentials():
+                return (None, None)
+
+            # Keep the native supervisor, source checks, prepare and bridge guard;
+            # only bypass profile lookup, with the already-open local bridge.
+            monkeypatch.setattr(supervisor, "_active_credentials", credentials)
+            monkeypatch.setattr(supervisor, "_bridge", lambda *a, **k: bridge)
+            monkeypatch.setattr(sdk, "add", no_model)
+            queue.settle(job, state=RUNNING, hy_invoked=False)
+            async with app.core.state.cmh_sdk_admission.exclusive():
+                # Separate task: exclusive owner itself is intentionally reentrant.
+                await asyncio.create_task(app.core.state.memory_write_drain.execute(job))
+            actual = queue.get(request_id)
+            assert calls == []
+            assert actual.state == "unknown"
+            assert actual.detail == "hy_memory_maintenance_in_progress"
+            with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
+                assert db.execute(
+                    "SELECT hy_invoked FROM memory_write_jobs WHERE job_id=?", (job,)
+                ).fetchone() == (1,)
+            print(
+                f"ADR-0034 maintenance: state={actual.state}, detail={actual.detail}, hy_invoked=1"
+            )
+            assert await bridge.get_sdk_write_outcome(request_id) is None
+            assert await app.core.state.cmh_reconciler.run() == 0
+            assert queue.get(request_id).state == "unknown"
+            print("ADR-0034 reconcile: absent SDK outcome -> unknown (not requeued)")
 
     asyncio.run(scenario())
 
