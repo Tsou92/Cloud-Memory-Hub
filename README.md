@@ -78,6 +78,7 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 | 原生写入副作用 | [请求级观察与后续持久证书](docs/adr/0039-sdk-write-effect-observation.md) · [诊断副本恢复与验证](docs/reviews/2026-11-10-write-effects.md)；观察字段不授予删除权限 |
 | 诊断后台写入 | [暂停、排空与关闭设计](docs/adr/0040-diagnostic-write-quiescence.md) · [回归及安装记录](docs/reviews/2026-11-10-diagnostic-quiescence.md)；不代替已有文件清理 |
 | 诊断正文策略 | [Hub 严格元数据与 SDK 兼容](docs/adr/0041-strict-diagnostic-content-policy.md) · [真实出口及并发验证](docs/reviews/2026-11-10-diagnostic-content.md)；旧物理日志仍待治理 |
+| 旧诊断文件范围 | [只读证明、精确记录与恢复合同](docs/adr/0042-diagnostic-file-governance.md) · [本步验证](docs/reviews/2026-11-10-diagnostic-inventory.md)；尚未执行物理清理 |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 

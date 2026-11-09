@@ -6,6 +6,7 @@ particular, unrelated live work cannot certify a native-only deletion scope.
 """
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -13,7 +14,7 @@ from one_memory.memory_processing import sdk_generation_input_for
 from one_memory.memory_server.durable_queue import _TERMINAL_WRITE_STATES, UNKNOWN
 
 from cloud_memory_hub.governance_candidates import ConfirmedScope, collect_inflight_evidence
-from cloud_memory_hub.governance_journal import GovernanceError, _json
+from cloud_memory_hub.governance_journal import GovernanceError, Target, _json
 from cloud_memory_hub.governance_sources import MAX_TARGETS
 from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.remote_ingest import Conversation, Operation
@@ -27,6 +28,22 @@ class PayloadTarget:
     input_digest: str
     disposition: Literal["cancel_unpermitted", "terminal_cleanup"] = "terminal_cleanup"
     message_texts: tuple[str, ...] = field(default=(), repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupSelector:
+    """Metadata for a whole confirmed input, not independent deletion authority."""
+
+    job_id: str
+    request_id: str
+    input_digest: str
+    disposition: Literal["cancel_unpermitted", "terminal_cleanup"]
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupPreparation:
+    selectors: tuple[CleanupSelector, ...]
+    rule_targets: tuple[Target, ...]
 
 
 def _message_texts(inputs, candidate):
@@ -154,7 +171,7 @@ class InflightGovernance:
             dispositions,
         )
 
-    def _prove_live(self, db, inventory, inputs, dispositions):
+    def _prove_live(self, db, inventory, inputs, dispositions, *, refresh_witness=True):
         candidates = (
             *inventory.confirmed_original_candidates,
             *inventory.unmatched_nonterminal_candidates,
@@ -178,7 +195,13 @@ class InflightGovernance:
                 actual = sdk_generation_input_for(request)
             except (ValueError, TypeError, KeyError, AttributeError):
                 raise GovernanceError("governance_inflight_input_unproven") from None
-            proof = self.admissions.proof_in(db, candidate.request_id, event=event, actual=actual)
+            proof = self.admissions.proof_in(
+                db,
+                candidate.request_id,
+                event=event,
+                actual=actual,
+                refresh_witness=refresh_witness,
+            )
             if proof.binding.project_id != candidate.scope_id:
                 raise GovernanceError("governance_inflight_scope_unproven")
             if proof.state != "enrolled":
@@ -186,28 +209,70 @@ class InflightGovernance:
         # UNKNOWN's observation blocker is waived only after every live request
         # above has a complete, independently witnessed ENROLLED proof.
 
-    def prepare(self, scope):
-        inventory, inputs, targets, dispositions = self._inspect(scope, signed=False)
+    @contextmanager
+    def _verified(self, scope, *, signed, completed=False, refresh_witness=True):
+        inspected = self._inspect(scope, signed=signed, anchored_only=completed)
+        inventory, inputs, _targets, dispositions = inspected
         try:
             with self.admissions.access._connection(writing=True) as db:
-                self._prove_live(db, inventory, inputs, dispositions)
+                if not refresh_witness:
+                    # Keep the writer exclusion, but fail any attempted row mutation.
+                    db.execute("PRAGMA query_only=ON")
+                self._prove_live(
+                    db, inventory, inputs, dispositions, refresh_witness=refresh_witness
+                )
+                yield inspected
         except (AccessError, sqlite3.Error, OSError):
             raise GovernanceError("governance_inflight_store_unavailable") from None
-        return targets
+
+    def prepare(self, scope):
+        with self._verified(scope, signed=False) as (_, _, targets, _):
+            return targets
+
+    def prepare_cleanup_selectors(
+        self, scope: ConfirmedScope, *, signed: bool = False, completed: bool = False
+    ) -> CleanupPreparation:
+        """Prove selectors without cancellation, payload cleanup or witness updates.
+
+        The executor verifies the committed intent before passing a signed scope.
+        Empty selectors do not prove that diagnostic files have no body copies.
+        """
+        if completed and not signed:
+            raise GovernanceError("governance_inflight_scope_invalid")
+        with self._verified(scope, signed=signed, completed=completed, refresh_witness=False) as (
+            inventory,
+            _inputs,
+            targets,
+            dispositions,
+        ):
+            selectors = tuple(
+                CleanupSelector(
+                    candidate.job_id,
+                    candidate.request_id,
+                    candidate.input_digest,
+                    dispositions[candidate.job_id],
+                )
+                for candidate in sorted(
+                    inventory.confirmed_original_candidates,
+                    key=lambda item: (item.job_id, item.request_id),
+                )
+            )
+            return CleanupPreparation(selectors, targets)
 
     def apply(self, scope, *, completed=False):
         self._scope_marker(scope, signed=True)
         if completed and not any(identity.startswith(PREFIX) for identity in scope.records):
             return ()
-        inventory, inputs, _, dispositions = self._inspect(
-            scope, signed=True, anchored_only=completed
-        )
-        queue = self.ingest._queue()
         try:
             # Keep this same writer lock through all CAS operations. A competing
             # SDK permit cannot commit between the negative proof and cancellation.
-            with self.admissions.access._connection(writing=True) as db:
-                self._prove_live(db, inventory, inputs, dispositions)
+            with self._verified(scope, signed=True, completed=completed) as (
+                inventory,
+                inputs,
+                _,
+                dispositions,
+            ):
+                queue = self.ingest._queue()
                 for candidate in inventory.confirmed_original_candidates:
                     if candidate.state in _TERMINAL_WRITE_STATES:
                         continue
@@ -221,8 +286,6 @@ class InflightGovernance:
                     )
                     if result != "cancelled":
                         raise GovernanceError("governance_inflight_queue_conflict")
-        except (AccessError, sqlite3.Error, OSError):
-            raise GovernanceError("governance_inflight_store_unavailable") from None
         except (ValueError, TypeError):
             raise GovernanceError("governance_inflight_queue_unproven") from None
         return tuple(

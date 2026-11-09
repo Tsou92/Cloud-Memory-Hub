@@ -302,11 +302,13 @@ class WriteAdmissions:
         ):
             raise GovernanceError("governance_admission_binding_mismatch")
 
-    def _witness(self, db, proof, checkpoints):
+    def _witness(self, db, proof, checkpoints, *, refresh_witness=True):
         binding = proof.binding
         row = db.execute(
             "SELECT * FROM cmh_admission_witnesses WHERE event_key=?", (binding.event_key,)
         ).fetchone()
+        if row is None and not refresh_witness:
+            raise GovernanceError("governance_admission_witness_missing")
         if row is not None:
             expected = self.journal._mac(
                 "admission-witness", [row["event_key"], row["birth_id"], row["checkpoint"]]
@@ -326,6 +328,8 @@ class WriteAdmissions:
                 or _json(floor.model_dump()) != row["checkpoint"]
             ):
                 raise GovernanceError("governance_admission_witness_invalid")
+        if not refresh_witness:
+            return
         payload = _json(proof.checkpoint.model_dump())
         signature = self.journal._mac(
             "admission-witness", [binding.event_key, binding.birth_id, payload]
@@ -338,7 +342,7 @@ class WriteAdmissions:
                 (binding.event_key, binding.birth_id, payload, signature),
             )
 
-    def _lookup(self, db, event_key):
+    def _lookup(self, db, event_key, *, refresh_witness=True):
         with self.journal._connection() as log:
             row = log.execute(
                 "SELECT scope_id FROM intents WHERE operation_id=?",
@@ -353,7 +357,7 @@ class WriteAdmissions:
             proof, checkpoints = self.journal._stream(log, row[0])
         if proof.binding.event_key != event_key:
             raise GovernanceError("governance_admission_binding_mismatch")
-        self._witness(db, proof, checkpoints)
+        self._witness(db, proof, checkpoints, refresh_witness=refresh_witness)
         return proof
 
     def _event_mac(self, event):
@@ -440,7 +444,8 @@ class WriteAdmissions:
         return entry
 
     @_safe_storage
-    def proof_in(self, db, request_id, *, event=None, actual=None):
+    def proof_in(self, db, request_id, *, event=None, actual=None, refresh_witness=True):
+        """Validate the latest proof; read-only callers require an existing witness."""
         self._binding(db)
         try:
             parts = request_id.split(":")
@@ -449,7 +454,11 @@ class WriteAdmissions:
             birth, device, event_id = (canonical_uuid(part) for part in parts[2:])
         except (ValueError, TypeError, AttributeError):
             raise GovernanceError("governance_admission_identity_invalid") from None
-        proof = self._lookup(db, self.journal.event_key(device, event_id))
+        proof = self._lookup(
+            db,
+            self.journal.event_key(device, event_id),
+            refresh_witness=refresh_witness,
+        )
         if (
             proof is None
             or proof.binding.birth_id != birth
