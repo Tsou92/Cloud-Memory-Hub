@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -160,6 +161,13 @@ async def phase(root, mode):
             assert await get("history", "cmhe:" + first["receipt"]) == 200
             assert await get("memories", second["memory"]) == 404
             assert await get("history", "cmhe:" + second["receipt"]) == 404
+            for index, row in enumerate(state["rows"]):
+                current = row["event"]
+                identity = (
+                    f"cmh:{current['instance_id']}:{current['device_id']}:{current['event_id']}"
+                )
+                outcome = await _joined_thread(sdk.get_write_outcome, identity)
+                assert (outcome is None) == (index == 1), "purge_result_cache_mismatch"
             # New revisions must not resurrect either forgotten or purged
             # originals, including after restoring the old business volumes.
             for row in state["rows"]:
@@ -209,6 +217,21 @@ def main():
         run(root, "read")
         assert leftover(root, MARK + " fact 1") == [], "purge_residue"
         assert leftover(root, MARK + " fact 0"), "forget_must_keep_content"
+        # Restore only the SDK outcome cache. No raw/vector node is restored,
+        # so ID existence alone cannot trigger replay (ADR-0035).
+        state = json.loads((root / "state.json").read_text())
+        event = state["rows"][1]["event"]
+        request_id = f"cmh:{event['instance_id']}:{event['device_id']}:{event['event_id']}"
+        caches = list((backup / "data").rglob("cache.sqlite3"))
+        assert len(caches) == 1, "cache_location_unproven"
+        cache = caches[0]
+        current_cache = root / "data" / cache.relative_to(backup / "data")
+        with sqlite3.connect(cache) as source, sqlite3.connect(current_cache) as destination:
+            source.backup(destination)
+            assert destination.execute(
+                "SELECT 1 FROM write_outcomes WHERE request_id=?", (request_id,)
+            ).fetchone(), "cache_restore_fixture_invalid"
+        run(root, "read")
         # Restore pre-purge business data: startup must re-apply the purge.
         for name in ("data", "config"):
             shutil.rmtree(root / name)
@@ -217,7 +240,7 @@ def main():
         run(root, "read")
         assert leftover(root, MARK + " fact 1") == [], "restore_replay_residue"
     print(
-        "Forget, purge, restart, restore replay and source reimport prevention "
+        "Forget, purge, restart, full/cache-only restore and source reimport prevention "
         "passed across processes."
     )
 

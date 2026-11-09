@@ -507,7 +507,11 @@ def test_interrupted_purge_hides_content_blocks_writes_and_resumes(tmp_path, mon
 
     async def scenario():
         async with fixture(config) as (app, web):
-            jobs, _, results, headers, event, _ = await produce(app, web, config, monkeypatch)
+            jobs, requests, results, headers, event, _ = await produce(
+                app, web, config, monkeypatch
+            )
+            sdk = await _sdk_library_bridge(app.core)._get_client()
+            assert await _joined_thread(sdk.get_write_outcome, requests[2].request_id) is not None
             admin = {"Authorization": "Bearer " + config.admin_token}
             scope, last = event["scope_id"], "cmhe:" + jobs[2]
             view = (
@@ -543,6 +547,8 @@ def test_interrupted_purge_hides_content_blocks_writes_and_resumes(tmp_path, mon
             monkeypatch.setattr(governance_purge.Purger, "_sdk_side_tables", original)
             await app.core.state.cmh_executor.resume()
             app.core.state.cmh_governance.require_writes_ready()
+            assert await _joined_thread(sdk.get_write_outcome, requests[2].request_id) is None
+            assert await _joined_thread(sdk.get_write_outcome, requests[0].request_id) is not None
         assert scan(tmp_path, "Synthetic fact 3") == []
 
     asyncio.run(scenario())

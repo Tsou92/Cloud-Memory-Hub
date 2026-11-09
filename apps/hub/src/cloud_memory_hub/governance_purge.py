@@ -7,11 +7,15 @@ an interrupted purge is simply re-run from the start.
 import sqlite3
 from pathlib import Path
 
+from hy_memory.data.cache_sqlite import SqliteCache
+from one_memory.database_access import main_database
 from one_memory.hy_memory_bridge import _joined_thread
 
 from cloud_memory_hub.chat_graph import PREFIX as CHAT
+from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.memory_graph import PREFIX as MEMORY
+from cloud_memory_hub.original_archive import validate_original
 from cloud_memory_hub.profile_evidence import PREFIX as PROFILE
 from cloud_memory_hub.reconcile_graph import PREFIX as INPUTS
 from cloud_memory_hub.sdk_reconcile import RESERVED_PREFIXES
@@ -75,18 +79,80 @@ def _delete_in(db, table, column, values):
         db.execute(f"DELETE FROM {table} WHERE {column} IN ({','.join('?' * len(chunk))})", chunk)
 
 
+def _present_in(path, table, column, values):
+    values = sorted(values)
+    if not values or not path.exists():
+        return False
+    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=30) as db:
+        for start in range(0, len(values), 500):
+            chunk = values[start : start + 500]
+            if db.execute(
+                f"SELECT 1 FROM {table} WHERE {column} IN ({','.join('?' * len(chunk))}) LIMIT 1",
+                chunk,
+            ).fetchone():
+                return True
+    return False
+
+
 class Purger:
     def __init__(self, ingest, bridge, data_dir):
         self.ingest, self.bridge = ingest, bridge
         self.data_dir = Path(data_dir)
 
     def _sdk_paths(self, sdk):
-        root = Path(sdk._config.vector_store.persist_directory).parent
+        if not isinstance(sdk._cache, SqliteCache):
+            raise GovernanceError("governance_purge_cache_unsupported")
         return {
             "chroma": Path(sdk._config.vector_store.persist_directory) / "chroma.sqlite3",
             "history": Path(sdk._config.history.db_path),
-            "cache": root / "cache.sqlite3",
+            "cache": Path(sdk._cache._db_path),
         }
+
+    def _requests(self, receipts, snapshots, scope_id):
+        """Core keeps job identities after payload reaping and Hub receipt purge."""
+        requests = set()
+        owners = receipts | {receipt for _, receipt in snapshots}
+        queue = self.ingest._queue()
+        with self.ingest._database() as db:
+            with main_database(queue.database_path).read(row_factory=sqlite3.Row) as jobs:
+                for receipt in sorted(owners):
+                    job = jobs.execute(
+                        "SELECT idempotency_key,source_key FROM memory_write_jobs WHERE job_id=?",
+                        (receipt,),
+                    ).fetchone()
+                    if job is None or not job["source_key"].startswith("cmh:"):
+                        raise GovernanceError("governance_purge_request_unproven")
+                    source_id = job["source_key"][4:]
+                    source = db.execute(
+                        "SELECT device_id,scope_id FROM cmh_sources WHERE source_id=?",
+                        (source_id,),
+                    ).fetchone()
+                    parts = job["idempotency_key"].split(":")
+                    if (
+                        source is None
+                        or source["scope_id"] != scope_id
+                        or len(parts) != 4
+                        or parts[:3] != ["cmh", self.ingest.access.instance_id, source["device_id"]]
+                    ):
+                        raise GovernanceError("governance_purge_request_unproven")
+                    try:
+                        canonical_uuid(parts[3])
+                    except ValueError:
+                        raise GovernanceError("governance_purge_request_unproven") from None
+                    row = db.execute(
+                        "SELECT * FROM cmh_event_receipts WHERE receipt_id=?", (receipt,)
+                    ).fetchone()
+                    if row is not None:
+                        event = validate_original(row, self.ingest.access.instance_id)
+                        if (
+                            event.scope_id != scope_id
+                            or event.source_id != source_id
+                            or event.event_id != parts[3]
+                            or row["request_id"] != job["idempotency_key"]
+                        ):
+                            raise GovernanceError("governance_purge_request_unproven")
+                    requests.add(job["idempotency_key"])
+        return requests
 
     async def _sdk_delete(self, sdk, native):
         for identity in sorted(native):
@@ -109,13 +175,6 @@ class Purger:
     def _hub_rows(self, receipts, snapshots):
         """Whole receipts in scope; only the in-scope snapshots of other receipts."""
         with self.ingest._database(writing=True) as db:
-            requests = set()
-            for receipt in sorted(receipts):
-                row = db.execute(
-                    "SELECT request_id FROM cmh_event_receipts WHERE receipt_id=?", (receipt,)
-                ).fetchone()
-                if row is not None:
-                    requests.add(row[0])
             for table in _RECEIPT_TABLES:
                 _delete_in(db, table, "receipt_id", receipts)
             for prefix, receipt in sorted(snapshots):
@@ -130,7 +189,6 @@ class Purger:
                 )
             for receipt in receipts:
                 db.execute("INSERT OR IGNORE INTO cmh_purged_receipts VALUES (?)", (receipt,))
-            return requests
 
     @staticmethod
     def initialize(db):
@@ -162,12 +220,31 @@ class Purger:
                     return True
         return False
 
-    async def present(self, records):
+    def _side_present(self, paths, native, requests):
+        return any(
+            _present_in(paths[store], table, column, values)
+            for store, table, column, values in (
+                ("cache", "write_outcomes", "request_id", requests),
+                ("history", "memory_history", "memory_id", native),
+                ("chroma", "embeddings_queue", "id", native),
+            )
+        )
+
+    def _reap_terminal_payloads(self):
+        # Reuse Core's existing terminal-only retention rule. This does not
+        # cancel or resolve pending/unknown work (handled separately in ADR-0034).
+        while self.ingest._queue().clear_terminal_payloads():
+            pass
+
+    async def present(self, records, *, scope_id):
         """Whether any purged record exists again, e.g. after a data restore."""
         native, receipts, snapshots = partition(records)
         if await _joined_thread(self._hub_present, receipts, snapshots):
             return True
         sdk = await self.bridge()._get_client()
+        requests = await _joined_thread(self._requests, receipts, snapshots, scope_id)
+        if await _joined_thread(self._side_present, self._sdk_paths(sdk), native, requests):
+            return True
         vector = sdk._vector_store
 
         async def lookup():
@@ -178,14 +255,15 @@ class Purger:
 
         return await _joined_thread(lambda: sdk._loop_thread.run(lookup()))
 
-    async def run(self, records, contents, requests_hint=()):
+    async def run(self, records, contents, *, scope_id):
         native, receipts, snapshots = partition(records)
         sdk = await self.bridge()._get_client()
         paths = self._sdk_paths(sdk)
+        requests = await _joined_thread(self._requests, receipts, snapshots, scope_id)
         await self._sdk_delete(sdk, native)
-        requests = await _joined_thread(self._hub_rows, receipts, snapshots)
-        requests |= set(requests_hint)
         await _joined_thread(self._sdk_side_tables, paths, native, requests)
+        await _joined_thread(self._hub_rows, receipts, snapshots)
+        await _joined_thread(self._reap_terminal_payloads)
         files = [
             paths["chroma"],
             paths["history"],
