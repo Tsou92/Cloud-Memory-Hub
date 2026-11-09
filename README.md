@@ -6,7 +6,7 @@
 
 实验入口直接复用固定版本的 MemHub Core 和管理网页，增加 NAS 认证边界及加密凭证存储。跨设备自动采集、同步、离线缓存、删除传播等能力仍在开发，当前不应接入真实历史或用作唯一记忆存储。
 
-运行时开始使用独立治理卷及身份库版本 2；已有实验实例须停服备份后显式迁移，不能直接用旧镜像回退。记录缺失、回滚或存在尚未执行的治理意图时保持隔离。选择性忘记、彻底删除和完整恢复仍待接通，迁移方式见[运行指南](docs/development-runtime.md)。
+运行时使用独立治理卷及身份库版本 2；已有实验实例须停服备份后显式迁移，不能直接用旧镜像回退。选择性忘记、普通记忆彻底删除及旧业务数据恢复后的删除重放已实现；生产力记录物理删除、完整备份恢复和离线规则传播仍待完成。记录缺失或尚未执行的治理意图会触发隔离，迁移方式见[运行指南](docs/development-runtime.md)。
 
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
@@ -59,6 +59,7 @@
 | 普通记忆合并来源 | [关系与兼容设计](docs/adr/0027-chat-reconcile-lineage.md) · [安装与 NAS 验证](docs/reviews/2026-11-03-memory-lineage.md)；完整输入覆盖与删除执行仍待完成 |
 | 基础画像输入与写入证据 | [原生旁路设计](docs/adr/0028-basic-profile-evidence.md) · [SDK 验证](docs/reviews/2026-11-03-profile-evidence.md) · [Hub 来源接线](docs/adr/0029-basic-profile-lineage.md) · [接线验证](docs/reviews/2026-11-03-profile-lineage.md) |
 | 忘记与彻底删除执行 | [状态机、清理清单与已知缺口](docs/adr/0032-governance-execution.md) |
+| 删除后的来源屏蔽 | [稳定来源规则与旧操作兼容](docs/adr/0033-durable-source-suppression.md) |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 

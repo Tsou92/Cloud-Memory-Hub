@@ -79,6 +79,7 @@ def test_forget_suppresses_scope_keeps_originals_and_blocks_reextraction(tmp_pat
             # A retried request after a lost response is idempotent.
             again = await web.post(EXECUTE, headers=admin, json={**body, "operation_id": operation})
             assert again.status_code == 200 and again.json()["operation_id"] == operation
+            assert again.json()["suppressed_count"] == len(scoped)
 
             for memory in memories:
                 assert (await read(web, headers, scope, "memories", memory)).status_code == 404
@@ -245,7 +246,7 @@ def test_crash_between_plan_and_completion_resumes_and_orphan_plan_is_discarded(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("damage", ["signature", "version"])
+@pytest.mark.parametrize("damage", ["signature", "version", "missing_row", "missing_set"])
 def test_tampered_execution_state_quarantines(tmp_path, monkeypatch, damage):
     config = config_for(tmp_path)
 
@@ -273,6 +274,10 @@ def test_tampered_execution_state_quarantines(tmp_path, monkeypatch, damage):
     with sqlite3.connect(path) as db:
         if damage == "signature":
             db.execute("UPDATE suppressed SET record_id='swapped' WHERE rowid=1")
+        elif damage == "missing_row":
+            db.execute("DELETE FROM suppressed WHERE rowid=1")
+        elif damage == "missing_set":
+            db.execute("DELETE FROM suppressed")
         else:
             db.execute("PRAGMA user_version=99")
     # Tampering cannot silently empty the suppression set.
@@ -374,6 +379,115 @@ def test_purge_of_unsupported_kind_refuses_before_any_intent(tmp_path, monkeypat
     )
     assert (native, receipts) == ({"a"}, {"r1"})
     assert snapshots == {("cmhj:", "r2"), ("cmhi:", "r3")}
+
+
+def test_purge_blocks_source_reimport_after_receipt_removal_and_restart(tmp_path, monkeypatch):
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            jobs, _, _, headers, event, _ = await produce(app, web, config, monkeypatch)
+            admin = {"Authorization": "Bearer " + config.admin_token}
+            await grant_reads(
+                web,
+                admin,
+                event,
+                permissions=("events:write", "memory:read", "history:read"),
+                revision=3,
+            )
+            body = {
+                "scope_id": event["scope_id"],
+                "action": "purge",
+                "record_ids": ["cmhe:" + jobs[2]],
+            }
+            view = (await web.post(PREVIEW, headers=admin, json=body)).json()
+            reply = await web.post(
+                EXECUTE, headers=admin, json={**body, "expected_view": view["view_digest"]}
+            )
+            assert reply.status_code == 200, reply.text
+            with app.core.state.cmh_ingest._database() as db:
+                assert not db.execute(
+                    "SELECT 1 FROM cmh_event_receipts WHERE receipt_id=?", (jobs[2],)
+                ).fetchone()
+
+        async with fixture(config) as (app, web):
+            queue = app.core.state.memory_write_queue
+            revised = {**event, "event_id": str(uuid4()), "revision": 2}
+            reply = await web.post("/hub/v1/events", headers=headers, json=revised)
+            assert reply.status_code == 409, reply.text
+            assert reply.json() == {"detail": "governance_source_suppressed"}
+            assert (
+                queue.get(f"cmh:{event['instance_id']}:{event['device_id']}:{revised['event_id']}")
+                is None
+            )
+            # Source identities are represented only by keyed digests.
+            for path in config.governance_dir.iterdir():
+                if path.is_file():
+                    for key in ("source_id", "conversation_id", "record_id"):
+                        assert event[key].encode() not in path.read_bytes()
+            # A different record from the same source remains eligible.
+            unrelated = {**revised, "event_id": str(uuid4()), "record_id": str(uuid4())}
+            assert (
+                await web.post("/hub/v1/events", headers=headers, json=unrelated)
+            ).status_code == 202
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("action", ["forget", "purge"])
+def test_legacy_source_rules_fail_closed_without_rewriting_intents(tmp_path, monkeypatch, action):
+    from cloud_memory_hub import governance_execution
+    from test_remote_ingest import provision
+
+    config = config_for(tmp_path)
+
+    async def scenario():
+        async with fixture(config) as (app, web):
+            jobs, _, _, headers, event, _ = await produce(app, web, config, monkeypatch)
+            admin = {"Authorization": "Bearer " + config.admin_token}
+            await grant_reads(
+                web,
+                admin,
+                event,
+                permissions=("events:write", "memory:read", "history:read"),
+                revision=3,
+            )
+            body = {
+                "scope_id": event["scope_id"],
+                "action": action,
+                "record_ids": ["cmhe:" + jobs[2]],
+            }
+            view = (await web.post(PREVIEW, headers=admin, json=body)).json()
+            # Model a pre-ADR-0033 writer using the same persisted schema.
+            with monkeypatch.context() as legacy:
+                legacy.setattr(governance_execution, "capture_sources", lambda *args: ())
+                reply = await web.post(
+                    EXECUTE, headers=admin, json={**body, "expected_view": view["view_digest"]}
+                )
+                assert reply.status_code == 200, reply.text
+            journal = app.core.state.cmh_governance.journal
+            checkpoint = journal.head(event["scope_id"])
+
+        async with fixture(config) as (app, web):
+            revised = {**event, "event_id": str(uuid4()), "revision": 2}
+            reply = await web.post("/hub/v1/events", headers=headers, json=revised)
+            expected = (
+                (409, "governance_source_suppressed")
+                if action == "forget"
+                else (503, "governance_source_rules_unavailable")
+            )
+            assert (reply.status_code, reply.json()["detail"]) == expected
+            if action == "purge":
+                assert not app.core.state.cmh_ingest.source_write_authorizer(
+                    "cmh:" + event["source_id"]
+                )
+            assert app.core.state.cmh_governance.journal.head(event["scope_id"]) == checkpoint
+            # Unknown legacy sources block only that project, not the instance.
+            _, other_headers, _, other_event = await provision(web, config)
+            reply = await web.post("/hub/v1/events", headers=other_headers, json=other_event)
+            assert reply.status_code == 202, reply.text
+
+    asyncio.run(scenario())
 
 
 def test_interrupted_purge_hides_content_blocks_writes_and_resumes(tmp_path, monkeypatch):

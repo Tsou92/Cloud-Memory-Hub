@@ -148,6 +148,8 @@ class RemoteIngest:
         self.queue_provider = queue_provider
         self.privacy = CredentialFilter()
         self.suppressed = lambda scope: {}
+        self.require_source_allowed = lambda event: None
+        self.require_source_rules = lambda scope: None
         with access._connection(writing=True) as db:
             extension = db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='cmh_ingest_schema'"
@@ -275,6 +277,7 @@ class RemoteIngest:
                 ).fetchone()
                 if row is None:
                     return False
+                self.require_source_rules(row["scope_id"])
                 return self._source_allowed(db, self.access._receipt(db, row[0]), source_id, row[1])
         except AccessError:
             return False
@@ -341,8 +344,9 @@ class RemoteIngest:
                 (event.source_id, event.conversation_id, event.record_id, event.revision),
             ).fetchone():
                 raise AccessError("record_revision_conflict", 409)
-            # A forgotten source record must not be re-extracted under a new revision
-            # (ADR-0032). Same-content re-import under new IDs needs a fingerprint.
+            self.require_source_allowed(event)
+            # Compatibility for forget operations created before durable source
+            # targets: their retained receipts still prove the stable identity.
             hidden = self.suppressed(event.scope_id)
             if hidden and any(
                 "cmhe:" + row[0] in hidden

@@ -17,6 +17,7 @@ from pydantic import ConfigDict, Field, ValidationError, field_validator
 from cloud_memory_hub.governance_inventory import observe_inventory
 from cloud_memory_hub.governance_journal import GovernanceError, Intent
 from cloud_memory_hub.governance_plan import PreviewRequest, plan_relations
+from cloud_memory_hub.governance_sources import capture_sources
 from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
 from cloud_memory_hub.sdk_reconcile import RESERVED_PREFIXES
 
@@ -108,13 +109,33 @@ class ExecutionStore:
             return rows
 
     def operations(self):
-        # Verify suppression rows here too: startup and every readiness check
-        # pass through this, so a tampered row cannot wait for a scoped read.
-        self._rows("SELECT * FROM suppressed")
-        return {
-            row["operation_id"]: (row["state"], Intent.model_validate_json(row["intent"]))
-            for row in self._rows("SELECT * FROM operations")
-        }
+        if not self.path.exists():
+            return {}
+        # One snapshot: a missing signed row is as unsafe as an edited one.
+        with self._connection() as db:
+            operations = db.execute("SELECT * FROM operations").fetchall()
+            suppressed = db.execute("SELECT * FROM suppressed").fetchall()
+        result, actual = {}, {}
+        for row in operations:
+            self._check(row, "operations")
+            intent = Intent.model_validate_json(row["intent"])
+            if row["operation_id"] != intent.operation_id or row["scope_id"] != intent.scope_id:
+                raise GovernanceError("governance_execution_tampered")
+            result[intent.operation_id] = (row["state"], intent)
+            actual[intent.operation_id] = set()
+        for row in suppressed:
+            self._check(row, "suppressed")
+            known = result.get(row["operation_id"])
+            if known is None or row["scope_id"] != known[1].scope_id:
+                raise GovernanceError("governance_execution_tampered")
+            actual[row["operation_id"]].add(
+                self.journal.target(row["scope_id"], row["kind"], row["record_id"])
+            )
+        for operation, (_, intent) in result.items():
+            expected = {target for target in intent.targets if target.kind in {"memory", "raw"}}
+            if actual[operation] != expected:
+                raise GovernanceError("governance_execution_tampered")
+        return result
 
     def suppressed(self, scope_id):
         """record -> kind, or "purged" when any purge covers it; conservative on crash."""
@@ -324,7 +345,9 @@ class GovernanceExecutor:
                     "scope_id": intent.scope_id,
                     "action": intent.action,
                     "state": "completed",
-                    "suppressed_count": len(intent.targets),
+                    "suppressed_count": len(
+                        await _joined_thread(self.store.records, intent.operation_id)
+                    ),
                 }
         namespace = f"cmh:{self.authority.access.instance_id}:{request.scope_id}"
         bridge = self.bridge()
@@ -353,6 +376,9 @@ class GovernanceExecutor:
                 partition(records)  # Refuse unsupported kinds before any intent.
             contents = [nodes[identity].content for identity in plan["record_ids"]]
             journal = self.authority.journal
+            sources = await _joined_thread(
+                capture_sources, journal, self.lineage.ingest, request.scope_id, records
+            )
             intent = Intent(
                 operation_id=request.operation_id or str(uuid4()),
                 actor_id=actor_id,
@@ -361,7 +387,8 @@ class GovernanceExecutor:
                 targets=tuple(
                     journal.target(request.scope_id, kind, identity)
                     for identity, kind in sorted(records.items())
-                ),
+                )
+                + sources,
             )
             # Order: plan (IDs) -> journal intent -> SDK state -> completed.
             await _joined_thread(self.store.plan, intent, records)
