@@ -4,6 +4,8 @@
 
 ## 构建与首次运行
 
+诊断恢复的只读维护入口为 `diagnostic-preview --writers-stopped --operation-id UUID`：先停止该实例所有写者，使用原 data/config/governance 卷与原私有配置运行命令。它持有现有存储租约，在普通服务启动之前读取实际已提交的 purge 和精确文件候选；返回元数据，不输出日志正文、不签确认、不执行删除。失败保留现场。新增 execution schema2 目前仅供隔离组件验证，普通服务明确拒绝该格式，不能在常驻实例自行迁移；完整确认/恢复入口尚未交付，见 [ADR-0043](adr/0043-diagnostic-physical-execution.md)。
+
 需要 Docker 与 Compose，以及可访问 GitHub、锁定依赖和 Hugging Face 模型文件的构建网络。目标为 Linux amd64；其他主机架构运行该镜像需要 Docker 的模拟支持。镜像包含第三方许可证和上游来源清单，以及构建时按固定摘要校验的内置检索模型；首次运行无需下载它。源码检出及依赖安装不会访问本机 Agent 历史。
 
 在仓库根目录执行：

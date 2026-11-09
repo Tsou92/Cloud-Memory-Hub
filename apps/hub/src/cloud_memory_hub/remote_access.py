@@ -92,8 +92,12 @@ class IssuedCredential(BaseModel):
 
 
 class DeviceAccessStore:
-    def __init__(self, path: Path, *, require_existing: bool = False) -> None:
+    def __init__(
+        self, path: Path, *, require_existing: bool = False, read_only: bool = False
+    ) -> None:
         self.path = path.absolute()
+        self.read_only = read_only
+        require_existing = require_existing or read_only
         try:
             if not require_existing:
                 self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -104,7 +108,7 @@ class DeviceAccessStore:
             self._check_private(self.path)
         except OSError:
             raise AccessError("access_store_unavailable", 503) from None
-        with self._connection(writing=True) as db:
+        with self._connection(writing=not self.read_only) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
                 if require_existing:
@@ -174,12 +178,17 @@ class DeviceAccessStore:
 
     @contextmanager
     def _connection(self, *, writing: bool = False):
+        if writing and self.read_only:
+            raise AccessError("access_store_read_only", 503)
         try:
             self._check_private(self.path.parent, directory=True)
             self._check_private(self.path)
-            db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=10)
+            mode = "ro" if self.read_only else "rw"
+            db = sqlite3.connect(self.path.as_uri() + "?mode=" + mode, uri=True, timeout=10)
             db.row_factory = sqlite3.Row
             try:
+                if self.read_only:
+                    db.execute("PRAGMA query_only=ON")
                 db.execute("PRAGMA foreign_keys=ON")
                 db.execute("PRAGMA synchronous=FULL")
                 db.execute("BEGIN IMMEDIATE" if writing else "BEGIN")

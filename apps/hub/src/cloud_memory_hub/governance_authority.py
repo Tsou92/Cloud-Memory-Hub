@@ -38,9 +38,12 @@ def require_separate_directory(directory: Path, *protected: Path) -> None:
 
 
 class GovernanceAuthority:
-    def __init__(self, access: DeviceAccessStore, journal: GovernanceJournal):
+    def __init__(
+        self, access: DeviceAccessStore, journal: GovernanceJournal, *, read_only: bool = False
+    ):
         self.access = access
         self.journal = journal
+        self.read_only = read_only
         if access.instance_id != journal.instance_id:
             raise GovernanceError("governance_binding_mismatch")
         self.verify()
@@ -52,6 +55,8 @@ class GovernanceAuthority:
     @classmethod
     def activate(cls, access: DeviceAccessStore, journal: GovernanceJournal):
         """Explicit stopped-service migration; never reset a preexisting binding."""
+        if access.read_only or journal.read_only:
+            raise GovernanceError("governance_authority_read_only")
         if access.instance_id != journal.instance_id:
             raise GovernanceError("governance_binding_mismatch")
         if access.schema_version in {2, 3}:
@@ -79,7 +84,8 @@ class GovernanceAuthority:
         access.schema_version = 2
         return cls(access, journal)
 
-    def _refresh(self, db) -> dict[str, Checkpoint]:
+    def _refresh(self, db, *, refresh_witness=True) -> dict[str, Checkpoint]:
+        refresh_witness = refresh_witness and not self.read_only
         if self.access.schema_version not in {2, 3}:
             raise GovernanceError("governance_migration_required")
         rows = db.execute("SELECT * FROM cmh_governance_binding").fetchall()
@@ -99,7 +105,10 @@ class GovernanceAuthority:
                 raise GovernanceError("governance_witness_invalid")
             floors[scope] = Checkpoint.model_validate_json(row["checkpoint"])
         heads = {}
-        for scope in sorted(set(floors) | set(self.journal.scopes())):
+        scopes = set(self.journal.scopes())
+        if not refresh_witness and scopes - floors.keys():
+            raise GovernanceError("governance_witness_missing")
+        for scope in sorted(set(floors) | scopes):
             cursor = floors.get(scope)
             while True:
                 page = self.journal.changes(scope, after=cursor, limit=1000)
@@ -107,7 +116,7 @@ class GovernanceAuthority:
                 if not page["has_more"]:
                     break
             heads[scope] = cursor
-            if cursor != floors.get(scope):
+            if refresh_witness and cursor != floors.get(scope):
                 payload = json.dumps(cursor.model_dump(), sort_keys=True, separators=(",", ":"))
                 db.execute(
                     "INSERT INTO cmh_governance_floors VALUES (?,?,?) "
@@ -118,9 +127,13 @@ class GovernanceAuthority:
         return heads
 
     def _run(self, intent=None):
+        if intent is not None and self.read_only:
+            raise GovernanceError("governance_authority_read_only")
         try:
             # Same order for every cooperating process: witness DB, then journal.
-            with self.access._connection(writing=True) as db:
+            with self.access._connection(writing=not self.read_only) as db:
+                if self.read_only:
+                    db.execute("PRAGMA query_only=ON")
                 heads = self._refresh(db)
                 if intent is None:
                     return heads
@@ -137,17 +150,25 @@ class GovernanceAuthority:
 
     def append(self, intent: Intent) -> Checkpoint:
         """Internal primitive; the future user endpoint must authorize the intent."""
+        if self.read_only:
+            raise GovernanceError("governance_authority_read_only")
         return self._run(intent)
 
     def _pending(self):
         from cloud_memory_hub.governance_execution import ExecutionStore, pending_operations
 
-        if not self.verify():
-            return [], {}
+        self.verify()
         store = ExecutionStore(self.journal)
+        if store.path.is_symlink():
+            raise GovernanceError("governance_execution_unavailable")
         return pending_operations(self.journal, store), store.operations()
 
     def require_ready(self) -> None:
+        # Schema-2 file execution is still an independently tested component.
+        # Do not let the legacy runtime accept its capability, including on an
+        # empty main journal that would otherwise skip execution-store checks.
+        if self.journal.execution_store_id() is not None:
+            raise GovernanceError("governance_execution_runtime_unsupported")
         # Reads may proceed while a forget/purge is planned: its Hub suppression
         # rows are durable and enforced. An intent without a plan (foreign
         # writer, lost execution store) quarantines the instance (ADR-0032).
@@ -163,17 +184,20 @@ class GovernanceAuthority:
             raise GovernanceError("governance_execution_pending")
 
 
-def open_authority(config) -> GovernanceAuthority:
+def open_authority(config, *, read_only: bool = False) -> GovernanceAuthority:
     require_separate_directory(config.governance_dir, config.config_dir, config.data_dir)
-    access = DeviceAccessStore(config.config_dir / "remote-access.sqlite3", require_existing=True)
+    access = DeviceAccessStore(
+        config.config_dir / "remote-access.sqlite3", require_existing=True, read_only=read_only
+    )
     if access.schema_version not in {2, 3}:
         raise GovernanceError("governance_migration_required")
     journal = GovernanceJournal(
         config.governance_dir / "journal.sqlite3",
         instance_id=access.instance_id,
         key=journal_key(config.encryption_key),
+        read_only=read_only,
     )
-    return GovernanceAuthority(access, journal)
+    return GovernanceAuthority(access, journal, read_only=read_only)
 
 
 def activate_authority(config_dir: Path, governance_dir: Path, encryption_key: bytes, *, new=False):

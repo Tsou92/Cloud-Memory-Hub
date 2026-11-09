@@ -77,3 +77,9 @@
 - 自由正文、任意键及身份字符串不进入诊断；保留规范请求 UUID、步骤、数值计数、耗时和闭集状态。debug 与内容策略独立，环境变量不能降级。诊断缓存、直接文件调用、memory-operation、metrics 合并及 Core 独立文件出口分别保护；不投影业务原文、模型实参或持久结果。
 - 旧活动资源必须先结束；handler 创建、挂载与严格激活协调，不能让后台旧 I/O 或新挂载的旧 formatter 在激活后漏出正文。Hub 接管进程日志配置，调用者 handler 分离但保留对象，不关闭其文件。
 - 兼容、失败、性能及真实场景验收见 [ADR-0041](../../docs/adr/0041-strict-diagnostic-content-policy.md)。没有在本补丁清理旧物理日志、Docker 旧 stdout 或独立读取副本，不据此宣布彻底删除完成。
+
+## 0024-diagnostic-file-handlers.patch
+
+- 复用现有日志 factory、handler、formatter、轮转与 strict policy 锁，新增同步维护租约、受控关闭和按原配置接管新流。Hub 文件执行器负责精确授权、持久 staging 与真实字节检查；上游不增加治理数据库或删除选择算法。
+- 原生 FileHandler 在文件替换后仍持有旧 inode，关闭后 emit 又可能自动重开，故仅替换文件或普通 close 不足以保证恢复。补丁让失败的受控处理器保持封闭，重试后绑定当前文件；未知调用者文件流与自定义轮转明确拒绝。
+- 原生新增与相关回归 192 项、Core 39 项通过。合同与完整执行边界见 [ADR-0043](../../docs/adr/0043-diagnostic-physical-execution.md)；不据此宣称 Core 旧日志、Docker 历史输出或全部 purge 已清理。

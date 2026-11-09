@@ -149,19 +149,24 @@ def write_request(event: EventEnvelope, *, request_id: str | None = None) -> Wri
 
 
 class RemoteIngest:
-    def __init__(self, access: DeviceAccessStore, queue_provider):
+    def __init__(self, access: DeviceAccessStore, queue_provider, *, read_only=False):
+        if read_only and not access.read_only:
+            raise AccessError("ingest_read_only_access_required", 503)
         self.access = access
+        self.read_only = read_only
         self.queue_provider = queue_provider
         self.privacy = CredentialFilter()
         self.suppressed = lambda scope: {}
         self.require_source_allowed = lambda event: None
         self.require_source_rules = lambda scope: None
         self.enroll_request = None
-        with access._connection(writing=True) as db:
+        with access._connection(writing=not self.read_only) as db:
             extension = db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='cmh_ingest_schema'"
             ).fetchone()
             if extension is None:
+                if self.read_only:
+                    raise AccessError("ingest_store_missing", 503)
                 if db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name IN ('cmh_sources','cmh_event_receipts')"
@@ -213,6 +218,8 @@ class RemoteIngest:
 
     @contextmanager
     def _database(self, *, writing=False):
+        if writing and self.read_only:
+            raise AccessError("ingest_store_read_only", 503)
         with self.access._connection(writing=writing) as db:
             self._check_schema(db)
             yield db
@@ -318,6 +325,8 @@ class RemoteIngest:
             raise AccessError("runtime_not_ready", 503) from None
 
     def accept(self, credential: str, event: EventEnvelope) -> dict:
+        if self.read_only:
+            raise AccessError("ingest_store_read_only", 503)
         if event.instance_id != self.access.instance_id:
             raise AccessError("instance_mismatch", 409)
         try:

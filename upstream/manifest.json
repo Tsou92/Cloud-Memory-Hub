@@ -119,6 +119,11 @@
       "path": "patches/0023-strict-diagnostic-content.patch",
       "scope": "optional_strict_diagnostic_metadata_and_atomic_output_policy_activation",
       "digest": "sha256:3d85f39dd5708e24d064e4b4d23c3dfe05b7f123f1c2db867214fbe15c7c0700"
+    },
+    {
+      "path": "patches/0024-diagnostic-file-handlers.patch",
+      "scope": "synchronous_owned_file_handler_maintenance_and_retryable_rebind",
+      "digest": "sha256:cb492f4b599302dd99d07c31ab31165689a99a7d165f478d1fcd9348d72671ac"
     }
   ]
 }

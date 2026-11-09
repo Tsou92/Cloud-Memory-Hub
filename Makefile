@@ -22,6 +22,10 @@ check-runtime: prepare-upstream
 probe-diagnostic-inventory: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_diagnostic_inventory.py
 
+.PHONY: probe-diagnostic-file-execution
+probe-diagnostic-file-execution: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_diagnostic_file_execution.py
+
 check-claude: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_claude_native.py
 
