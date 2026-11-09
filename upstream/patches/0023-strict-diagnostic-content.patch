@@ -1,0 +1,1965 @@
+diff --git a/hy_memory/data/cache_mysql.py b/hy_memory/data/cache_mysql.py
+index 4903de0..c2ce88f 100644
+--- a/hy_memory/data/cache_mysql.py
++++ b/hy_memory/data/cache_mysql.py
+@@ -24,6 +24,8 @@ from typing import Optional, List, Dict, Any
+ from .cache_base import CacheBase
+ from ..config import MemoryConfig
+
++from ..utils.diagnostic_policy import register_diagnostic_resource, release_diagnostic_resource
++
+ logger = logging.getLogger(__name__)
+
+ # DDL (MySQL syntax)
+@@ -131,6 +133,7 @@ class MysqlCache(CacheBase):
+     """
+
+     def __init__(self, config: MemoryConfig):
++        register_diagnostic_resource(self, supported=False)
+         self.config = config
+         self._pool = None  # aiomysql.Pool
+
+@@ -150,6 +153,7 @@ class MysqlCache(CacheBase):
+
+     async def initialize(self) -> None:
+         """立即创建 pool（必须在正确的 event loop 上调用，即 _LoopThread 的 loop）"""
++        register_diagnostic_resource(self, supported=False)
+         import aiomysql
+         self._pool = await aiomysql.create_pool(
+             host=self._host,
+@@ -201,6 +205,7 @@ class MysqlCache(CacheBase):
+             self._pool.close()
+             await self._pool.wait_closed()
+             self._pool = None
++        release_diagnostic_resource(self)
+         logger.info("MysqlCache closed")
+
+     # ================================================================
+diff --git a/hy_memory/data/cache_sqlite.py b/hy_memory/data/cache_sqlite.py
+index 0f989a3..d1680bf 100644
+--- a/hy_memory/data/cache_sqlite.py
++++ b/hy_memory/data/cache_sqlite.py
+@@ -28,6 +28,12 @@ from ..core.write_effects import observe_async
+ from ..config import MemoryConfig
+ from ..utils.async_executor import run_in_executor_guarded
+
++from ..utils.diagnostic_policy import (
++    register_diagnostic_resource, release_diagnostic_resource,
++    strict_diagnostics_enabled, project_pipeline_diagnostic, project_memory_operation,
++    project_metrics, metric_minute,
++)
++
+ logger = logging.getLogger(__name__)
+
+ # SQLite 独立线程池（不与 VDB/Graph 竞争）
+@@ -136,6 +142,7 @@ class SqliteCache(CacheBase):
+     """
+
+     def __init__(self, config: MemoryConfig):
++        register_diagnostic_resource(self)
+         self.config = config
+         self._conn: Optional[sqlite3.Connection] = None
+         # One connection is shared by the executor workers. Use the same lock
+@@ -159,6 +166,7 @@ class SqliteCache(CacheBase):
+     # ================================================================
+
+     async def initialize(self) -> None:
++        register_diagnostic_resource(self)
+         await _run_in_sqlite_pool(self._init_sync)
+         logger.debug(f"SqliteCache initialized: {self._db_path}")
+
+@@ -198,6 +206,10 @@ class SqliteCache(CacheBase):
+     async def close(self) -> None:
+         if self._conn is not None:
+             await _run_in_sqlite_pool(self._close_sync)
++        writer = getattr(self, "_pipeline_log_writer", None)
++        if writer is not None:
++            writer.close()
++        release_diagnostic_resource(self)
+         logger.info("SqliteCache closed")
+
+     def _close_sync(self) -> None:
+@@ -238,6 +250,18 @@ class SqliteCache(CacheBase):
+         from ..utils.pipeline_observability import is_memory_operations_enabled
+         if not is_memory_operations_enabled():
+             return True
++        if strict_diagnostics_enabled():
++            safe = project_memory_operation(request_id=request_id, user_id=user_id, agent_id=agent_id, op=op, memory_id=memory_id, content=content, layer=layer, old_memory_id=old_memory_id, reason=reason, supersedes=supersedes)
++            request_id = safe["request_id"]
++            user_id = safe["user_id"]
++            agent_id = safe["agent_id"]
++            op = safe["op"]
++            memory_id = safe["memory_id"]
++            content = safe["content"]
++            layer = safe["layer"]
++            old_memory_id = safe["old_memory_id"]
++            reason = safe["reason"]
++            supersedes = safe["supersedes"]
+         try:
+             import json as _json
+             from datetime import datetime as dt
+@@ -248,14 +272,17 @@ class SqliteCache(CacheBase):
+
+             def _insert():
+                 with self._lock:
++                    values = (request_id, user_id, agent_id, op, memory_id,
++                              old_memory_id, content, layer, reason, supersedes_str)
++                    if strict_diagnostics_enabled():
++                        safe = project_memory_operation(request_id=request_id, user_id=user_id, agent_id=agent_id, op=op, memory_id=memory_id, content=content, layer=layer, old_memory_id=old_memory_id, reason=reason, supersedes=supersedes)
++                        values = tuple(safe[key] for key in ("request_id", "user_id", "agent_id", "op", "memory_id", "old_memory_id", "content", "layer", "reason")) + (json.dumps(safe["supersedes"]),)
+                     self._conn.execute(
+                         """INSERT INTO memory_operations_v2
+                            (request_id, user_id, agent_id, op, memory_id, old_memory_id,
+                             content, layer, reason, supersedes, created_at, created_date)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+-                        (request_id, user_id, agent_id, op, memory_id,
+-                         old_memory_id, content, layer, reason, supersedes_str,
+-                         created_at, created_date),
++                        values + (created_at, created_date),
+                     )
+                     self._conn.commit()
+
+@@ -346,6 +373,22 @@ class SqliteCache(CacheBase):
+         user_id 按 "__" 拆出 namespace 单独落库；session_id 与 user/agent 同为隔离维度。
+         event_at_ms: step 发生时刻（epoch 毫秒，与 JSONL log timestamp 同源）；缺省回落入库时刻。
+         """
++        if strict_diagnostics_enabled():
++            safe = project_pipeline_diagnostic(request_id=request_id, user_id=user_id, agent_id=agent_id, session_id=session_id, step=step, prompt=prompt, response=response, parsed=parsed, memory_ids=memory_ids, elapsed_ms=elapsed_ms, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens, event_at_ms=event_at_ms)
++            request_id = safe["request_id"]
++            user_id = safe["user_id"]
++            agent_id = safe["agent_id"]
++            session_id = safe["session_id"]
++            step = safe["step"]
++            prompt = safe["prompt"]
++            response = safe["response"]
++            parsed = safe["parsed"]
++            memory_ids = safe["memory_ids"]
++            elapsed_ms = safe["elapsed_ms"]
++            prompt_tokens = safe["prompt_tokens"]
++            completion_tokens = safe["completion_tokens"]
++            total_tokens = safe["total_tokens"]
++            event_at_ms = safe["event_at_ms"]
+         try:
+             from datetime import datetime as dt
+             from ..utils.pipeline_observability import split_namespace_user
+@@ -358,6 +401,14 @@ class SqliteCache(CacheBase):
+
+             def _insert():
+                 with self._lock:
++                    values = (request_id, namespace, uid, agent_id, session_id or "",
++                              step, prompt, response, parsed, mem_ids_json, elapsed_ms,
++                              prompt_tokens, completion_tokens, total_tokens, event_at_ms)
++                    if strict_diagnostics_enabled():
++                        safe = project_pipeline_diagnostic(request_id=request_id, user_id=user_id, agent_id=agent_id, session_id=session_id, step=step, prompt=prompt, response=response, parsed=parsed, memory_ids=memory_ids, elapsed_ms=elapsed_ms, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens, event_at_ms=event_at_ms)
++                        values = (safe["request_id"], "", safe["user_id"], safe["agent_id"], safe["session_id"],
++                                  safe["step"], "", "", safe["parsed"], json.dumps(safe["memory_ids"]),
++                                  safe["elapsed_ms"], safe["prompt_tokens"], safe["completion_tokens"], safe["total_tokens"], safe["event_at_ms"])
+                     self._conn.execute(
+                         """INSERT INTO pipeline_logs_v2
+                            (request_id, namespace, user_id, agent_id, session_id,
+@@ -366,11 +417,7 @@ class SqliteCache(CacheBase):
+                             prompt_tokens, completion_tokens, total_tokens,
+                             event_at_ms, created_at, created_date)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+-                        (request_id, namespace, uid, agent_id, session_id or "",
+-                         step, prompt, response,
+-                         parsed, mem_ids_json, elapsed_ms,
+-                         prompt_tokens, completion_tokens, total_tokens,
+-                         event_at_ms, created_at, created_date),
++                        values + (created_at, created_date),
+                     )
+                     self._conn.commit()
+
+@@ -520,27 +567,36 @@ class SqliteCache(CacheBase):
+
+     async def store_metrics_minute(self, minute_ts: str, data: dict) -> None:
+         """存储一个分钟桶的增量指标数据（UPSERT: 同一分钟多次写入会合并）"""
++        if strict_diagnostics_enabled():
++            minute_ts = metric_minute(minute_ts)
++            data = project_metrics(data)
+         try:
+             def _store():
+                 with self._lock:
++                    stored_minute = metric_minute(minute_ts) if strict_diagnostics_enabled() else minute_ts
++                    stored_data = project_metrics(data) if strict_diagnostics_enabled() else data
+                     now = datetime.now().isoformat()
+                     # UPSERT: 如果同一分钟已存在，合并数据
+                     existing = self._conn.execute(
+                         "SELECT data FROM system_metrics WHERE minute_ts = ?",
+-                        (minute_ts,),
++                        (stored_minute,),
+                     ).fetchone()
+                     if existing:
+                         import json as _json
+                         old_data = _json.loads(existing["data"])
+-                        merged = self._merge_metric_buckets(old_data, data)
++                        if strict_diagnostics_enabled():
++                            old_data = project_metrics(old_data)
++                        merged = self._merge_metric_buckets(old_data, stored_data)
++                        if strict_diagnostics_enabled():
++                            merged = project_metrics(merged)
+                         self._conn.execute(
+                             "UPDATE system_metrics SET data = ?, created_at = ? WHERE minute_ts = ?",
+-                            (_json.dumps(merged, default=str), now, minute_ts),
++                            (_json.dumps(merged, default=str), now, stored_minute),
+                         )
+                     else:
+                         self._conn.execute(
+                             "INSERT INTO system_metrics (minute_ts, data, created_at) VALUES (?, ?, ?)",
+-                            (minute_ts, json.dumps(data, default=str), now),
++                            (stored_minute, json.dumps(stored_data, default=str), now),
+                         )
+                     self._conn.commit()
+             await _run_in_sqlite_pool(_store)
+diff --git a/hy_memory/utils/diagnostic_policy.py b/hy_memory/utils/diagnostic_policy.py
+new file mode 100644
+index 0000000..f0d55a9
+--- /dev/null
++++ b/hy_memory/utils/diagnostic_policy.py
+@@ -0,0 +1,580 @@
++"""Opt-in, process-monotone diagnostic metadata policy (not business data).
++
++Enable before any diagnostic resource is created. Live legacy resources must
++be closed first; this module cannot retract bytes already queued or written.
++"""
++from __future__ import annotations
++
++import json
++import importlib.util
++import logging
++import math
++import sys
++import threading
++import types
++import weakref
++from functools import wraps
++from datetime import datetime, timezone
++from pathlib import Path
++from uuid import UUID
++
++POLICY_VERSION = "strict-v1"
++MAX_INPUT_BYTES = 64 * 1024
++MAX_ITEMS = 128
++MAX_DEPTH = 4
++_LOCK = threading.RLock()
++_STRICT = False
++_RESOURCES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
++_KNOWN_SOURCES: dict[str, str] = {}
++
++
++class DiagnosticPolicyError(RuntimeError):
++    """Fixed, content-free policy error."""
++
++
++def strict_diagnostics_enabled() -> bool:
++    return _STRICT
++
++
++def register_diagnostic_resource(resource, *, supported: bool = True) -> None:
++    with _LOCK:
++        if _STRICT and not supported:
++            raise DiagnosticPolicyError("diagnostic_policy_backend_unsupported")
++        _RESOURCES[resource] = _STRICT
++
++
++def release_diagnostic_resource(resource) -> None:
++    with _LOCK:
++        _RESOURCES.pop(resource, None)
++
++
++def _source_inventory() -> dict[str, str]:
++    roots = [Path(__file__).resolve().parents[1]]
++    for package in ("one_memory", "cloud_memory_hub"):
++        spec = importlib.util.find_spec(package)
++        if spec and spec.submodule_search_locations:
++            roots.extend(Path(p) for p in spec.submodule_search_locations)
++    result = {}
++    for root in roots:
++        for source in root.rglob("*.py"):
++            result[str(source.resolve())] = root.name + "/" + source.relative_to(root).as_posix()
++    return result
++
++
++def _owned_handlers():
++    result = []
++    for name in ("hy_memory", ""):
++        for handler in logging.getLogger(name).handlers:
++            if (name == "hy_memory" or getattr(handler, "_one_memory_diagnostic_handler", False)) and handler not in result:
++                result.append(handler)
++    return result
++
++
++def _protected(handler):
++    return isinstance(handler.formatter, StrictDiagnosticFormatter) and getattr(handler.handleError, "__func__", None) is _safe_handle_error
++
++
++def _handler_lock(handler):
++    lock = handler.lock
++    if lock is None or not callable(getattr(lock, "_is_owned", None)):
++        raise DiagnosticPolicyError("diagnostic_policy_handler_unsupported")
++    return lock
++
++
++def enable_strict_diagnostics() -> None:
++    """Irreversibly opt in; busy legacy resources/emitters require a retry."""
++    global _STRICT, _KNOWN_SOURCES
++    # Reject same-thread re-entry BEFORE taking policy lock: another activator
++    # must never wait for the handler lock held by this legacy formatter.
++    for handler in _owned_handlers():
++        if not _protected(handler) and _handler_lock(handler)._is_owned():
++            raise DiagnosticPolicyError("diagnostic_policy_logging_active")
++    with _LOCK:
++        core = sys.modules.get("one_memory.diagnostic_log")
++        core_lock = getattr(core, "_diagnostic_resource_lock", _LOCK)
++        with core_lock:
++            if not _STRICT:
++                core_resources = getattr(core, "_live_diagnostic_logs", ())
++                if any(not mode for mode in _RESOURCES.values()) or any(core_resources):
++                    raise DiagnosticPolicyError("diagnostic_policy_resources_active")
++            locks = []
++            try:
++                targets = [handler for handler in _owned_handlers() if not _protected(handler)]
++                for handler in targets:
++                    lock = _handler_lock(handler)
++                    if lock._is_owned() or not lock.acquire(False):
++                        raise DiagnosticPolicyError("diagnostic_policy_logging_active")
++                    locks.append(lock)
++                sources = _KNOWN_SOURCES if _STRICT else _source_inventory()
++                for handler in targets:
++                    _set_strict_handler(handler)
++                _KNOWN_SOURCES = sources
++                _STRICT = True
++            finally:
++                for lock in reversed(locks):
++                    lock.release()
++
++
++def safe_identifier(value, *, request: bool = False) -> str:
++    if type(value) is not str or len(value) > 160:
++        return ""
++    if request and value.startswith(("cmh:", "cmh2:")):
++        parts = value.split(":")
++        count = 5 if parts[0] == "cmh2" else 4
++        return value if len(parts) == count and all(safe_identifier(v) for v in parts[1:]) else ""
++    if len(value) != 36:
++        return ""
++    try:
++        return value if str(UUID(value)) == value else ""
++    except (ValueError, AttributeError):
++        return ""
++
++
++# This is a closed vocabulary, not a suffix/regular-expression trust rule.
++_STEPS = frozenset("""
++CODING_EXTRACT CODING_JUDGE CODING_RECONCILE DELETE DELETE_ALL_GRAPH
++DELETE_ALL_SUMMARY DELETE_ALL_VDB EPISODE EXTRACT GET GET_BASIC_INFO
++GET_USER_PROFILE INTENTION_UPSERT LIST RECONCILE RECONCILE_APPLY
++RECONCILE_CANDIDATES S1_AGENT_FAILED S1_AGENT_SKIPPED S1_EMBED S1_L1_ROLLBACK
++S1_L1_UPSERT SEARCH_QUERY SUMMARY SWEEPER_BEH_EMBED SWEEPER_COLLISION
++SWEEPER_CORE_CREATE SWEEPER_CORE_MERGE SWEEPER_SUMMARY SYSTEM2_AGENT
++SYSTEM2_AGENT_MESSAGES SYSTEM2_AGENT_TRAJECTORY SYSTEM2_PREPROCESS TOOL_CALLS
++WRITE_SUMMARY WRITE_TIMELINE READ_SUMMARY READ_CODING_RESULT READ_EMBED_QUERY
++READ_CODING_EMBED READ_RECALL_VEC READ_HIDDEN_L0_CONTEXT READ_RECALL_TAG READ_BM25
++READ_TAG_MATCH READ_CODING_VDB READ_KEYWORD_EMBED READ_SCENE_JUDGE
++""".split())
++_NUMERIC_KEYS = frozenset("""
++elapsed_ms embed_ms llm_ms vdb_search_ms step_ms duration_ms total_ms count
++input_count output_count result_count candidate_count memory_count raw_count
++recalled_count selected_count filtered_count query_count top_k limit score
++prompt_tokens completion_tokens total_tokens tokens token_count attempt
++invalid_lines open_file_count memory_bytes thread_count database_error_count
++file_count sqlite_file_count byte_file_count total_bytes copied_bytes
++bytes_per_second stored_count revised_count skipped_count error_count
++pending_count prepared_count queue_depth in_flight_count call_count
++created_count updated_count superseded_count deleted_count lexical_hits
++semantic_hits generation file_size cursor_new cursor_old summed_ms model_ms
++accounted_ms unaccounted_ms embed_request_ms embed_queue_ms embed_batch_size
++batch_size pool_wait_ms request_ms queued_ms retry_count
++""".split())
++_BOOL_KEYS = frozenset("enabled spawned index_complete timed_out truncated success skipped cached found cursor_read_to_end cursor_rewind_branch content_omitted metadata_truncated".split())
++_ENUMS = {
++    "status": frozenset("ok success succeeded failed pending running completed skipped cancelled timeout unknown".split()),
++    "outcome": frozenset("ok success succeeded failed started completed skipped cancelled rejected observed unknown dropped".split()),
++    "mode": frozenset("default explicit llm vector hybrid lexical semantic chat working coding system1 system2".split()),
++    "scene": frozenset(("chat", "working", "coding")),
++    "layer": frozenset(("L0", "L1", "L2", "L3")),
++    "op": frozenset("add update delete merge keep skip create upsert search read write".split()),
++}
++_CONTAINERS = frozenset(("timings", "counts", "provider_meta", "stats"))
++_ERROR_TYPES = frozenset("Exception Error RuntimeError ValueError TypeError KeyError IndexError OSError IOError TimeoutError CancelledError ConnectionError PermissionError FileNotFoundError OperationalError IntegrityError DatabaseError".split())
++
++
++def _number(value, default=0):
++    if type(value) not in (int, float) or not 0 <= value <= 10**15 or not math.isfinite(value):
++        return default
++    return value
++
++
++def _enum(value, choices, default="unknown"):
++    return value if type(value) is str and value in choices else default
++
++
++def _metadata(value, depth=0):
++    if type(value) is not dict or depth >= MAX_DEPTH or len(value) > MAX_ITEMS:
++        return {}
++    result = {}
++    for key, item in value.items():
++        if type(key) is not str:
++            continue
++        if len(key) > 80:
++            continue
++        if key in _NUMERIC_KEYS:
++            number = _number(item, None)
++            if number is not None:
++                result[key] = number
++        elif key in _BOOL_KEYS and type(item) is bool:
++            result[key] = item
++        elif key in _ENUMS and type(item) is str and item in _ENUMS[key]:
++            result[key] = item
++        elif key in _CONTAINERS:
++            nested = _metadata(item, depth + 1)
++            if nested:
++                result[key] = nested
++    return result
++
++
++def project_parsed(value) -> str:
++    parsed = {}
++    if type(value) is str and len(value) <= MAX_INPUT_BYTES:
++        try:
++            if len(value.encode("utf-8")) <= MAX_INPUT_BYTES:
++                parsed = json.loads(value)
++        except (ValueError, UnicodeError, RecursionError):
++            pass
++    elif type(value) is dict:
++        parsed = value
++    result = _metadata(parsed)
++    result.update(diagnostic_policy=POLICY_VERSION, content_omitted=True)
++    encoded = json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
++    if len(encoded) > MAX_INPUT_BYTES // 2:
++        return '{"content_omitted":true,"diagnostic_policy":"strict-v1","metadata_truncated":true}'
++    return encoded
++
++
++def project_pipeline_diagnostic(**fields) -> dict:
++    """Return fixed keys and bounded metadata; never render arbitrary objects."""
++    ids = fields.get("memory_ids")
++    memory_ids = []
++    if type(ids) in (list, tuple) and len(ids) <= MAX_ITEMS:
++        memory_ids = [safe for item in ids if (safe := safe_identifier(item))]
++    return {
++        "request_id": safe_identifier(fields.get("request_id"), request=True),
++        "user_id": safe_identifier(fields.get("user_id")),
++        "agent_id": safe_identifier(fields.get("agent_id")),
++        "session_id": safe_identifier(fields.get("session_id")),
++        "step": _enum(fields.get("step"), _STEPS),
++        "prompt": "", "response": "",
++        "parsed": project_parsed(fields.get("parsed")),
++        "memory_ids": memory_ids,
++        "elapsed_ms": _number(fields.get("elapsed_ms")),
++        "prompt_tokens": int(_number(fields.get("prompt_tokens"))),
++        "completion_tokens": int(_number(fields.get("completion_tokens"))),
++        "total_tokens": int(_number(fields.get("total_tokens"))),
++        "event_at_ms": int(_number(fields.get("event_at_ms"))) if _number(fields.get("event_at_ms")) <= 253402300799000 else 0,
++    }
++
++
++def safe_error_type(error) -> str:
++    return _enum(type(error).__name__, _ERROR_TYPES, "Error")
++
++
++def safe_exception_details(error) -> dict:
++    """Inspect traceback objects, never format exceptions or load source lines."""
++    result = {"error_type": safe_error_type(error)}
++    frames = []
++    frame = BaseException.__getattribute__(error, "__traceback__")
++    for _ in range(128):
++        if type(frame) is not types.TracebackType:
++            break
++        source = _KNOWN_SOURCES.get(frame.tb_frame.f_code.co_filename)
++        if source:
++            frames.append(source + ":" + str(frame.tb_lineno))
++        frame = frame.tb_next
++    if frames:
++        result["safe_stack"] = tuple(frames[-16:])
++    return result
++
++
++def _safe_stack(value):
++    if type(value) not in (list, tuple) or len(value) > 16:
++        return []
++    sources = frozenset(_KNOWN_SOURCES.values())
++    result = []
++    for entry in value:
++        if type(entry) is not str or len(entry) > 512:
++            continue
++        source, separator, line = entry.rpartition(":")
++        if separator and source in sources and line.isascii() and line.isdecimal() and len(line) <= 8:
++            result.append(source + ":" + str(int(line)))
++    return result
++
++
++def _category(name) -> str:
++    if type(name) is not str:
++        return "unknown"
++    for root in ("hy_memory", "one_memory", "cloud_memory_hub", "uvicorn", "asyncio", "openai", "httpx", "httpcore", "urllib3"):
++        if name == root or name.startswith(root + "."):
++            return root
++    return "unknown"
++
++
++class StrictDiagnosticFormatter(logging.Formatter):
++    """No getMessage, exception formatting, arbitrary extras, or repr fallback."""
++
++    def format(self, record):
++        try:
++            created = _number(record.created)
++            result = {
++                "diagnostic_policy": POLICY_VERSION, "content_omitted": True,
++                "ts": datetime.fromtimestamp(min(created, 253402300799), timezone.utc).isoformat(),
++                "level": _enum(record.levelname, frozenset(("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")), "UNKNOWN"),
++                "logger": _category(record.name), "msg": "diagnostic_event",
++                "request_id": safe_identifier(getattr(record, "request_id", ""), request=True),
++                "line": int(_number(record.lineno)),
++            }
++            source = _KNOWN_SOURCES.get(record.pathname) if type(record.pathname) is str else None
++            if source:
++                result["source"] = source
++            exc = record.exc_info
++            if type(exc) is tuple and len(exc) == 3 and isinstance(exc[1], BaseException):
++                result.update(safe_exception_details(exc[1]))
++            return json.dumps(result, ensure_ascii=True, separators=(",", ":"))
++        except Exception:
++            return '{"diagnostic_policy":"strict-v1","content_omitted":true,"msg":"diagnostic_format_failed"}'
++
++
++def _safe_handle_error(self, record):
++    # StreamHandler/FileHandler otherwise prints msg and args to sys.stderr.
++    # Best effort diagnostics must not throw or render a failed record again.
++    return None
++
++
++def _set_strict_handler(handler):
++    handler.setFormatter(StrictDiagnosticFormatter())
++    handler.handleError = types.MethodType(_safe_handle_error, handler)
++
++
++def protect_diagnostic_handler(handler: logging.Handler) -> None:
++    if _protected(handler):
++        return
++    lock = _handler_lock(handler)
++    if lock._is_owned() or not lock.acquire(False):
++        raise DiagnosticPolicyError("diagnostic_policy_logging_active")
++    try:
++        _set_strict_handler(handler)
++    finally:
++        lock.release()
++
++
++def _timestamp(value):
++    if type(value) is str and len(value) <= 40:
++        try:
++            parsed = datetime.fromisoformat(value)
++            if parsed.tzinfo is not None:
++                return parsed.isoformat()
++        except ValueError:
++            pass
++    return datetime.now(timezone.utc).isoformat()
++
++
++def project_core_diagnostic(value: dict) -> dict:
++    """The structured Core sink is separate from Python logging handlers."""
++    result = {
++        "schema_version": 1, "diagnostic_policy": POLICY_VERSION,
++        "content_omitted": True, "timestamp": _timestamp(value.get("timestamp")),
++        "level": _enum(value.get("level"), frozenset(("info", "warn", "error")), "info"),
++        "service": "core",
++        "component": _enum(value.get("component"), _CORE_COMPONENTS),
++        "event": _enum(value.get("event"), _CORE_EVENTS),
++        "outcome": _enum(value.get("outcome"), _ENUMS["outcome"]),
++    }
++    for key in ("session_id", "trace_id", "incident_id", "instance_id", "operation_id", "request_id", "job_id", "task_id"):
++        identity = safe_identifier(value.get(key), request=key == "request_id")
++        if identity:
++            result[key] = identity
++    if "duration_ms" in value:
++        result["duration_ms"] = int(_number(value["duration_ms"]))
++    if "error_type" in value:
++        result["error_type"] = _enum(value["error_type"], _ERROR_TYPES, "Error")
++    frames = _safe_stack(value.get("safe_stack"))
++    if frames:
++        result["safe_stack"] = frames
++    details = _metadata(value.get("details"))
++    if details:
++        result["details"] = details
++    return result
++
++_CORE_COMPONENTS = frozenset((
++    'context.search',
++    'core.api',
++    'core.database',
++    'core.diagnostics',
++    'core.lifecycle',
++    'core.loop',
++    'core.resources',
++    'core.task',
++    'core.thread',
++    'hy.bridge',
++    'hy.client',
++    'hy.model',
++    'hy.reconcile',
++    'import.async_bridge',
++    'import.live_sync',
++    'import.live_watch',
++    'import.parser',
++    'import.runner',
++    'import.snapshot',
++    'import.supervisor',
++    'memory.context',
++    'memory.deletion',
++    'memory.scheduler',
++    'memory.sedimentation',
++    'memory.semantic',
++    'memory.task',
++    'memory.visibility',
++    'memory.write_queue',
++    'model.credentials',
++    'model.probe',
++    'service_level.scheduler',
++))
++
++_CORE_EVENTS = frozenset((
++    'context.lexical_memory_failed',
++    'context.semantic_enrichment_failed',
++    'context_lane.completed',
++    'context_stage.completed',
++    'core.initializing',
++    'core.loop.task_exception',
++    'core.process_started',
++    'core.ready',
++    'core.resource_snapshot',
++    'core.stopped',
++    'core.stopping',
++    'core.task.exception',
++    'core.thread.exception',
++    'database.error',
++    'diagnostic.events_dropped',
++    'hy.client_initialization.completed',
++    'hy.client_initialization.failed',
++    'hy.ingest_completed',
++    'hy.ingest_failed',
++    'hy.ingest_started',
++    'hy.model_call.completed',
++    'hy.model_call.failed',
++    'hy.reconcile.completed',
++    'hy.reconcile.failed',
++    'hy.step.completed',
++    'hy.steps.summary',
++    'import.discovery.completed',
++    'import.finished',
++    'import.heartbeat_failed',
++    'import.parse.completed',
++    'import.parse.failed',
++    'import.parse.issue_summary',
++    'import.parse.started',
++    'import.phase_changed',
++    'import.queued',
++    'import.retry_scheduled',
++    'import.snapshot.completed',
++    'import.snapshot.failed',
++    'import.source_read_finished',
++    'import.started',
++    'known_memory_stale_omitted',
++    'live_sync.cursor_rewound',
++    'live_sync.hook_completed',
++    'live_sync.hook_failed',
++    'live_sync.hook_received',
++    'live_sync.internal_error',
++    'live_sync.state_changed',
++    'loop.blocked',
++    'memory.identity_failures_repaired',
++    'memory.write_queue.retry_scheduled',
++    'memory_conversation.prepare_failed',
++    'memory_deletion.sync_failed',
++    'memory_scheduler.dispatch_failed',
++    'memory_scheduler.dispatch_failure_unrecorded',
++    'memory_scheduler.idle',
++    'memory_scheduler.orphan_recovery_failed',
++    'memory_scheduler.orphans_recovered',
++    'memory_scheduler.scan_completed',
++    'memory_scheduler.scan_inventory',
++    'memory_scheduler.scan_started',
++    'memory_scheduler.scan_yielded',
++    'memory_scheduler.tasks_queued',
++    'memory_sedimentation.toggled',
++    'memory_task.failed',
++    'memory_task.finished',
++    'memory_task.started',
++    'memory_task.step_completed',
++    'memory_visibility.audit_mismatch',
++    'memory_visibility.background_failed',
++    'memory_write_job.queued',
++    'model_credentials.cleaned',
++    'model_credentials.cleanup_failed',
++    'model_probe.completed',
++    'model_probe.failed',
++    'model_probe.rejected',
++    'model_probe.started',
++    'recall.workspace_scope_resolved',
++    'semantic_read_bridge.refresh_failed',
++    'semantic_read_bridge.refreshed',
++    'service_level.admitted',
++    'service_level.summary',
++))
++
++_READ_STEPS = frozenset((
++    'READ_',
++    'READ_BM25',
++    'READ_CODING_EMBED',
++    'READ_CODING_RESULT',
++    'READ_CODING_VDB',
++    'READ_EMBED_QUERY',
++    'READ_EVOLUTION',
++    'READ_GRAPH_RERANK',
++    'READ_HIDDEN_L0_CONTEXT',
++    'READ_INTENT',
++    'READ_INTENTION',
++    'READ_KEYWORD_EMBED',
++    'READ_MERGE_SCHEMA',
++    'READ_RECALL_TAG',
++    'READ_RECALL_VEC',
++    'READ_REQUEST',
++    'READ_RRF',
++    'READ_SCENE_JUDGE',
++    'READ_SUMMARY',
++    'READ_TAG_MATCH',
++))
++
++_STEPS = _STEPS | _READ_STEPS
++
++_METRIC_COUNTS = frozenset("sys1_started sys1_completed sys1_failed sys2_started sys2_completed sys2_failed vdb_ops graph_ops vdb_ops_sum_ms graph_ops_sum_ms".split())
++_METRIC_TIMINGS = {
++    "sys1_timing_sums": frozenset("sys1_waiting_ms sys1_l1_process_ms sys1_workflow_ms sys1_ops_avg_ms".split()),
++    "sys2_timing_sums": frozenset("sys2_waiting_ms sys2_preprocess_ms sys2_agent_generate_ms sys2_agent_tools_avg_ms sys2_sweeper_ms".split()),
++}
++
++
++def project_metrics(data) -> dict:
++    values = data if type(data) is dict else {}
++    result = {key: _number(values.get(key)) for key in _METRIC_COUNTS}
++    for key, allowed in _METRIC_TIMINGS.items():
++        nested = values.get(key)
++        nested = nested if type(nested) is dict else {}
++        result[key] = {name: _number(nested[name]) for name in allowed if name in nested}
++    return result
++
++
++def metric_minute(value) -> str:
++    if type(value) is str and len(value) == 16:
++        try:
++            minute = datetime.strptime(value, "%Y-%m-%dT%H:%M")
++            if minute.strftime("%Y-%m-%dT%H:%M") == value:
++                return value
++        except ValueError:
++            pass
++    return datetime.now().strftime("%Y-%m-%dT%H:%M")
++
++
++def legacy_trace_file(method):
++    """Serialize opt-in with the optional legacy file sink's actual write."""
++    @wraps(method)
++    def guarded(*args, **kwargs):
++        with _LOCK:
++            if _STRICT:
++                raise DiagnosticPolicyError("diagnostic_legacy_trace_file_unsupported")
++            return method(*args, **kwargs)
++    return guarded
++
++
++def project_memory_operation(**fields):
++    result = {key: safe_identifier(fields.get(key), request=key == "request_id")
++              for key in ("request_id", "user_id", "agent_id", "memory_id", "old_memory_id")}
++    result.update(content="", reason="",
++        op=_enum(fields.get("op"), frozenset(("ADD", "UPDATE", "DELETE", "EVOLVE", "MERGE"))),
++        layer=_enum(fields.get("layer"), _ENUMS["layer"], ""))
++    previous = fields.get("supersedes")
++    result["supersedes"] = [safe for item in previous if (safe := safe_identifier(item))] if type(previous) in (list, tuple) and len(previous) <= MAX_ITEMS else []
++    return result
++
++
++def locked_diagnostic_setup(method):
++    """Setup/attachment and activation must be one atomic handler transition."""
++    @wraps(method)
++    def guarded(*args, **kwargs):
++        with _LOCK:
++            return method(*args, **kwargs)
++    return guarded
++
++# Core may see this module through sys.modules while another thread imports it.
++_POLICY_READY = True
+diff --git a/hy_memory/utils/log_setup.py b/hy_memory/utils/log_setup.py
+index 250afad..396e4a8 100644
+--- a/hy_memory/utils/log_setup.py
++++ b/hy_memory/utils/log_setup.py
+@@ -24,6 +24,7 @@ import sys
+ from logging.handlers import TimedRotatingFileHandler
+ from pathlib import Path
+ from typing import Optional
++from .diagnostic_policy import locked_diagnostic_setup
+
+ # ================================================================
+ # request_id 上下文变量 (协程安全)
+@@ -159,6 +160,9 @@ def _make_formatter() -> logging.Formatter:
+     - "json"          → JsonLineFormatter（结构化，供 JSON 采集平台）
+     - 其它/未设置(默认) → SingleLineFormatter（纯文本，但保证单行不被换行截断）
+     """
++    from .diagnostic_policy import strict_diagnostics_enabled, StrictDiagnosticFormatter
++    if strict_diagnostics_enabled():
++        return StrictDiagnosticFormatter()
+     fmt = os.getenv("MEMORY_LOG_FORMAT", "text").strip().lower()
+     if fmt == "json":
+         return JsonLineFormatter()
+@@ -182,6 +186,7 @@ def _default_log_dir() -> str:
+     return os.path.join(data_dir, "logs")
+
+
++@locked_diagnostic_setup
+ def setup_logging(
+     log_dir: Optional[str] = None,
+     retention_days: int = 15,
+@@ -203,8 +208,12 @@ def setup_logging(
+
+     可多次调用，但只有首次生效。
+     """
++    from .diagnostic_policy import strict_diagnostics_enabled, protect_diagnostic_handler
+     global _logging_configured
+     if _logging_configured:
++        if strict_diagnostics_enabled():
++            for handler in logging.getLogger("hy_memory").handlers:
++                protect_diagnostic_handler(handler)
+         return
+     _logging_configured = True
+
+@@ -243,6 +252,9 @@ def setup_logging(
+     file_handler.setFormatter(formatter)
+     file_handler.setLevel(level)
+     file_handler.addFilter(req_filter)
++    file_handler._hy_memory_diagnostic_handler = True
++    if strict_diagnostics_enabled():
++        protect_diagnostic_handler(file_handler)
+     root_logger.addHandler(file_handler)
+
+     # ---- 控制台 Handler: 双流分离 ----
+@@ -256,6 +268,9 @@ def setup_logging(
+     stdout_handler.setLevel(level)
+     stdout_handler.addFilter(req_filter)
+     stdout_handler.addFilter(_StdoutLevelFilter())
++    stdout_handler._hy_memory_diagnostic_handler = True
++    if strict_diagnostics_enabled():
++        protect_diagnostic_handler(stdout_handler)
+     root_logger.addHandler(stdout_handler)
+
+     stderr_handler = logging.StreamHandler(sys.stderr)
+@@ -264,6 +279,9 @@ def setup_logging(
+     # stderr 也不会拿到 INFO/DEBUG 行）
+     stderr_handler.setLevel(logging.WARNING)
+     stderr_handler.addFilter(req_filter)
++    stderr_handler._hy_memory_diagnostic_handler = True
++    if strict_diagnostics_enabled():
++        protect_diagnostic_handler(stderr_handler)
+     root_logger.addHandler(stderr_handler)
+
+     # 避免日志向上传播到 root logger 导致重复输出
+diff --git a/hy_memory/utils/pipeline_log_writer.py b/hy_memory/utils/pipeline_log_writer.py
+index 20220bb..dc7f54f 100644
+--- a/hy_memory/utils/pipeline_log_writer.py
++++ b/hy_memory/utils/pipeline_log_writer.py
+@@ -17,6 +17,8 @@ MEMORY_LOG_LLM_CONTENT=true 才记录全文。
+ from __future__ import annotations
+
+ import json
++import threading
++from functools import wraps
+ import logging
+ import re
+ from datetime import datetime
+@@ -48,6 +50,17 @@ def _safe_subdir(value: str) -> Optional[str]:
+ TraceFileWriter = None  # set after class definition
+
+
++def _serialized_write(method):
++    @wraps(method)
++    def write(self, *args, **kwargs):
++        from .diagnostic_policy import DiagnosticPolicyError
++        with self._diagnostic_lock:
++            if self._diagnostic_closed:
++                raise DiagnosticPolicyError("diagnostic_writer_closed")
++            return method(self, *args, **kwargs)
++    return write
++
++
+ class PipelineLogWriter:
+     """按 {subdir}/{date}.log 追加 JSONL；best-effort，失败静默。
+
+@@ -59,6 +72,12 @@ class PipelineLogWriter:
+     """
+
+     def __init__(self, log_dir: str, default_subdir: str = "default"):
++        from .diagnostic_policy import register_diagnostic_resource, strict_diagnostics_enabled
++        self._diagnostic_lock = threading.RLock()
++        self._diagnostic_closed = False
++        register_diagnostic_resource(self)
++        if strict_diagnostics_enabled():
++            default_subdir = "default"
+         self._log_dir = log_dir
+         self._default_subdir = _safe_subdir(default_subdir) or "default"
+         try:
+@@ -66,14 +85,24 @@ class PipelineLogWriter:
+         except Exception:
+             pass
+
++    def close(self) -> None:
++        from .diagnostic_policy import release_diagnostic_resource
++        with self._diagnostic_lock:
++            self._diagnostic_closed = True
++            release_diagnostic_resource(self)
++
+     def _resolve_subdir(self, user_id: str) -> str:
+         """从 user_id 的 "{prefix}__{user_id}" 前缀取 prefix 作为子目录；无前缀则回落。"""
++        from .diagnostic_policy import strict_diagnostics_enabled
++        if strict_diagnostics_enabled():
++            return "default"
+         if user_id and "__" in user_id:
+             prefix = _safe_subdir(user_id.split("__", 1)[0])
+             if prefix:
+                 return prefix
+         return self._default_subdir
+
++    @_serialized_write
+     def write_step(
+         self,
+         *,
+@@ -93,6 +122,23 @@ class PipelineLogWriter:
+         event_at_ms: int = 0,
+         **kwargs: Any,
+     ) -> None:
++        from .diagnostic_policy import strict_diagnostics_enabled, project_pipeline_diagnostic
++        if strict_diagnostics_enabled():
++            safe = project_pipeline_diagnostic(request_id=request_id, user_id=user_id, agent_id=agent_id, session_id=session_id, step=step, prompt=prompt, response=response, parsed=parsed, memory_ids=memory_ids, elapsed_ms=elapsed_ms, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens, event_at_ms=event_at_ms)
++            request_id = safe["request_id"]
++            user_id = safe["user_id"]
++            agent_id = safe["agent_id"]
++            session_id = safe["session_id"]
++            step = safe["step"]
++            prompt = safe["prompt"]
++            response = safe["response"]
++            parsed = safe["parsed"]
++            memory_ids = safe["memory_ids"]
++            elapsed_ms = safe["elapsed_ms"]
++            prompt_tokens = safe["prompt_tokens"]
++            completion_tokens = safe["completion_tokens"]
++            total_tokens = safe["total_tokens"]
++            event_at_ms = safe["event_at_ms"]
+         try:
+             from .pipeline_observability import (
+                 is_llm_content_logging_enabled,
+diff --git a/hy_memory/utils/pipeline_observability.py b/hy_memory/utils/pipeline_observability.py
+index f6a2bdd..767c3bb 100644
+--- a/hy_memory/utils/pipeline_observability.py
++++ b/hy_memory/utils/pipeline_observability.py
+@@ -40,6 +40,7 @@ from pathlib import Path
+ from typing import Any, Callable, Set
+
+ from .async_executor import run_in_executor_guarded
++from .diagnostic_policy import strict_diagnostics_enabled, project_pipeline_diagnostic
+ from .pipeline_log_lifecycle import PipelineLogWorkGroup
+ from ..core.write_effects import observe_async
+
+@@ -108,13 +109,15 @@ def is_memory_operations_enabled() -> bool:
+
+ def is_llm_content_logging_enabled() -> bool:
+     """Whether pipeline logs/traces may persist full LLM input and output."""
+-    return os.getenv("MEMORY_LOG_LLM_CONTENT", "false").strip().lower() in (
++    return not strict_diagnostics_enabled() and os.getenv("MEMORY_LOG_LLM_CONTENT", "false").strip().lower() in (
+         "true", "1", "yes", "on",
+     )
+
+
+ def logged_content(value) -> str:
+     """Text for a log line: the value itself only when content logging is on."""
++    if strict_diagnostics_enabled():
++        return "<content omitted>"
+     text = value if isinstance(value, str) else str(value)
+     return text if is_llm_content_logging_enabled() else redact_content(text)
+
+@@ -365,11 +368,28 @@ def wrap_store_pipeline_log(
+         # 自己被调用的时刻，调用方经过 create_task/跨线程调度后可能已经晚了。
+         # 显式命名参数（而不是让它落进 **kwargs）是为了避免下面 original_store(
+         # event_at_ms=event_at_ms, **extra_kwargs) 出现重复关键字参数报错。
++        if strict_diagnostics_enabled():
++            safe = project_pipeline_diagnostic(request_id=request_id, user_id=user_id, agent_id=agent_id, session_id=session_id, step=step, prompt=prompt, response=response, parsed=parsed, memory_ids=memory_ids, elapsed_ms=elapsed_ms, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens, event_at_ms=event_at_ms)
++            request_id = safe["request_id"]
++            user_id = safe["user_id"]
++            agent_id = safe["agent_id"]
++            session_id = safe["session_id"]
++            step = safe["step"]
++            prompt = safe["prompt"]
++            response = safe["response"]
++            parsed = safe["parsed"]
++            memory_ids = safe["memory_ids"]
++            elapsed_ms = safe["elapsed_ms"]
++            prompt_tokens = safe["prompt_tokens"]
++            completion_tokens = safe["completion_tokens"]
++            total_tokens = safe["total_tokens"]
++            event_at_ms = safe["event_at_ms"]
++            kwargs = {}
+         _now = time.time()
+         event_at_ms = int(event_at_ms) if event_at_ms else int(_now * 1000)
+
+         parsed = _inject_op_ms(parsed, step, elapsed_ms)
+-        if not is_llm_content_logging_enabled():
++        if not strict_diagnostics_enabled() and not is_llm_content_logging_enabled():
+             prompt = redact_content(prompt)
+             response = redact_content(response)
+             # parsed carries extracted facts and queries too (EXTRACT, READ_*).
+@@ -568,3 +588,4 @@ def install_pipeline_observability(
+         owner_loop=owner_loop,
+     )
+     cache._pipeline_log_work_group = cache.store_pipeline_log.work_group
++    cache._pipeline_log_writer = log_writer
+diff --git a/hy_memory/utils/tracer.py b/hy_memory/utils/tracer.py
+index dc77ab6..ac2685f 100644
+--- a/hy_memory/utils/tracer.py
++++ b/hy_memory/utils/tracer.py
+@@ -62,6 +62,8 @@ from datetime import datetime
+ from pathlib import Path
+ from typing import Any, Dict, List, Optional
+
++from .diagnostic_policy import legacy_trace_file
++
+ logger = logging.getLogger(__name__)
+
+ # 日志根目录
+@@ -312,6 +314,9 @@ class PipelineTracer:
+         Returns:
+             完整的 trace dict
+         """
++        from .diagnostic_policy import strict_diagnostics_enabled, DiagnosticPolicyError
++        if write_file and strict_diagnostics_enabled():
++            raise DiagnosticPolicyError("diagnostic_legacy_trace_file_unsupported")
+         if self._finished:
+             return self.to_dict()
+         self._finished = True
+@@ -328,3 +333,4 @@ class PipelineTracer:
++    @legacy_trace_file
+     def _write_to_file(self, trace_data: Dict[str, Any]) -> None:
+         """
+         写入 JSONL 日志文件。
+@@ -337,6 +343,9 @@ class PipelineTracer:
+
+         每行一条 JSON trace，按天滚动。
+         """
++        from .diagnostic_policy import strict_diagnostics_enabled, DiagnosticPolicyError
++        if strict_diagnostics_enabled():
++            raise DiagnosticPolicyError("diagnostic_legacy_trace_file_unsupported")
+         try:
+             uid = self.uid or "_unknown"
+             agent_id = self.agent_id or "_default"
+diff --git a/memhub/apps/core/src/one_memory/diagnostic_log.py b/memhub/apps/core/src/one_memory/diagnostic_log.py
+index 6e9c402..e45c59c 100644
+--- a/memhub/apps/core/src/one_memory/diagnostic_log.py
++++ b/memhub/apps/core/src/one_memory/diagnostic_log.py
+@@ -26,6 +26,7 @@ import sys
+ import threading
+ import time
+ import traceback
++import weakref
+ from collections import Counter, deque
+ from collections.abc import Mapping
+ from contextlib import suppress
+@@ -148,6 +149,38 @@ _DETAIL_KEYS = frozenset(
+ )
+ _trace_id: ContextVar[str | None] = ContextVar("one_memory_trace_id", default=None)
+ _active: DiagnosticLog | None = None
++_live_diagnostic_logs: weakref.WeakSet = weakref.WeakSet()
++_diagnostic_resource_lock = threading.RLock()
++
++
++def _diagnostic_policy():
++    # Do not import the heavy optional SDK merely to use legacy Core logging.
++    policy = sys.modules.get("hy_memory.utils.diagnostic_policy")
++    return policy if getattr(policy, "_POLICY_READY", False) is True else None
++
++
++def _strict_policy():
++    policy = _diagnostic_policy()
++    return policy if policy and policy.strict_diagnostics_enabled() else None
++
++
++def _register_diagnostic_log(log):
++    policy = _diagnostic_policy()
++    lock = policy._LOCK if policy else _diagnostic_resource_lock
++    with lock, _diagnostic_resource_lock:
++        _live_diagnostic_logs.add(log)
++        if policy:
++            policy.register_diagnostic_resource(log)
++
++
++def _release_diagnostic_log(log):
++    policy = _diagnostic_policy()
++    lock = policy._LOCK if policy else _diagnostic_resource_lock
++    with lock, _diagnostic_resource_lock:
++        _live_diagnostic_logs.discard(log)
++        if policy:
++            policy.release_diagnostic_resource(log)
++
+ _database_errors: Counter[tuple[str, str]] = Counter()
+ _database_errors_lock = threading.Lock()
+
+@@ -166,8 +199,9 @@ class DiagnosticLog:
+         service: Literal["core"] = "core",
+         session_id: str | None = None,
+     ) -> None:
++        _register_diagnostic_log(self)
+         self.data_dir = data_dir.resolve()
+-        self.service = service
++        self.service = "core" if _strict_policy() else service
+         self.session_id = _uuid(session_id) or str(uuid4())
+         # Held only around the queue, never across a syscall. That is the whole
+         # difference from the version that stalled the loop: a caller can always
+@@ -220,6 +254,13 @@ class DiagnosticLog:
+         safe_stack: tuple[str, ...] | None = None,
+         details: Mapping[str, str | int | float | bool | None] | None = None,
+     ) -> None:
++        policy = _strict_policy()
++        if policy:
++            value = dict(locals())
++            value["session_id"] = self.session_id
++            value["trace_id"] = trace_id or current_trace_id()
++            self._submit(_serialize(policy.project_core_diagnostic(value)))
++            return
+         if level == "info" and event in _HIGH_FREQUENCY_EVENTS:
+             detail_values = dict(details or {})
+             sample_key = (
+@@ -374,6 +415,7 @@ class DiagnosticLog:
+             writer = self._writer
+             self._ready.notify_all()
+         if writer is None:
++            _release_diagnostic_log(self)
+             return True
+         if writer is threading.current_thread():
+             # The writer asking itself to stop: joining would raise. Marking it
+@@ -381,7 +423,10 @@ class DiagnosticLog:
+             return False
+         writer.join(timeout)
+         with self._ready:
+-            return not writer.is_alive() and not self._degraded
++            success = not writer.is_alive() and not self._degraded
++        if success:
++            _release_diagnostic_log(self)
++        return success
+
+     # --- the writer thread: everything below runs only there --------------
+
+@@ -771,6 +816,10 @@ def resource_snapshot() -> dict[str, int]:
+
+
+ def database_error_code(error: BaseException) -> str:
++    if _strict_policy():
++        # SQLite's native integer error code is safe; arbitrary messages are not.
++        code = getattr(error, "sqlite_errorcode", None)
++        return {5: "database_busy", 6: "database_locked", 8: "database_readonly", 10: "database_disk_io", 11: "database_corrupt", 14: "database_cannot_open"}.get(code, "database_other") if type(code) is int else "database_other"
+     text = str(error).lower()
+     if "locked" in text:
+         return "database_locked"
+@@ -820,6 +869,9 @@ def record_database_error(
+
+
+ def diagnostic_exception(error: BaseException) -> dict[str, object]:
++    policy = _strict_policy()
++    if policy:
++        return policy.safe_exception_details(error)
+     frames: list[str] = []
+     for frame in traceback.extract_tb(error.__traceback__):
+         parts = Path(frame.filename).parts
+@@ -838,6 +890,9 @@ def diagnostic_exception(error: BaseException) -> dict[str, object]:
+
+
+ def _serialize(value: Mapping[str, object]) -> str:
++    policy = _strict_policy()
++    if policy:
++        value = policy.project_core_diagnostic(value)
+     return json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n"
+
+
+diff --git a/memhub/apps/core/src/one_memory/exception_reporting.py b/memhub/apps/core/src/one_memory/exception_reporting.py
+index d544801..88c2622 100644
+--- a/memhub/apps/core/src/one_memory/exception_reporting.py
++++ b/memhub/apps/core/src/one_memory/exception_reporting.py
+@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable, Coroutine
+ from time import monotonic
+ from typing import Any, cast
+
+-from one_memory.diagnostic_log import diagnostic_event, diagnostic_exception
++from one_memory.diagnostic_log import diagnostic_event, diagnostic_exception, _strict_policy
+
+ _logger = logging.getLogger(__name__)
+ _REPORT_LOCK = threading.Lock()
+@@ -28,6 +28,8 @@ _FULL_INTERVAL_SECONDS = 60.0
+
+
+ def _safe_message(error: BaseException, limit: int = 300) -> str:
++    if _strict_policy():
++        return "content_omitted"
+     text = " ".join(str(error).split())
+     return text if len(text) <= limit else f"{text[:limit]}…"
+
+@@ -94,9 +96,12 @@ def install_asyncio_exception_handler(loop: asyncio.AbstractEventLoop) -> None:
+                 "core.loop.task_exception",
+                 error,
+                 context={
+-                    "reason": str(context.get("message") or "unhandled task error")[:200],
++                    "reason": "content_omitted" if _strict_policy() else str(context.get("message") or "unhandled task error")[:200],
+                 },
+             )
++        if _strict_policy():
++            # A caller hook may print raw context; strict owns this error sink.
++            return
+         if previous is not None:
+             previous(loop_, context)
+         else:
+@@ -117,7 +122,7 @@ def install_threading_excepthook() -> None:
+                 "core.thread",
+                 "core.thread.exception",
+                 error,
+-                context={"reason": f"thread {args.thread and args.thread.name}"},
++                context={"reason": "content_omitted" if _strict_policy() else f"thread {args.thread and args.thread.name}"},
+             )
+
+     threading.excepthook = hook
+diff --git a/memhub/apps/core/src/one_memory/hy_runtime_config.py b/memhub/apps/core/src/one_memory/hy_runtime_config.py
+index 66c2603..5171bfa 100644
+--- a/memhub/apps/core/src/one_memory/hy_runtime_config.py
++++ b/memhub/apps/core/src/one_memory/hy_runtime_config.py
+@@ -9,6 +9,7 @@ from __future__ import annotations
+ import json
+ import logging
+ import os
++import sys
+ from importlib import metadata
+ from pathlib import Path
+ from typing import Literal, cast
+@@ -125,6 +126,12 @@ def set_diagnostic_log_level(
+     return level
+
+
++def _diagnostic_content_allowed(level: DiagnosticLogLevel) -> bool:
++    policy = sys.modules.get("hy_memory.utils.diagnostic_policy")
++    ready = getattr(policy, "_POLICY_READY", False) is True
++    return level == "debug" and not (ready and policy.strict_diagnostics_enabled())
++
++
+ def apply_diagnostic_log_level(level: DiagnosticLogLevel) -> None:
+     """Apply the selected collection level without rewriting log content."""
+
+@@ -152,7 +159,7 @@ def apply_diagnostic_log_level(level: DiagnosticLogLevel) -> None:
+
+     os.environ["MEMORY_LOG_LEVEL"] = logging.getLevelName(selected)
+     os.environ["MEMORY_PIPELINE_TRACE_ENABLED"] = "true" if level == "debug" else "false"
+-    os.environ["MEMORY_LOG_LLM_CONTENT"] = "true" if level == "debug" else "false"
++    os.environ["MEMORY_LOG_LLM_CONTENT"] = "true" if _diagnostic_content_allowed(level) else "false"
+
+
+ def hy_memory_version() -> str:
+@@ -174,7 +181,7 @@ def configure_hy_runtime_environment(data_dir: Path) -> None:
+     level = diagnostic_log_level(data_dir)
+     os.environ["MEMORY_LOG_LEVEL"] = level.upper()
+     os.environ["MEMORY_PIPELINE_TRACE_ENABLED"] = "true" if level == "debug" else "false"
+-    os.environ["MEMORY_LOG_LLM_CONTENT"] = "true" if level == "debug" else "false"
++    os.environ["MEMORY_LOG_LLM_CONTENT"] = "true" if _diagnostic_content_allowed(level) else "false"
+     os.environ["MEMORY_MEMORY_OPERATIONS_ENABLED"] = "false"
+     os.environ["ANONYMIZED_TELEMETRY"] = "False"
+     os.environ.pop("CHROMA_OTEL_COLLECTION_ENDPOINT", None)
+diff --git a/memhub/apps/core/src/one_memory/log_file.py b/memhub/apps/core/src/one_memory/log_file.py
+index 23be281..5cad5a8 100644
+--- a/memhub/apps/core/src/one_memory/log_file.py
++++ b/memhub/apps/core/src/one_memory/log_file.py
+@@ -1,6 +1,8 @@
+ import logging
+ from logging.handlers import RotatingFileHandler
+ from pathlib import Path
++from functools import wraps
++from one_memory.diagnostic_log import _strict_policy, _diagnostic_policy, _diagnostic_resource_lock
+
+ # Enough history to cover the run before the one being complained about,
+ # capped so that a machine left running for months does not fill up.
+@@ -12,6 +14,17 @@ def log_path(data_dir: Path) -> Path:
+     return data_dir / "logs" / "core.log"
+
+
++def _locked_setup(method):
++    @wraps(method)
++    def guarded(*args, **kwargs):
++        policy = _diagnostic_policy()
++        lock = policy._LOCK if policy else _diagnostic_resource_lock
++        with lock, _diagnostic_resource_lock:
++            return method(*args, **kwargs)
++    return guarded
++
++
++@_locked_setup
+ def start_logging_to_file(data_dir: Path) -> Path:
+     """Also write the log to a file the user can find.
+
+@@ -32,6 +45,10 @@ def start_logging_to_file(data_dir: Path) -> Path:
+             isinstance(existing, RotatingFileHandler)
+             and Path(existing.baseFilename) == destination.resolve()
+         ):
++            existing._one_memory_diagnostic_handler = True
++            policy = _strict_policy()
++            if policy:
++                policy.protect_diagnostic_handler(existing)
+             return destination
+     handler = RotatingFileHandler(
+         destination,
+@@ -45,6 +62,10 @@ def start_logging_to_file(data_dir: Path) -> Path:
+             datefmt="%Y-%m-%d %H:%M:%S",
+         )
+     )
++    handler._one_memory_diagnostic_handler = True
++    policy = _strict_policy()
++    if policy:
++        policy.protect_diagnostic_handler(handler)
+     root.addHandler(handler)
+     if root.level > logging.INFO or root.level == logging.NOTSET:
+         root.setLevel(logging.INFO)
+diff --git a/memhub/apps/core/tests/test_diagnostic_log.py b/memhub/apps/core/tests/test_diagnostic_log.py
+index 558bab1..5222e7b 100644
+--- a/memhub/apps/core/tests/test_diagnostic_log.py
++++ b/memhub/apps/core/tests/test_diagnostic_log.py
+@@ -350,3 +350,170 @@ def test_a_plain_zero_does_not_enable_diagnostics(monkeypatch) -> None:
+     for value in ("0", "false", "no", "off", ""):
+         monkeypatch.setenv("ONE_MEMORY_DIAGNOSTICS", value)
+         assert diagnostics_requested() is False, value
++
++
++@pytest.fixture
++def strict_native_policy(monkeypatch):
++    import weakref
++    from hy_memory.utils import diagnostic_policy as policy
++    monkeypatch.setattr(policy, "_STRICT", False)
++    monkeypatch.setattr(policy, "_RESOURCES", weakref.WeakKeyDictionary())
++    monkeypatch.setattr(policy, "_KNOWN_SOURCES", {})
++    monkeypatch.setattr(diagnostic_log, "_live_diagnostic_logs", weakref.WeakSet())
++    handlers = [handler for name in ("", "hy_memory") for handler in logging.getLogger(name).handlers]
++    previous = [(h, h.formatter, h.handleError) for h in handlers]
++    yield policy
++    for handler, formatter, handle_error in previous:
++        handler.setFormatter(formatter)
++        handler.handleError = handle_error
++
++
++def test_strict_activation_refuses_live_legacy_core_writer_until_real_close(tmp_path, monkeypatch, strict_native_policy):
++    import threading
++    policy = strict_native_policy
++    log = DiagnosticLog(tmp_path)
++    entered, release = threading.Event(), threading.Event()
++    original = log._write_batch
++    def blocked(lines):
++        entered.set()
++        assert release.wait(3)
++        original(lines)
++    monkeypatch.setattr(log, "_write_batch", blocked)
++    log.write(level="info", component="core.lifecycle", event="core.ready", outcome="completed")
++    assert entered.wait(2)
++    try:
++        assert not log.close(timeout=0.01)
++        with pytest.raises(policy.DiagnosticPolicyError, match="resources_active"):
++            policy.enable_strict_diagnostics()
++        assert not policy.strict_diagnostics_enabled()
++    finally:
++        release.set()
++        assert log.close(timeout=3)
++    policy.enable_strict_diagnostics()
++
++
++def test_strict_core_jsonl_drops_free_fields_but_keeps_counts(tmp_path, strict_native_policy):
++    policy = strict_native_policy
++    policy.enable_strict_diagnostics()
++    synthetic_body = "synthetic-private-prose-正文"
++    log = DiagnosticLog(tmp_path)
++    log.write(level="error", component="core.database", event="database.error", outcome="failed",
++        request_id=synthetic_body, error_type="OperationalError", error_code=synthetic_body,
++        safe_stack=(synthetic_body,), details={"reason": synthetic_body, synthetic_body: synthetic_body, "count": 3, "timed_out": True})
++    assert log.close()
++    raw = log.path.read_text()
++    assert synthetic_body not in raw
++    row = json.loads(raw)
++    assert row["component"] == "core.database" and row["event"] == "database.error"
++    assert row["error_type"] == "OperationalError" and row["details"] == {"count": 3, "timed_out": True}
++    assert row["content_omitted"] is True
++    assert policy.project_core_diagnostic(row) == row
++
++
++def test_strict_exception_reporting_never_stringifies_or_calls_previous_hook(tmp_path, monkeypatch, strict_native_policy):
++    import asyncio
++    from one_memory import exception_reporting
++    policy = strict_native_policy
++    policy.enable_strict_diagnostics()
++    class HostileError(Exception):
++        def __str__(self):
++            raise AssertionError("error message must not be rendered")
++    error = HostileError()
++    assert diagnostic_exception(error) == {"error_type": "Error"}
++    assert database_error_code(error) == "database_other"
++    exception_reporting.report_exception("core.task", "core.task.exception", error)
++    async def scenario():
++        loop = asyncio.get_running_loop()
++        previous = loop.get_exception_handler()
++        seen = []
++        loop.set_exception_handler(lambda *_: seen.append(True))
++        exception_reporting.install_asyncio_exception_handler(loop)
++        try:
++            loop.call_exception_handler({"exception": error, "message": "synthetic-private-prose"})
++            assert seen == []
++        finally:
++            loop.set_exception_handler(previous)
++    asyncio.run(scenario())
++
++
++def test_strict_core_log_handler_and_debug_toggle_stay_content_free(tmp_path, strict_native_policy):
++    from one_memory.log_file import start_logging_to_file
++    from one_memory.hy_runtime_config import apply_diagnostic_log_level
++    policy = strict_native_policy
++    destination = start_logging_to_file(tmp_path)
++    root = logging.getLogger()
++    handlers = [h for h in root.handlers if getattr(h, "baseFilename", None) == str(destination.resolve())]
++    try:
++        policy.enable_strict_diagnostics()
++        for level in ("debug", "info", "debug"):
++            apply_diagnostic_log_level(level)
++            assert os.environ["MEMORY_LOG_LLM_CONTENT"] == "false"
++            assert start_logging_to_file(tmp_path) == destination
++            logging.getLogger("one_memory.probe").error("synthetic-private-prose", exc_info=ValueError("synthetic-private-prose"))
++        for handler in handlers:
++            handler.flush()
++        content = destination.read_text()
++        assert "synthetic-private-prose" not in content
++        assert "diagnostic_event" in content
++        assert len([h for h in root.handlers if getattr(h, "baseFilename", None) == str(destination.resolve())]) == 1
++        record = logging.LogRecord("one_memory.diagnostic_log", logging.INFO, diagnostic_log.__file__, 2, "body", (), None)
++        assert json.loads(policy.StrictDiagnosticFormatter().format(record))["source"] == "one_memory/diagnostic_log.py"
++    finally:
++        for handler in handlers:
++            root.removeHandler(handler)
++            handler.close()
++
++
++def test_strict_core_handler_attach_and_activation_are_atomic(tmp_path, monkeypatch, strict_native_policy):
++    import threading
++    from one_memory.log_file import start_logging_to_file
++    policy = strict_native_policy
++    root = logging.getLogger()
++    original = root.addHandler
++    entered, release, activated = threading.Event(), threading.Event(), threading.Event()
++    def blocked_attach(handler):
++        if getattr(handler, '_one_memory_diagnostic_handler', False):
++            entered.set()
++            assert release.wait(3)
++        original(handler)
++    monkeypatch.setattr(root, 'addHandler', blocked_attach)
++    setup = threading.Thread(target=lambda: start_logging_to_file(tmp_path))
++    setup.start()
++    assert entered.wait(2)
++    activation = threading.Thread(target=lambda: (policy.enable_strict_diagnostics(), activated.set()))
++    activation.start()
++    try:
++        assert not activated.wait(0.03)
++    finally:
++        release.set()
++        setup.join(2)
++        activation.join(2)
++    assert activated.is_set()
++    logging.getLogger('one_memory.probe').error('synthetic-private-prose')
++    for handler in list(root.handlers):
++        if getattr(handler, 'baseFilename', None) == str((tmp_path / 'logs/core.log').resolve()):
++            assert isinstance(handler.formatter, policy.StrictDiagnosticFormatter)
++            handler.flush()
++            root.removeHandler(handler)
++            handler.close()
++    assert 'synthetic-private-prose' not in (tmp_path / 'logs/core.log').read_text()
++
++
++def test_partial_sdk_policy_import_keeps_legacy_core_resources_registered(tmp_path, monkeypatch, strict_native_policy):
++    import sys
++    import types
++    from one_memory.hy_runtime_config import apply_diagnostic_log_level
++    policy = strict_native_policy
++    module_name = 'hy_memory.utils.diagnostic_policy'
++    with monkeypatch.context() as pending_import:
++        pending_import.setitem(sys.modules, module_name, types.ModuleType(module_name))
++        log = DiagnosticLog(tmp_path)
++        apply_diagnostic_log_level('debug')
++        assert os.environ['MEMORY_LOG_LLM_CONTENT'] == 'true'
++        log.write(level='info', component='core.lifecycle', event='core.ready', outcome='completed')
++        assert diagnostic_exception(ValueError('synthetic')) == {'error_type': 'ValueError'}
++    with pytest.raises(policy.DiagnosticPolicyError, match='resources_active'):
++        policy.enable_strict_diagnostics()
++    assert log.close()
++    policy.enable_strict_diagnostics()
++    assert policy.strict_diagnostics_enabled()
+diff --git a/tests/test_diagnostic_content_policy.py b/tests/test_diagnostic_content_policy.py
+new file mode 100644
+index 0000000..14c37e2
+--- /dev/null
++++ b/tests/test_diagnostic_content_policy.py
+@@ -0,0 +1,449 @@
++"""Strict diagnostics protect real sinks without changing business records."""
++import gc
++import io
++import json
++import logging
++import sys
++import threading
++import weakref
++from types import SimpleNamespace
++from uuid import uuid4
++
++import pytest
++
++from hy_memory.utils import diagnostic_policy as policy
++from hy_memory.utils import log_setup
++from hy_memory.data.cache_sqlite import SqliteCache
++from hy_memory.utils.pipeline_log_writer import PipelineLogWriter
++from hy_memory.utils.pipeline_observability import install_pipeline_observability
++from hy_memory.utils.pipeline_log_lifecycle import quiesce_pipeline_logs
++
++BODY = "synthetic-private-prose-敏感正文"
++
++
++@pytest.fixture(autouse=True)
++def isolated_policy(monkeypatch, tmp_path):
++    # Production exposes no downgrade/reset. Test state is isolated and restored.
++    monkeypatch.setattr(policy, "_STRICT", False)
++    monkeypatch.setattr(policy, "_RESOURCES", weakref.WeakKeyDictionary())
++    monkeypatch.setattr(policy, "_KNOWN_SOURCES", {})
++    monkeypatch.setattr(log_setup, "_logging_configured", False)
++    monkeypatch.setenv("MEMORY_LOG_DIR", str(tmp_path / "logs"))
++    monkeypatch.setenv("MEMORY_PIPELINE_TRACE_ENABLED", "true")
++    logger = logging.getLogger("hy_memory")
++    previous, propagate, level = logger.handlers[:], logger.propagate, logger.level
++    logger.handlers = []
++    yield
++    for handler in logger.handlers:
++        handler.close()
++    logger.handlers, logger.propagate, logger.level = previous, propagate, level
++
++
++def config(tmp_path):
++    return SimpleNamespace(cache=SimpleNamespace(db_path=str(tmp_path / "cache.db")))
++
++
++def payload(**extra):
++    values = dict(request_id=str(uuid4()), user_id=BODY, agent_id=BODY, session_id=BODY,
++                  step="EXTRACT", prompt=BODY, response=BODY,
++                  parsed=json.dumps({BODY: BODY, "reason": BODY, "error": BODY,
++                      "source": BODY, "owner": BODY, "custom_id": BODY,
++                      "custom_ms": BODY, "custom_at": BODY, "count": 7,
++                      "llm_ms": 12.5, "status": "succeeded",
++                      "stats": {"count": 3, "reason": BODY}}),
++                  memory_ids=[BODY, str(uuid4())], elapsed_ms=5.0, total_tokens=9)
++    values.update(extra)
++    return values
++
++
++class Hostile:
++    def __str__(self):
++        raise AssertionError("__str__ must never run")
++
++    def __repr__(self):
++        raise AssertionError("__repr__ must never run")
++
++
++def test_closed_projection_is_idempotent_and_drops_body():
++    values = payload()
++    projected = policy.project_pipeline_diagnostic(**values)
++    assert BODY not in json.dumps(projected, ensure_ascii=False)
++    assert projected["request_id"] == values["request_id"]
++    assert projected["prompt"] == projected["response"] == ""
++    assert projected["user_id"] == projected["agent_id"] == projected["session_id"] == ""
++    parsed = json.loads(projected["parsed"])
++    assert parsed == {"count": 7, "llm_ms": 12.5, "status": "succeeded",
++                      "stats": {"count": 3}, "diagnostic_policy": "strict-v1", "content_omitted": True}
++    assert policy.project_pipeline_diagnostic(**projected) == projected
++
++
++@pytest.mark.parametrize("parsed", [Hostile(), {BODY: Hostile()}, '["'+BODY+'"]',
++    '<redacted len='+BODY+'>', '{"reason":"'+BODY+'"}',
++    '[' * 5000 + '0' + ']' * 5000, 'x' * (policy.MAX_INPUT_BYTES + 1),
++    {"count": 10**500, "llm_ms": float('inf'), "stats": {"count": Hostile()}}], ids=["object", "nested_object", "array", "fake_redaction", "reason", "depth", "size", "numbers"])
++def test_invalid_parsed_is_bounded_and_never_stringifies(parsed):
++    safe = policy.project_pipeline_diagnostic(parsed=parsed, request_id=Hostile(),
++        memory_ids=[Hostile()], prompt=Hostile(), elapsed_ms=Hostile())
++    assert BODY not in json.dumps(safe, ensure_ascii=False)
++    assert len(json.dumps(safe)) < 1024
++
++
++def test_ids_are_closed_not_merely_valid_tokens():
++    ids = [str(uuid4()) for _ in range(4)]
++    request = 'cmh2:' + ':'.join(ids)
++    assert policy.safe_identifier(request, request=True) == request
++    assert policy.safe_identifier('cmh2:'+BODY, request=True) == ''
++    assert policy.safe_identifier('synthetic_private_prose', request=True) == ''
++    assert policy.project_pipeline_diagnostic(step='READ_'+BODY)['step'] == 'unknown'
++    assert policy.safe_identifier(ids[0].upper()) == ''
++
++
++def test_active_writer_blocks_activation_atomically_and_close_releases(tmp_path):
++    log_setup.setup_logging()
++    logger = logging.getLogger('hy_memory')
++    formatters = [h.formatter for h in logger.handlers]
++    writer = PipelineLogWriter(str(tmp_path / 'pipeline'))
++    with pytest.raises(policy.DiagnosticPolicyError, match='^diagnostic_policy_resources_active$'):
++        policy.enable_strict_diagnostics()
++    assert not policy.strict_diagnostics_enabled()
++    assert [h.formatter for h in logger.handlers] == formatters
++    writer.close()
++    policy.enable_strict_diagnostics()
++    policy.enable_strict_diagnostics()
++    assert len(logger.handlers) == 3
++    with pytest.raises(policy.DiagnosticPolicyError, match='diagnostic_writer_closed'):
++        writer.write_step(**payload())
++
++
++def test_dead_legacy_resource_does_not_permanently_block_activation(tmp_path):
++    writer = PipelineLogWriter(str(tmp_path))
++    reference = weakref.ref(writer)
++    del writer
++    gc.collect()
++    assert reference() is None
++    policy.enable_strict_diagnostics()
++
++
++@pytest.mark.asyncio
++async def test_cache_close_allows_activation_but_live_legacy_cache_does_not(tmp_path):
++    cache = SqliteCache(config(tmp_path))
++    await cache.initialize()
++    install_pipeline_observability(cache)
++    with pytest.raises(policy.DiagnosticPolicyError, match='resources_active'):
++        policy.enable_strict_diagnostics()
++    async with quiesce_pipeline_logs((cache,)):
++        await cache.close()
++    policy.enable_strict_diagnostics()
++
++
++def test_resource_registration_and_activation_share_one_lock(tmp_path):
++    entered = threading.Event()
++    finished = threading.Event()
++    resources = []
++    def register():
++        entered.set()
++        resources.append(PipelineLogWriter(str(tmp_path)))
++        finished.set()
++    with policy._LOCK:
++        thread = threading.Thread(target=register)
++        thread.start()
++        assert entered.wait(1)
++        assert not finished.is_set()
++        policy.enable_strict_diagnostics()
++    thread.join(2)
++    assert finished.is_set()
++    assert policy._RESOURCES[resources[0]] is True
++    resources[0].close()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize('wrapped', [False, True])
++@pytest.mark.parametrize('debug', [False, True])
++async def test_real_sqlite_and_jsonl_keep_metadata_and_business_state(tmp_path, monkeypatch, wrapped, debug):
++    policy.enable_strict_diagnostics()
++    monkeypatch.setenv('MEMORY_LOG_LLM_CONTENT', str(debug).lower())
++    monkeypatch.setenv('MEMORY_MEMORY_OPERATIONS_ENABLED', 'true')
++    cache = SqliteCache(config(tmp_path))
++    await cache.initialize()
++    values = payload()
++    if wrapped:
++        install_pipeline_observability(cache)
++    else:
++        writer = PipelineLogWriter(str(tmp_path / 'logs'), default_subdir=BODY)
++        writer.write_step(**values)
++        writer.close()
++    try:
++        await cache.store_pipeline_log(**values)
++        if wrapped:
++            async with quiesce_pipeline_logs((cache,)):
++                pass
++        rows = await cache.get_pipeline_logs(request_id=values['request_id'])
++        assert len(rows) == 1
++        assert rows[0]['step'] == 'EXTRACT'
++        assert rows[0]['total_tokens'] == 9
++        assert json.loads(rows[0]['parsed'])['count'] == 7
++        assert BODY not in json.dumps(rows, ensure_ascii=False)
++        files = list((tmp_path / 'logs').rglob('*.log'))
++        assert files
++        lines = [json.loads(line) for f in files for line in f.read_text().split('\n') if line]
++        assert any(line.get('step') == 'EXTRACT' and line.get('tokens') == 9 for line in lines)
++        assert BODY not in json.dumps(lines, ensure_ascii=False)
++        assert not any(BODY in str(f) for f in (tmp_path / 'logs').rglob('*'))
++        await cache.store_memory_operation(values['request_id'], BODY, BODY, 'ADD', str(uuid4()), BODY, reason=BODY)
++        operations = await cache.get_memory_operations(request_id=values['request_id'])
++        assert len(operations) == 1 and operations[0]['content'] == operations[0]['reason'] == ''
++        # Authority/recovery state is explicitly outside the diagnostic projection.
++        await cache.claim_write_outcome(values['request_id'], BODY, BODY, BODY, 'add')
++        assert await cache.finish_write_outcome(values['request_id'], 'succeeded', {'content': BODY})
++        outcome = await cache.get_write_outcome(values['request_id'])
++        assert outcome['result']['content'] == BODY
++    finally:
++        await cache.close()
++
++
++def test_existing_and_future_sdk_handlers_ignore_message_exception_and_bad_stream(tmp_path, monkeypatch):
++    stdout, stderr = io.StringIO(), io.StringIO()
++    monkeypatch.setattr(sys, 'stdout', stdout)
++    monkeypatch.setattr(sys, 'stderr', stderr)
++    log_setup.setup_logging(level=logging.DEBUG)
++    policy.enable_strict_diagnostics()
++    monkeypatch.setenv('MEMORY_LOG_LLM_CONTENT', 'true')
++    log_setup.setup_logging(level=logging.DEBUG)
++    log_setup.set_request_id(BODY)
++    logger = logging.getLogger('hy_memory.synthetic')
++    logger.info('%s', Hostile())
++    logger.error(BODY, exc_info=(ValueError, ValueError(BODY), None))
++    class BrokenStream:
++        def write(self, _):
++            raise OSError(BODY)
++        def flush(self):
++            pass
++    handler = logging.StreamHandler(BrokenStream())
++    policy.protect_diagnostic_handler(handler)
++    handler.handle(logging.LogRecord('hy_memory', logging.ERROR, __file__, 1, Hostile(), (Hostile(),), None))
++    captured = stdout.getvalue() + stderr.getvalue() + (tmp_path / 'logs/hy_memory.log').read_text()
++    assert BODY not in captured
++    assert 'ValueError' in captured and 'diagnostic_event' in captured
++    assert len(logging.getLogger('hy_memory').handlers) == 3
++
++
++def test_strict_formatter_does_not_render_preformatted_extras():
++    policy.enable_strict_diagnostics()
++    record = logging.LogRecord(BODY, logging.ERROR, BODY, 1, Hostile(), (Hostile(),), None)
++    record.exc_text = record.stack_info = record.request_id = BODY
++    record.getMessage = lambda: (_ for _ in ()).throw(AssertionError('getMessage'))
++    value = json.loads(policy.StrictDiagnosticFormatter().format(record))
++    assert BODY not in json.dumps(value, ensure_ascii=False)
++    assert value['logger'] == 'unknown'
++
++
++def test_strict_rejects_mysql_and_legacy_trace_file(tmp_path, monkeypatch):
++    policy.enable_strict_diagnostics()
++    from hy_memory.data.cache_mysql import MysqlCache
++    from hy_memory.utils import tracer
++    monkeypatch.setattr(tracer, '_TRACE_LOG_DIR', str(tmp_path))
++    with pytest.raises(policy.DiagnosticPolicyError, match='backend_unsupported'):
++        MysqlCache(SimpleNamespace(cache=None))
++    trace = tracer.PipelineTracer(operation='add', pipeline_version='system1', uid=BODY)
++    with pytest.raises(policy.DiagnosticPolicyError, match='legacy_trace_file_unsupported'):
++        trace.finish(write_file=True)
++    with pytest.raises(policy.DiagnosticPolicyError, match='legacy_trace_file_unsupported'):
++        trace._write_to_file({'body': BODY})
++    assert not list(tmp_path.rglob('*.log'))
++
++
++def test_invalid_timestamp_keeps_a_metadata_line(tmp_path):
++    policy.enable_strict_diagnostics()
++    writer = PipelineLogWriter(str(tmp_path))
++    writer.write_step(**payload(event_at_ms=10**15))
++    assert len(list(tmp_path.rglob('*.log'))) == 1
++    writer.close()
++
++
++@pytest.mark.asyncio
++async def test_metric_bucket_projection_preserves_native_merge_and_drops_old_free_keys(tmp_path):
++    policy.enable_strict_diagnostics()
++    cache = SqliteCache(config(tmp_path))
++    await cache.initialize()
++    minute = "2026-11-10T15:20"
++    try:
++        # An actual legacy row proves a new UPSERT cannot recopy its free keys.
++        with cache._lock:
++            cache._conn.execute("INSERT INTO system_metrics VALUES (?, ?, ?)",
++                (minute, json.dumps({"sys1_started": 2, "sys1_timing_sums": {"sys1_waiting_ms": 4, BODY: BODY}, BODY: BODY}), minute))
++            cache._conn.commit()
++        await cache.store_metrics_minute(minute, {"sys1_started": 3,
++            "sys1_timing_sums": {"sys1_waiting_ms": 5, "arbitrary": Hostile()}, BODY: Hostile()})
++        rows = await cache.load_metrics_range(minute, minute)
++        assert len(rows) == 1 and rows[0]["sys1_started"] == 5
++        assert rows[0]["sys1_timing_sums"]["sys1_waiting_ms"] == 9
++        assert BODY not in json.dumps(rows, ensure_ascii=False)
++        await cache.store_metrics_minute(BODY, {BODY: Hostile()})
++        with cache._lock:
++            all_rows = [dict(row) for row in cache._conn.execute("SELECT * FROM system_metrics")]
++        assert BODY not in json.dumps(all_rows, ensure_ascii=False)
++    finally:
++        await cache.close()
++
++
++def test_nested_projection_has_a_total_serialized_budget():
++    leaf = {key: 10**14 for key in policy._NUMERIC_KEYS}
++    value = leaf
++    for _ in range(3):
++        value = {**leaf, **{key: value for key in policy._CONTAINERS}}
++    result = policy.project_parsed(value)
++    assert len(result) <= policy.MAX_INPUT_BYTES // 2
++    assert policy.project_parsed(result) == result
++
++
++@pytest.mark.asyncio
++async def test_legacy_sql_callback_delayed_across_close_reopen_gets_final_projection(tmp_path, monkeypatch):
++    import asyncio
++    from hy_memory.data import cache_sqlite
++    original = cache_sqlite._run_in_sqlite_pool
++    ready, release = asyncio.Event(), asyncio.Event()
++    async def delayed(function, *args, **kwargs):
++        if function.__name__ == '_insert':
++            ready.set()
++            await release.wait()
++        return await original(function, *args, **kwargs)
++    monkeypatch.setattr(cache_sqlite, '_run_in_sqlite_pool', delayed)
++    cache = SqliteCache(config(tmp_path))
++    await cache.initialize()
++    values = payload()
++    task = asyncio.create_task(cache.store_pipeline_log(**values))
++    await asyncio.wait_for(ready.wait(), 2)
++    await cache.close()
++    policy.enable_strict_diagnostics()
++    await cache.initialize()
++    release.set()
++    assert await task
++    rows = await cache.get_pipeline_logs(request_id=values['request_id'])
++    assert len(rows) == 1 and BODY not in json.dumps(rows, ensure_ascii=False)
++    await cache.close()
++
++
++def test_optional_legacy_trace_write_serializes_with_activation(tmp_path, monkeypatch):
++    from hy_memory.utils import tracer
++    import builtins
++    entered, release, activated = threading.Event(), threading.Event(), threading.Event()
++    original = builtins.open
++    def blocked_open(*args, **kwargs):
++        entered.set()
++        assert release.wait(3)
++        return original(*args, **kwargs)
++    monkeypatch.setattr(tracer, 'open', blocked_open, raising=False)
++    monkeypatch.setattr(tracer, '_TRACE_LOG_DIR', str(tmp_path))
++    trace = tracer.PipelineTracer(operation='add', uid='legacy-test')
++    writer = threading.Thread(target=lambda: trace.finish(write_file=True))
++    writer.start()
++    assert entered.wait(2)
++    activator = threading.Thread(target=lambda: (policy.enable_strict_diagnostics(), activated.set()))
++    activator.start()
++    assert not activated.wait(0.03)
++    release.set()
++    writer.join(2)
++    activator.join(2)
++    assert activated.is_set()
++    with pytest.raises(policy.DiagnosticPolicyError, match='legacy_trace_file_unsupported'):
++        trace._write_to_file({'body': BODY})
++
++
++def test_sdk_handler_attach_and_activation_are_atomic(tmp_path, monkeypatch):
++    logger = logging.getLogger('hy_memory')
++    original = logger.addHandler
++    entered, release, activated = threading.Event(), threading.Event(), threading.Event()
++    def blocked_attach(handler):
++        if isinstance(handler, logging.FileHandler):
++            entered.set()
++            assert release.wait(3)
++        original(handler)
++    monkeypatch.setattr(logger, 'addHandler', blocked_attach)
++    setup = threading.Thread(target=lambda: log_setup.setup_logging(level=logging.INFO))
++    setup.start()
++    assert entered.wait(2)
++    activation = threading.Thread(target=lambda: (policy.enable_strict_diagnostics(), activated.set()))
++    activation.start()
++    try:
++        assert not activated.wait(0.03)
++    finally:
++        release.set()
++        setup.join(2)
++        activation.join(2)
++    assert activated.is_set()
++    logger.info(BODY)
++    for handler in logger.handlers:
++        handler.flush()
++        assert isinstance(handler.formatter, policy.StrictDiagnosticFormatter)
++    assert BODY not in (tmp_path / 'logs/hy_memory.log').read_text()
++
++
++def test_activation_refuses_an_existing_handlers_actual_emit_until_retry(tmp_path):
++    log_setup.setup_logging(level=logging.INFO)
++    logger = logging.getLogger('hy_memory')
++    handler = next(h for h in logger.handlers if isinstance(h, logging.FileHandler))
++    original = handler.stream
++    entered, release = threading.Event(), threading.Event()
++    class BlockedStream:
++        def write(self, value):
++            entered.set()
++            assert release.wait(3)
++            return original.write(value)
++        def flush(self):
++            original.flush()
++        def close(self):
++            original.close()
++    handler.stream = BlockedStream()
++    emitter = threading.Thread(target=lambda: logger.info(BODY))
++    emitter.start()
++    assert entered.wait(2)
++    previous = [h.formatter for h in logger.handlers]
++    try:
++        with pytest.raises(policy.DiagnosticPolicyError, match='^diagnostic_policy_logging_active$'):
++            policy.enable_strict_diagnostics()
++        assert not policy.strict_diagnostics_enabled()
++        assert [h.formatter for h in logger.handlers] == previous
++    finally:
++        release.set()
++        emitter.join(2)
++    policy.enable_strict_diagnostics()
++    old = (tmp_path / 'logs/hy_memory.log').read_text()
++    assert BODY in old  # Previously written content is a separate cleanup task.
++    logger.info(BODY)
++    handler.flush()
++    after = (tmp_path / 'logs/hy_memory.log').read_text()
++    assert BODY not in after[len(old):]
++
++
++def test_activation_from_legacy_message_rendering_is_rejected_not_deadlocked(tmp_path):
++    log_setup.setup_logging(level=logging.INFO)
++    failures = []
++    class ReentrantMessage:
++        def __str__(self):
++            try:
++                policy.enable_strict_diagnostics()
++            except policy.DiagnosticPolicyError as error:
++                failures.append(error.args[0])
++            return BODY
++    logging.getLogger('hy_memory').info(ReentrantMessage())
++    assert failures and set(failures) == {'diagnostic_policy_logging_active'}
++    assert not policy.strict_diagnostics_enabled()
++    policy.enable_strict_diagnostics()
++    assert policy.strict_diagnostics_enabled()
++
++
++def test_safe_exception_location_uses_only_known_code_frames(tmp_path):
++    policy.enable_strict_diagnostics()
++    from hy_memory.data.cache_mysql import MysqlCache
++    try:
++        MysqlCache(SimpleNamespace(cache=None))
++    except policy.DiagnosticPolicyError as error:
++        details = policy.safe_exception_details(error)
++        record = logging.LogRecord('hy_memory', logging.ERROR, __file__, 1, BODY, (), (type(error), error, error.__traceback__))
++        rendered = json.loads(policy.StrictDiagnosticFormatter().format(record))
++    assert details['safe_stack']
++    assert all(frame.startswith('hy_memory/') for frame in details['safe_stack'])
++    assert rendered['safe_stack'] == list(details['safe_stack'])
++    assert BODY not in json.dumps(rendered, ensure_ascii=False)
++    projected = policy.project_core_diagnostic({'safe_stack': [BODY, *details['safe_stack']]})
++    assert projected['safe_stack'] == list(details['safe_stack'])

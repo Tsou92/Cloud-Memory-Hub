@@ -1,18 +1,18 @@
 """Headless deployment entry, including explicit non-overwriting initialization."""
 
 import argparse
+import logging
 import os
 import secrets
 import sys
 from pathlib import Path
 
-import uvicorn
 from cryptography.fernet import Fernet
 
 from cloud_memory_hub.config import HubConfig, read_private_file
+from cloud_memory_hub.diagnostics import initialize_diagnostics, install_process_exception_hooks
 from cloud_memory_hub.governance_authority import activate_authority, require_separate_directory
-from cloud_memory_hub.original_archive import migrate_originals
-from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
+from cloud_memory_hub.remote_access import DeviceAccessStore
 from cloud_memory_hub.storage_lease import StorageLease, StorageLeaseError
 
 
@@ -76,6 +76,8 @@ def _main() -> None:
         print("Private configuration and governance authority initialized.")
         return
     if args.command == "migrate-originals":
+        from cloud_memory_hub.original_archive import migrate_originals
+
         if not args.writers_stopped:
             parser.error("migrate-originals requires stopped writers and --writers-stopped")
         data_dir = Path(os.environ.get("CMH_DATA_DIR", "/data"))
@@ -108,6 +110,8 @@ def _main() -> None:
     config = HubConfig.from_environment()
     config.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        import uvicorn
+
         from cloud_memory_hub.app import create_hub
 
         uvicorn.run(
@@ -116,14 +120,25 @@ def _main() -> None:
             port=config.port,
             access_log=False,
             proxy_headers=False,
+            log_config=None,
         )
 
 
 def main() -> None:
     try:
+        initialize_diagnostics()
+        install_process_exception_hooks()
         _main()
-    except (StorageLeaseError, AccessError) as error:
-        print(f"cloud-memory-hub: {error}", file=sys.stderr)
+    except StorageLeaseError as error:
+        # Preserve the public lease-conflict recovery code without formatting
+        # arbitrary exceptions or copying their message into diagnostic output.
+        if error.args == ("storage_in_use",):
+            print("cloud-memory-hub: storage_in_use", file=sys.stderr)
+        else:
+            logging.getLogger(__name__).error("hub_storage_unavailable", exc_info=True)
+        raise SystemExit(2) from None
+    except Exception:
+        logging.getLogger(__name__).error("hub_startup_failed", exc_info=True)
         raise SystemExit(2) from None
 
 

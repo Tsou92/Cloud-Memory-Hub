@@ -114,6 +114,11 @@
       "path": "patches/0022-diagnostic-write-quiescence.patch",
       "scope": "strict_pipeline_diagnostic_quiescence_and_retryable_runtime_shutdown",
       "digest": "sha256:af81b44174884d718b1e6d210516ef112606ee138a883ca75443fc4394992656"
+    },
+    {
+      "path": "patches/0023-strict-diagnostic-content.patch",
+      "scope": "optional_strict_diagnostic_metadata_and_atomic_output_policy_activation",
+      "digest": "sha256:3d85f39dd5708e24d064e4b4d23c3dfe05b7f123f1c2db867214fbe15c7c0700"
     }
   ]
 }

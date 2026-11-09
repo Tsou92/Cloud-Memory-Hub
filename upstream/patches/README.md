@@ -51,6 +51,8 @@
 
 ## 0017-content-free-logs.patch
 
+此为历史过滤实现，不能构成完整无正文保证：后续已复现自由键、标识后缀、伪占位符及异常路径泄漏。Hub 严格策略见 0023／ADR-0041；0017 继续保留为 SDK legacy 行为的一部分。
+
 - 实测上游在 INFO 级别把完整用户消息（`[add] messages detail`）、检索查询（`[search] target/query`、`[read/hybrid] query`）写入按天滚动、保留 15 天的文本日志；JSONL 管线日志的 `parsed` 字段（EXTRACT、S1_L1_UPSERT、RECONCILE_APPLY、READ_*）也含正文。这些副本无法按记录精确删除，与彻底删除冲突（ADR-0032）。
 - 复用上游已有的 `MEMORY_LOG_LLM_CONTENT` 开关与 `redact_content`：开关关闭（MemHub 非 debug 级别的默认）时，文本日志位置只记录长度和截断摘要；`parsed` 保留 JSON 结构、ID、计数和枚举字段，只替换自由文本值。debug 级别仍保留完整内容供诊断。
 - 不改变日志级别、行格式、文件位置或任何业务路径。实测脚本在接纳、提炼、检索、删除全流程后扫描日志目录，确认无合成标记。
@@ -68,3 +70,10 @@
 - 维护先暂停全部关联工作组，再严格等待实际完成；超时或取消保留未完成任务并恢复本次暂停租约。暂停期间新日志返回未接纳、不缓存正文；成功关闭后永久封闭工作组。
 - Core 两个搜索入口加入共享准入，保留读取并发；每桥关闭等待搜索。SDK/runtime 与 Core 引用链在关闭成功后释放，失败保留对象以供重试，不再先删除注册条目或吞掉关闭错误。
 - 不改数据库、删除选择器、签名或一次性许可；`write_effects` 仍是观察。未启用 Hub 准入时普通 SDK 路径保留原行为，但诊断关闭失败现在明确报告。详见 [ADR-0040](../../docs/adr/0040-diagnostic-write-quiescence.md) 和[验证记录](../../docs/reviews/2026-11-10-diagnostic-quiescence.md)。既有文件正文和其他后台域仍待后续治理。
+
+## 0023-strict-diagnostic-content.patch
+
+- Hub 显式启用进程级 strict-v1，普通 SDK 保持 legacy 默认。复用原 wrapper、JSONL、SQLite、Core 诊断 writer 和 Python logging，只增加共用封闭投影、受控 formatter 与资源激活前置。
+- 自由正文、任意键及身份字符串不进入诊断；保留规范请求 UUID、步骤、数值计数、耗时和闭集状态。debug 与内容策略独立，环境变量不能降级。诊断缓存、直接文件调用、memory-operation、metrics 合并及 Core 独立文件出口分别保护；不投影业务原文、模型实参或持久结果。
+- 旧活动资源必须先结束；handler 创建、挂载与严格激活协调，不能让后台旧 I/O 或新挂载的旧 formatter 在激活后漏出正文。Hub 接管进程日志配置，调用者 handler 分离但保留对象，不关闭其文件。
+- 兼容、失败、性能及真实场景验收见 [ADR-0041](../../docs/adr/0041-strict-diagnostic-content-policy.md)。没有在本补丁清理旧物理日志、Docker 旧 stdout 或独立读取副本，不据此宣布彻底删除完成。

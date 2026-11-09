@@ -1,16 +1,17 @@
 """FR-11: request-bound diagnostic rows survive neither purge nor cache restore."""
 
 import asyncio
+import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from hy_memory.client import HyMemoryClient
-from hy_memory.data.cache_sqlite import SqliteCache
+from hy_memory.utils.diagnostic_policy import strict_diagnostics_enabled
 from one_memory.api import _sdk_library_bridge
-from one_memory.hy_memory_bridge import _joined_thread
 from test_chat_graph import produce
 from test_governance_execution import EXECUTE
 from test_inflight_execution_recovery import confirmation
@@ -20,6 +21,48 @@ from test_output_lineage import fixture
 TABLES = ("pipeline_logs_v2", "memory_operations_v2")
 TARGET_TEXT = "Synthetic diagnostic-only orchard detail retained independently of source text."
 OTHER_TEXT = "Synthetic unrelated diagnostic harbour detail must remain available."
+
+# A separate process uses the SDK's supported legacy default. Never turn off
+# the irreversible strict policy in the running Hub to manufacture old bodies.
+LEGACY_WRITER = r"""
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from hy_memory.data.cache_sqlite import SqliteCache
+from hy_memory.utils.diagnostic_policy import strict_diagnostics_enabled
+
+async def main():
+    assert not strict_diagnostics_enabled()
+    payload = json.load(sys.stdin)
+    path = Path(payload["path"])
+    assert not path.exists()
+    os.environ["MEMORY_MEMORY_OPERATIONS_ENABLED"] = "true"
+    os.environ["MEMORY_LOG_LLM_CONTENT"] = "true"
+    cache = SqliteCache(SimpleNamespace(cache=SimpleNamespace(db_path=str(path))))
+    await cache.initialize()
+    try:
+        for row in payload["rows"]:
+            identity = {key: row[key] for key in ("request_id", "user_id", "agent_id")}
+            assert await cache.store_pipeline_log(
+                **identity, session_id=row["session_id"], step="EXTRACT",
+                prompt=row["text"], response=row["text"],
+                parsed=json.dumps({"diagnostic": row["text"]}),
+                memory_ids=[row["memory_id"]],
+            )
+            assert await cache.store_memory_operation(
+                **identity, op="ADD", memory_id=row["memory_id"],
+                content=row["text"], layer="l2_semantic",
+                reason="synthetic legacy diagnostic fixture",
+            )
+    finally:
+        await cache.close()
+    assert not strict_diagnostics_enabled()
+
+asyncio.run(main())
+"""
 
 
 def diagnostic_rows(path, request_id):
@@ -38,32 +81,68 @@ def file_has_text(path, text):
     )
 
 
-async def store_diagnostics(cache, request, memory_id, text):
-    # Use the native persistence methods, not hand-written INSERT statements.
-    # This deliberately represents a cache from a diagnostic-enabled period;
-    # it makes no assertion that normal production defaults enable such logs.
-    assert await SqliteCache.store_pipeline_log(
-        cache,
-        request_id=request.request_id,
-        user_id=request.user_id,
-        agent_id=request.agent_id,
-        session_id=request.session_id,
-        step="EXTRACT",
-        prompt=text,
-        response=text,
-        parsed='{"diagnostic":"' + text + '"}',
-        memory_ids=[memory_id],
+def legacy_diagnostics(path, rows):
+    payload = [
+        {
+            **{
+                key: getattr(request, key)
+                for key in ("request_id", "user_id", "agent_id", "session_id")
+            },
+            "memory_id": memory_id,
+            "text": text,
+        }
+        for request, memory_id, text in rows
+    ]
+    reply = subprocess.run(
+        [sys.executable, "-c", LEGACY_WRITER],
+        input=json.dumps({"path": str(path), "rows": payload}),
+        text=True,
+        capture_output=True,
+        timeout=15,
     )
-    assert await cache.store_memory_operation(
-        request_id=request.request_id,
-        user_id=request.user_id,
-        agent_id=request.agent_id,
-        op="ADD",
-        memory_id=memory_id,
-        content=text,
-        layer="l2_semantic",
-        reason="synthetic diagnostic fixture",
-    )
+    assert reply.returncode == 0, reply.stderr
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT count(*) FROM write_outcomes").fetchone()[0] == 0
+        for row in payload:
+            assert db.execute(
+                "SELECT prompt,response,parsed FROM pipeline_logs_v2 WHERE request_id=?",
+                (row["request_id"],),
+            ).fetchall() == [(row["text"], row["text"], json.dumps({"diagnostic": row["text"]}))]
+            assert db.execute(
+                "SELECT content FROM memory_operations_v2 WHERE request_id=?",
+                (row["request_id"],),
+            ).fetchall() == [(row["text"],)]
+            assert file_has_text(path, row["text"])
+
+
+def _other_tables(db):
+    names = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    return {
+        name: db.execute('SELECT * FROM "' + name.replace('"', '""') + '"').fetchall()
+        for (name,) in names
+        if name not in TABLES
+    }
+
+
+def restore_diagnostics(legacy_path, cache_path):
+    # Copy actual native rows, never synthesize diagnostic fields in SQL. The
+    # destination allocates local row IDs; every other field is copied exactly.
+    with sqlite3.connect(legacy_path) as source, sqlite3.connect(cache_path) as destination:
+        destination.execute("BEGIN IMMEDIATE")
+        before = _other_tables(destination)
+        for table in TABLES:
+            columns = [row[1] for row in source.execute(f"PRAGMA table_info({table})")]
+            assert columns == [row[1] for row in destination.execute(f"PRAGMA table_info({table})")]
+            columns.remove("id")
+            names = ",".join(columns)
+            rows = source.execute(f"SELECT {names} FROM {table}").fetchall()
+            destination.executemany(
+                f"INSERT INTO {table} ({names}) VALUES ({','.join('?' for _ in columns)})", rows
+            )
+        assert _other_tables(destination) == before
+    assert strict_diagnostics_enabled(), "restoring old rows must not downgrade the Hub policy"
 
 
 @pytest.mark.parametrize("restore_only_diagnostics", [False, True])
@@ -80,6 +159,7 @@ def test_purge_removes_bound_diagnostics_and_preserves_unrelated_rows(
 
     async def scenario():
         async with fixture(config) as (app, web):
+            assert strict_diagnostics_enabled()
             jobs, requests, results, _, event, _ = await produce(app, web, config, monkeypatch)
             admin = {"Authorization": "Bearer " + config.admin_token}
             sdk = await _sdk_library_bridge(app.core)._get_client()
@@ -88,32 +168,18 @@ def test_purge_removes_bound_diagnostics_and_preserves_unrelated_rows(
             target = requests[0]
             other = target.model_copy(update={"request_id": str(uuid4())})
             memory_id = results[0]["memory_ids"][0]
-            target_cache = (
-                SqliteCache(SimpleNamespace(cache=SimpleNamespace(db_path=str(backup_path))))
-                if restore_only_diagnostics
-                else sdk._cache
+            await asyncio.to_thread(
+                legacy_diagnostics,
+                backup_path,
+                ((target, memory_id, TARGET_TEXT), (other, str(uuid4()), OTHER_TEXT)),
             )
-            if restore_only_diagnostics:
-                await target_cache.initialize()
-            with monkeypatch.context() as logging:
-                logging.setenv("MEMORY_MEMORY_OPERATIONS_ENABLED", "true")
-                await _joined_thread(
-                    lambda: sdk._loop_thread.run(
-                        store_diagnostics(target_cache, target, memory_id, TARGET_TEXT)
-                    )
-                )
-                await _joined_thread(
-                    lambda: sdk._loop_thread.run(
-                        store_diagnostics(target_cache, other, str(uuid4()), OTHER_TEXT)
-                    )
-                )
+            if not restore_only_diagnostics:
+                await asyncio.to_thread(restore_diagnostics, backup_path, cache_path)
             selected_path = backup_path if restore_only_diagnostics else cache_path
             expected_other = diagnostic_rows(selected_path, other.request_id)
             assert all(expected_other.values())
             assert all(diagnostic_rows(selected_path, target.request_id).values())
             assert file_has_text(selected_path, TARGET_TEXT)
-            if restore_only_diagnostics:
-                await target_cache.close()
 
             monkeypatch.setattr(HyMemoryClient, "add", no_generation)
             monkeypatch.setattr(HyMemoryClient, "add_extracted", no_generation)
@@ -126,11 +192,14 @@ def test_purge_removes_bound_diagnostics_and_preserves_unrelated_rows(
             head = executor.authority.journal.head(event["scope_id"])
 
         if restore_only_diagnostics:
-            # Restore only the cache containing diagnostic rows. In particular,
-            # no write_outcomes, vector node, Hub receipt, or history is restored.
-            with sqlite3.connect(backup_path) as source, sqlite3.connect(cache_path) as destination:
-                assert source.execute("SELECT count(*) FROM write_outcomes").fetchone()[0] == 0
-                source.backup(destination)
+            # Restore only old diagnostic tables, preserving every other cache
+            # table. No outcome, vector node, Hub receipt or history is restored.
+            await asyncio.to_thread(restore_diagnostics, backup_path, cache_path)
+            restored_other = diagnostic_rows(cache_path, other.request_id)
+            assert {table: [row[1:] for row in rows] for table, rows in restored_other.items()} == {
+                table: [row[1:] for row in rows] for table, rows in expected_other.items()
+            }
+            expected_other = restored_other  # Destination-owned autoincrement IDs.
             assert all(diagnostic_rows(cache_path, target.request_id).values())
             assert executor.purger._side_present(paths, set(), {target.request_id})
             async with fixture(config) as (app, _web):
@@ -160,6 +229,7 @@ def test_completed_purge_retry_removes_restored_diagnostics_without_new_scope(
 
     async def scenario():
         async with fixture(config) as (app, web):
+            assert strict_diagnostics_enabled()
             jobs, requests, results, _, event, _ = await produce(app, web, config, monkeypatch)
             admin = {"Authorization": "Bearer " + config.admin_token}
             sdk = await _sdk_library_bridge(app.core)._get_client()
@@ -175,19 +245,18 @@ def test_completed_purge_retry_removes_restored_diagnostics_without_new_scope(
             operations = executor.store.operations()
             head = executor.authority.journal.head(event["scope_id"])
 
-            # Restore logical diagnostic rows through the native writer while
-            # the cache remains open; do not replace a live SQLite database.
-            with monkeypatch.context() as logging:
-                logging.setenv("MEMORY_MEMORY_OPERATIONS_ENABLED", "true")
-                for request, identity, text in (
+            # Import legacy native bodies into the live cache. Strict remains
+            # enabled and no live SQLite file is replaced beneath its owner.
+            legacy_path = tmp_path / "retry-legacy-diagnostics.sqlite3"
+            await asyncio.to_thread(
+                legacy_diagnostics,
+                legacy_path,
+                (
                     (target, results[0]["memory_ids"][0], TARGET_TEXT),
                     (other, str(uuid4()), OTHER_TEXT),
-                ):
-                    await _joined_thread(
-                        lambda request=request, identity=identity, text=text: sdk._loop_thread.run(
-                            store_diagnostics(sdk._cache, request, identity, text)
-                        )
-                    )
+                ),
+            )
+            await asyncio.to_thread(restore_diagnostics, legacy_path, cache_path)
             expected_other = diagnostic_rows(cache_path, other.request_id)
             assert all(expected_other.values())
             assert all(diagnostic_rows(cache_path, target.request_id).values())

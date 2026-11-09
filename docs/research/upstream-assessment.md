@@ -102,3 +102,5 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 后续内容治理只读调查（尚未实现）：0017 的非 debug 投影仍可能通过任意字典键、reason/error/source/owner、标识后缀字符串及伪造 redacted 占位符输出正文；text add 的 INFO 消息、异常格式化和直接 JSONL 调用也存在未过滤位置。固定 Hub/Core 没有直接返回 SDK pipeline 完整正文的 HTTP 接口，桌面流水线面板只需步骤/时间/计数/请求标识；SDK MemoryInspector 的原始接口则需保留默认兼容。可评估 Hub 专用的版本化封闭元数据投影，使 cache、文件与所有 Hub 输出处理器共用固定内容策略，独立于 debug 级别；SDK 自有、root/第三方及 Uvicorn 处理器分别安装，不能只给 root 加过滤器。
 
 原生格式的合成实验另确认：JSONL 必须按字节 LF 划分，通用 Unicode splitlines 会误拆合法正文；直接替换文件后，旧 FileHandler 会继续向已断开的 inode 写入，需在排空后持处理器锁关闭/重开。独立读取 request 可在首个 user_id 标签下包含另一项目节点，不能以该字段或 memory_ids 交集授权删除整请求。未来文件清理须复用已有签名请求定位，同时区分完整回执与输入快照所属请求，保留同文件中未选记录字节，并覆盖仅日志恢复；这些观察尚不构成完整文件治理实现。
+
+0023 实施上述新输出策略：复用原 wrapper、直接 SQLite/JSONL 入口、SDK 三个 handlers、Core 结构化诊断与文件处理器，在固定入口使用同一封闭元数据投影；不新增日志存储，不改业务正文/模型调用。原有内容开关和 0017 不能防自由字段及异常泄漏，故需要独立且不可降级的 Hub opt-in。SDK legacy 默认、原日志测试及 Core HTTP 日志兼容仍保留。新增真实文件/缓存、handler 并发、活动资源拒绝、初始化中途模块、异常及旧正文恢复负例；详情见 [ADR-0041](../adr/0041-strict-diagnostic-content-policy.md) 和[验证记录](../reviews/2026-11-10-diagnostic-content.md)。已有物理文件的定向清理仍是独立未完成项。

@@ -1,7 +1,7 @@
 """ADR-0040 installed/native diagnostic quiescence probe; no external model.
 
 Real HTTP, SDK, storage, pipeline logger and purge; synthetic extraction/embedding
-and explicit queue settlement. Existing JSONL body cleanup remains out of scope.
+and explicit queue settlement. Legacy JSONL body cleanup remains a separate gate.
 Sibling dependency: probe_original_archive.py (environment and identity setup).
 The scenario is also called directly by Hub pytest; it never imports test modules.
 """
@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import warnings
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from tempfile import mkdtemp
@@ -59,10 +60,10 @@ class DelayedDiagnostic:
         self.request_id = None
 
     def selected(self, kwargs):
-        return kwargs.get("step") == "EXTRACT" and self.marker in kwargs.get("response", "")
+        return kwargs.get("step") == "EXTRACT" and kwargs.get("request_id") == self.request_id
 
     def wait(self, kwargs):
-        self.request_id = kwargs["request_id"]
+        assert kwargs["request_id"] == self.request_id
         self.entered.set()
         assert self.release.wait(15), "test did not release native diagnostic I/O"
 
@@ -78,7 +79,9 @@ def jsonl_rows(config, request_id):
     rows = []
     root = config.data_dir / "hy-memory" / "governed-v2" / "logs"
     for path in root.glob("*/*.log"):
-        for line in path.read_text().splitlines():
+        for line in path.read_bytes().split(b"\n"):
+            if not line:
+                continue
             row = json.loads(line)
             if row.get("request_id") == request_id:
                 rows.append(row)
@@ -89,7 +92,7 @@ async def settle_logs(sdk):
     await _joined_thread(lambda: sdk._loop_thread.run(drain_pipeline_log_tasks()))
 
 
-async def write(app, web, headers, template, marker):
+async def write(app, web, headers, template, marker, *, delay=None):
     event = {
         **template,
         **{key: str(uuid4()) for key in ("event_id", "record_id", "conversation_id")},
@@ -101,6 +104,8 @@ async def write(app, web, headers, template, marker):
     queue = app.core.state.memory_write_queue
     frozen = queue.payload_for(job)
     request = MemoryTaskRunner.request_for(frozen.idempotency_key, frozen.input_records)
+    if delay is not None:
+        delay.request_id = request.request_id
     sdk = await _sdk_library_bridge(app.core)._get_client()
 
     async def extract(self, **kwargs):
@@ -122,6 +127,15 @@ async def write(app, web, headers, template, marker):
             scene="chat",
         )
     assert result["success"] and result["memory_ids"]
+    memory = await _joined_thread(sdk.get, result["memory_ids"][0])
+    assert memory["content"] == "Synthetic extracted fact " + marker
+    with app.core.state.cmh_ingest._database() as db:
+        archived = json.loads(
+            db.execute(
+                "SELECT payload_json FROM cmh_event_receipts WHERE receipt_id=?", (job,)
+            ).fetchone()[0]
+        )
+    assert archived["content"]["messages"][0]["text"] == "Synthetic original " + marker
     await app.core.state.cmh_lineage.observe(job, frozen)
     queue.settle(job, state=COMPLETED)
     return job, request, result, event
@@ -141,6 +155,8 @@ def _loggers():
 @contextmanager
 def isolated_logging():
     """Restore caller objects only after the enclosing SDK lifespan has ended."""
+    from cloud_memory_hub import diagnostics
+
     before = {
         logger: (
             logger.level,
@@ -154,6 +170,13 @@ def isolated_logging():
     # Include unattached caller handlers: attaching one later does not make it
     # ours to close. The native setup flag is separate from logger state.
     caller_handlers = {ref() for ref in tuple(logging._handlerList) if ref() is not None}
+    handler_state = {
+        handler: (handler.formatter, handler.level, tuple(handler.filters))
+        for handler in caller_handlers
+    }
+    last_resort, raise_exceptions = logging.lastResort, logging.raiseExceptions
+    show_warning, saved_warning = warnings.showwarning, logging._warnings_showwarning
+    detached = set(diagnostics._detached_handlers)
     configured = native_logging._logging_configured
     for logger in before:
         if logger.name == "hy_memory" or logger.name.startswith("hy_memory."):
@@ -177,6 +200,13 @@ def isolated_logging():
             logger.disabled = disabled
             logger.filters[:] = filters
         native_logging._logging_configured = configured
+        for handler, (formatter, level, filters) in handler_state.items():
+            handler.setFormatter(formatter)
+            handler.setLevel(level)
+            handler.filters[:] = filters
+        logging.lastResort, logging.raiseExceptions = last_resort, raise_exceptions
+        warnings.showwarning, logging._warnings_showwarning = show_warning, saved_warning
+        diagnostics._detached_handlers.intersection_update(detached)
         for handler in created - caller_handlers:
             handler.close()
 
@@ -244,7 +274,7 @@ async def setup_records(app, web, config, admin, headers, template, delay):
     other_rows = diagnostic_rows(sdk, other[1].request_id)
     other_json = jsonl_rows(config, other[1].request_id)
     assert other_rows and other_json
-    target = await write(app, web, headers, template, delay.marker)
+    target = await write(app, web, headers, template, delay.marker, delay=delay)
     assert await asyncio.to_thread(delay.entered.wait, 5), "native diagnostic did not enqueue"
     assert delay.request_id == target[1].request_id
     body = {
@@ -320,8 +350,11 @@ async def verify_case(app, web, config, admin, headers, template, delay, *, inte
         assert diagnostic_rows(sdk, target[1].request_id) == []
         assert diagnostic_rows(sdk, other[1].request_id) == other_rows
         assert jsonl_rows(config, other[1].request_id) == other_json
-        # ADR-0040 drains writes; it does not yet purge existing log files.
-        assert any(delay.marker in str(row) for row in jsonl_rows(config, target[1].request_id))
+        # ADR-0041 prevents new body copies; these metadata rows still prove the
+        # delayed original writer ran. This is not a legacy file cleanup test.
+        retained = jsonl_rows(config, target[1].request_id)
+        assert retained and all(delay.marker not in json.dumps(row) for row in retained)
+        assert all(not row["prompt"] and not row["content"] for row in retained)
         operations = executor.store.operations()
         head = executor.authority.journal.head(target[3]["scope_id"])
         assert len(operations) == len(operations_before) + 1
