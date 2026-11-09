@@ -6,7 +6,11 @@
 
 实验入口直接复用固定版本的 MemHub Core 和管理网页，增加 NAS 认证边界及加密凭证存储。跨设备自动采集、同步、离线缓存、删除传播等能力仍在开发，当前不应接入真实历史或用作唯一记忆存储。
 
-当前开发版本使用独立治理卷、主治理日志版本 2、身份库版本 3及独立 SDK 准入日志；已有实验实例须停服备份后显式迁移，不能直接用旧镜像回退。普通记忆忘记、彻底删除及旧业务数据恢复后的重放已有实现；生产力记录的忘记与物理删除、完整备份恢复和离线规则传播仍待完成。范围含未支持类型时明确拒绝执行，不将界面隐藏当作内部提炼已停止；当前恢复验证边界见[治理记录](docs/reviews/2026-11-09-governance-retry-and-entities.md)。记录缺失或尚未执行的治理意图会触发隔离，迁移方式见[运行指南](docs/development-runtime.md)。
+当前开发版本使用独立治理卷、主治理日志版本 2、身份库版本 3 及独立 SDK 准入日志；已有实验实例须停服备份后显式迁移，不能直接用旧镜像回退。普通记忆忘记、彻底删除及旧业务数据恢复后的重放已有实现。新接纳任务在能够证明尚未获准调用 SDK 时，可在确认范围内取消：忘记保留可显式读取的完整原文，彻底删除清理目标正文；仅恢复旧队列后，启动会重放同一操作。
+
+旧任务或已获准调用 SDK 的任务仍需完整副作用证明；生产力记录的忘记与物理删除、完整备份恢复和离线规则传播也仍待完成。范围或证明不完整时明确拒绝执行，恢复未完成前不开放写入。当前证据与限制见[在途任务取消及恢复记录](docs/reviews/2026-11-10-inflight-execution.md)，迁移方式见[运行指南](docs/development-runtime.md)。
+
+NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、启动与重启验证通过。本地和 NAS 的六套安装探针、完整 Compose 验证及实际双镜像迁移／拒绝均通过；未启用外部模型、导入真实历史或修改日常 Agent 配置。这仍是 G1 实验验证，详细证据见上述记录。
 
 已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
 
@@ -56,7 +60,7 @@
 | 普通聊天历史输入 | [捕获设计](docs/adr/0024-chat-input-evidence.md) · [SDK 验证](docs/reviews/2026-10-30-chat-history.md) · [Hub 来源接线](docs/reviews/2026-10-30-chat-lineage.md) |
 | 普通聊天合并输入 | [实际候选快照与兼容设计](docs/adr/0025-chat-reconcile-evidence.md) · [NAS 验证](docs/reviews/2026-10-31-chat-reconcile.md) |
 | 普通记忆生产版本 | [设计](docs/adr/0026-chat-memory-origins.md) · [验证记录](docs/reviews/2026-11-02-memory-origins.md) |
-| 普通记忆合并来源 | [关系与兼容设计](docs/adr/0027-chat-reconcile-lineage.md) · [安装与 NAS 验证](docs/reviews/2026-11-03-memory-lineage.md)；完整输入覆盖与删除执行仍待完成 |
+| 普通记忆合并来源 | [关系与兼容设计](docs/adr/0027-chat-reconcile-lineage.md) · [安装与 NAS 验证](docs/reviews/2026-11-03-memory-lineage.md)；完整输入与 SDK 副作用覆盖仍待完成 |
 | 基础画像输入与写入证据 | [原生旁路设计](docs/adr/0028-basic-profile-evidence.md) · [SDK 验证](docs/reviews/2026-11-03-profile-evidence.md) · [Hub 来源接线](docs/adr/0029-basic-profile-lineage.md) · [接线验证](docs/reviews/2026-11-03-profile-lineage.md) |
 | 忘记与彻底删除执行 | [状态机、清理清单与已知缺口](docs/adr/0032-governance-execution.md) |
 | 删除后的来源屏蔽 | [稳定来源规则与旧操作兼容](docs/adr/0033-durable-source-suppression.md) |
@@ -64,6 +68,7 @@
 | 删除中断与缓存恢复 | [请求身份与重放设计](docs/adr/0035-purge-cache-recovery.md) · [验证记录](docs/reviews/2026-11-09-purge-cache-recovery.md) |
 | 治理请求重试与实体副本 | [请求一致性设计](docs/adr/0036-governance-request-identity.md) · [恢复检查与验证](docs/reviews/2026-11-09-governance-retry-and-entities.md) |
 | 删除后继续写入 | [Chroma 序号与删除重放设计](docs/adr/0037-chroma-purge-sequence.md) · [验证记录](docs/reviews/2026-11-09-chroma-purge-sequence.md) |
+| 持久准入与在途任务取消 | [准入证明与恢复设计](docs/adr/0038-durable-sdk-admission.md) · [执行、安装与验证边界](docs/reviews/2026-11-10-inflight-execution.md) |
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
