@@ -30,6 +30,12 @@ from cloud_memory_hub.governance_diagnostic_inventory import (
     DomainObservation,
     FileObservation,
 )
+from cloud_memory_hub.governance_diagnostic_profiles import (
+    CORE_PROFILE,
+    SDK_PROFILE,
+    coverage_satisfies,
+    required_domains,
+)
 from cloud_memory_hub.governance_journal import GovernanceError, Intent
 from cloud_memory_hub.remote_access import DeviceAccessStore
 
@@ -61,8 +67,11 @@ def _hex(value):
 
 
 def _file_key(domain, key):
-    if type(key) is not str:
+    if type(domain) is not str or type(key) is not str:
         return False
+    if domain in {"core-log", "core-diagnostic"}:
+        base = "core.log" if domain == "core-log" else "diagnostic-core.jsonl"
+        return key in {base, *(f"{base}.{index}" for index in (1, 2, 3))}
     if domain == "pipeline" and key.startswith("default/") and key.endswith(".log"):
         suffix = key[len("default/") : -len(".log")]
     elif domain == "sdk" and key == "hy_memory.log":
@@ -153,11 +162,15 @@ class CleanupManifest:
     pass_id: str
     artifacts: tuple[ArtifactEntry, ...]
     contributors: tuple[CleanupContributor, ...] | None = None
+    profile: str = SDK_PROFILE
 
     def __post_init__(self):
         try:
             canonical_uuid(self.operation_id)
             canonical_uuid(self.pass_id)
+            domains = required_domains(self.profile)
+            if self.profile == CORE_PROFILE and self.contributors is None:
+                raise ValueError
             if self.contributors is not None:
                 if (
                     type(self.contributors) is not tuple
@@ -181,6 +194,8 @@ class CleanupManifest:
                 if not isinstance(entry, ArtifactEntry):
                     raise ValueError
                 entry.__post_init__()
+                if entry.before.domain not in domains:
+                    raise ValueError
                 if entry.stage_name != stage_name(self.operation_id, self.pass_id, index):
                     raise ValueError
                 keys.append((entry.before.domain, entry.before.key))
@@ -200,13 +215,15 @@ def manifest_to_dict(value):
         raise GovernanceError("governance_cleanup_manifest_invalid")
     value.__post_init__()
     result = {
-        "version": 1 if value.contributors is None else 2,
+        "version": 3 if value.profile == CORE_PROFILE else 1 if value.contributors is None else 2,
         "operation_id": value.operation_id,
         "pass_id": value.pass_id,
         "artifacts": [asdict(item) for item in value.artifacts],
     }
     if value.contributors is not None:
         result["contributors"] = [asdict(item) for item in value.contributors]
+    if value.profile == CORE_PROFILE:
+        result["profile"] = value.profile
     return result
 
 
@@ -217,10 +234,11 @@ def manifest_from_dict(value):
         if (
             type(value) is not dict
             or type(value["version"]) is not int
-            or value["version"] not in {1, 2}
+            or value["version"] not in {1, 2, 3}
             or set(value)
             != {"version", "operation_id", "pass_id", "artifacts"}
-            | ({"contributors"} if value["version"] == 2 else set())
+            | ({"contributors"} if value["version"] in {2, 3} else set())
+            | ({"profile"} if value["version"] == 3 else set())
             or type(value["artifacts"]) is not list
             or len(value["artifacts"]) > 256
         ):
@@ -237,13 +255,16 @@ def manifest_from_dict(value):
                 raise ValueError
             artifacts.append(ArtifactEntry(**{**item, "before": FileObservation(**item["before"])}))
         contributors = None
-        if value["version"] == 2:
+        if value["version"] in {2, 3}:
             raw = value["contributors"]
             if type(raw) is not list or not 0 < len(raw) <= MAX_CONTRIBUTORS:
                 raise ValueError
             contributors = tuple(CleanupContributor(**item) for item in raw)
+        profile = value["profile"] if value["version"] == 3 else SDK_PROFILE
+        if value["version"] == 3 and profile != CORE_PROFILE:
+            raise ValueError
         return CleanupManifest(
-            value["operation_id"], value["pass_id"], tuple(artifacts), contributors
+            value["operation_id"], value["pass_id"], tuple(artifacts), contributors, profile
         )
     except (ValueError, TypeError, KeyError):
         raise GovernanceError("governance_cleanup_manifest_invalid") from None
@@ -274,7 +295,7 @@ class ArtifactAbsence:
                 or any(
                     type(item) is not tuple
                     or len(item) != 2
-                    or item[0] not in {"pipeline", "sdk"}
+                    or item[0] not in required_domains(CORE_PROFILE)
                     or type(item[1]) is not str
                     or "/" in item[1]
                     or len(item[1]) > 128
@@ -291,6 +312,7 @@ class ArtifactAbsence:
 class CleanupVerification:
     inventory: DiagnosticInventory
     artifacts: ArtifactAbsence
+    profile: str = SDK_PROFILE
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,8 +321,10 @@ class VerificationEvidence:
 
     inventory_sha256: str
     artifact_absence_sha256: str
+    profile: str = SDK_PROFILE
 
     def __post_init__(self):
+        required_domains(self.profile)
         if not _hex(self.inventory_sha256) or not _hex(self.artifact_absence_sha256):
             raise GovernanceError("governance_cleanup_verification_invalid")
 
@@ -311,7 +335,16 @@ def _evidence_to_dict(value):
     if type(value) is not VerificationEvidence:
         raise GovernanceError("governance_cleanup_verification_invalid")
     value.__post_init__()
-    return {"version": 1, **asdict(value)}
+    result = {
+        "version": 1,
+        "inventory_sha256": value.inventory_sha256,
+        "artifact_absence_sha256": value.artifact_absence_sha256,
+    }
+    if value.profile == CORE_PROFILE:
+        result.update(
+            version=2, profile=value.profile, domains=list(required_domains(value.profile))
+        )
+    return result
 
 
 def _evidence_from_dict(value):
@@ -319,12 +352,23 @@ def _evidence_from_dict(value):
         return None
     if (
         type(value) is not dict
-        or set(value) != {"version", "inventory_sha256", "artifact_absence_sha256"}
+        or "version" not in value
         or type(value["version"]) is not int
-        or value["version"] != 1
+        or value["version"] not in {1, 2}
+        or set(value)
+        != {"version", "inventory_sha256", "artifact_absence_sha256"}
+        | ({"profile", "domains"} if value["version"] == 2 else set())
     ):
         raise GovernanceError("governance_cleanup_verification_invalid")
-    return VerificationEvidence(value["inventory_sha256"], value["artifact_absence_sha256"])
+    if value["version"] == 2 and (
+        value["profile"] != CORE_PROFILE or value["domains"] != list(required_domains(CORE_PROFILE))
+    ):
+        raise GovernanceError("governance_cleanup_verification_invalid")
+    return VerificationEvidence(
+        value["inventory_sha256"],
+        value["artifact_absence_sha256"],
+        CORE_PROFILE if value["version"] == 2 else SDK_PROFILE,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,8 +420,10 @@ class RecoverySnapshot:
     orphans: tuple[str, ...]
     unplanned: tuple[Intent, ...]
     committed_digests: Mapping[str, str]
+    required_profile: str = SDK_PROFILE
 
     def __post_init__(self):
+        required_domains(self.required_profile)
         object.__setattr__(
             self, "committed_digests", MappingProxyType(dict(self.committed_digests))
         )
@@ -910,6 +956,8 @@ class ExecutionStore:
             and verification is not None
             or row["state"] == "verified"
             and verification is None
+            or verification is not None
+            and (manifest is None or verification.profile != manifest.profile)
             or row["state"] == "verified"
             and any(item.state != "verified" for item in manifest.artifacts)
         ):
@@ -977,7 +1025,7 @@ class ExecutionStore:
         with self._connection() as db:
             return self._snapshot(db)
 
-    def _recovery(self, snapshot, entries):
+    def _recovery(self, snapshot, entries, *, required_profile=SDK_PROFILE):
         committed, orphans, unplanned = self._classify(snapshot.operations, entries)
         for key in committed:
             cleanup = snapshot.operations[key].cleanup
@@ -1007,6 +1055,7 @@ class ExecutionStore:
             orphans,
             unplanned,
             {operation_id: entries[operation_id][1] for operation_id in committed},
+            required_profile,
         )
         # A batch stores the same frozen references on several receipts. Reuse
         # validation only within this real journal/execution snapshot; nothing
@@ -1016,6 +1065,7 @@ class ExecutionStore:
             if operation.cleanup is None or operation.cleanup.manifest is None:
                 continue
             manifest = operation.cleanup.manifest
+            self._validate_manifest_domains(manifest)
             references = manifest.contributors
             if references is None:
                 self._resolve_manifest(recovery, manifest)
@@ -1030,11 +1080,21 @@ class ExecutionStore:
         return recovery
 
     @staticmethod
+    def _validate_manifest_domains(manifest):
+        # Four-domain scans are available before Core physical grants. Do not
+        # let even a well-signed progress row turn SDK rights into Core rights.
+        if any(
+            item.before.domain not in required_domains(SDK_PROFILE) for item in manifest.artifacts
+        ):
+            raise GovernanceError("governance_cleanup_manifest_invalid")
+
+    @staticmethod
     def _resolve_manifest(recovery, manifest):
         # The pure resolver imports these immutable storage types; delay this
         # import so both layers reuse the same authority checks without a cycle.
         from cloud_memory_hub.governance_diagnostic_recovery import resolve_cleanup_authority
 
+        ExecutionStore._validate_manifest_domains(manifest)
         contributors = manifest.contributors
         if contributors is None:
             operation = recovery.snapshot.operations[manifest.operation_id]
@@ -1059,7 +1119,9 @@ class ExecutionStore:
                 snapshot.binding.store_id
             ):
                 raise GovernanceError("governance_execution_binding_mismatch")
-            return self._recovery(snapshot, entries)
+            return self._recovery(
+                snapshot, entries, required_profile=self.journal._coverage_profile(journal_db)
+            )
 
     @contextmanager
     def _mutation(self):
@@ -1071,7 +1133,9 @@ class ExecutionStore:
                 snapshot.binding.store_id
             ):
                 raise GovernanceError("governance_execution_binding_mismatch")
-            recovery = self._recovery(snapshot, entries)
+            recovery = self._recovery(
+                snapshot, entries, required_profile=self.journal._coverage_profile(journal_db)
+            )
             yield db, recovery, entries
 
     def _insert_cleanup(self, db, binding, intent, authority, *, orphan_only=False):
@@ -1133,7 +1197,7 @@ class ExecutionStore:
             if cleanup is not None:
                 self._insert_cleanup(db, snapshot.binding, intent, cleanup)
             updated = self._snapshot(db)
-            self._recovery(updated, entries)
+            self._recovery(updated, entries, required_profile=recovery.required_profile)
             return updated.operations[intent.operation_id]
 
     def cleanup(self, operation_id):
@@ -1211,12 +1275,20 @@ class ExecutionStore:
             self._current(recovery, expected)
             if operation_id != expected.operation_id:
                 raise GovernanceError("governance_cleanup_manifest_invalid")
+            if manifest.profile != recovery.required_profile:
+                raise GovernanceError("governance_cleanup_profile_required")
             resolved = self._resolve_manifest(recovery, manifest)
             if (
                 expected.pass_id == manifest.pass_id
                 or any(item.state != "registered" for item in manifest.artifacts)
                 or not resolved.grants
                 and manifest.artifacts
+                # Core deletion awaits a separate physical-authority contract.
+                # A signed SDK record grant never grants rights over Core bytes.
+                or any(
+                    item.before.domain not in required_domains(SDK_PROFILE)
+                    for item in manifest.artifacts
+                )
                 or any(
                     item.retained_bytes >= item.before.byte_length
                     or item.before.candidate_count + item.before.removed_count == 0
@@ -1247,6 +1319,7 @@ class ExecutionStore:
                 or manifest.operation_id != old.operation_id
                 or manifest.pass_id != old.pass_id
                 or manifest.contributors != old.contributors
+                or manifest.profile != old.profile
                 or len(manifest.artifacts) != len(old.artifacts)
             ):
                 raise GovernanceError("governance_cleanup_manifest_invalid")
@@ -1274,17 +1347,35 @@ class ExecutionStore:
                 not isinstance(verification, CleanupVerification)
                 or not isinstance(verification.inventory, DiagnosticInventory)
                 or expected.manifest is None
+                or verification.profile != expected.manifest.profile
+                or verification.inventory.profile != expected.manifest.profile
                 or any(item.state != "verified" for item in expected.manifest.artifacts)
             ):
                 raise GovernanceError("governance_cleanup_verification_invalid")
             self._absence(expected, verification.artifacts)
             inventory = verification.inventory
+            domains = required_domains(expected.manifest.profile)
             if (
                 type(inventory.files) is not tuple
                 or len(inventory.files) > 256
                 or type(inventory.domains) is not tuple
-                or len(inventory.domains) != 2
+                or len(inventory.domains) != len(domains)
                 or any(type(domain) is not DomainObservation for domain in inventory.domains)
+                or any(
+                    type(domain.domain) is not str
+                    or domain.domain not in domains
+                    or type(domain.exists) is not bool
+                    or domain.exists
+                    and (
+                        type(domain.device) is not int
+                        or not 0 <= domain.device <= 2**64 - 1
+                        or type(domain.inode) is not int
+                        or not 0 < domain.inode <= 2**64 - 1
+                    )
+                    or not domain.exists
+                    and (domain.device is not None or domain.inode is not None)
+                    for domain in inventory.domains
+                )
                 or type(inventory.grants) is not tuple
                 or type(inventory.byte_length) is not int
                 or not 0 <= inventory.byte_length <= 128 * 1024 * 1024
@@ -1293,8 +1384,11 @@ class ExecutionStore:
             ):
                 raise GovernanceError("governance_cleanup_verification_invalid")
             files = {}
+            present_domains = {domain.domain for domain in inventory.domains if domain.exists}
             for item in inventory.files:
                 _file_observation(item)
+                if item.domain not in present_domains:
+                    raise GovernanceError("governance_cleanup_verification_invalid")
                 if item.candidate_count or item.removed_count:
                     raise GovernanceError("governance_cleanup_incomplete")
                 key = (item.domain, item.key)
@@ -1303,7 +1397,7 @@ class ExecutionStore:
                 files[key] = item
             if (
                 inventory.grants
-                or tuple(sorted(item.domain for item in inventory.domains)) != ("pipeline", "sdk")
+                or tuple(sorted(item.domain for item in inventory.domains)) != domains
                 or inventory.byte_length != sum(item.byte_length for item in inventory.files)
                 or inventory.record_count != sum(item.record_count for item in inventory.files)
             ):
@@ -1338,6 +1432,7 @@ class ExecutionStore:
                         }
                     ),
                     _digest(asdict(verification.artifacts)),
+                    expected.manifest.profile,
                 ),
             )
 
@@ -1351,7 +1446,7 @@ class ExecutionStore:
             if intent.action == "purge":
                 self._current(recovery, expected_cleanup)
                 if expected_cleanup.operation_id != intent.operation_id or (
-                    expected_cleanup.state != "verified"
+                    not coverage_satisfies(expected_cleanup, recovery.required_profile)
                 ):
                     raise GovernanceError("governance_cleanup_incomplete")
             elif expected_cleanup is not None:
@@ -1363,11 +1458,22 @@ class ExecutionStore:
             )
 
     def has_pending(self):
-        return any(
+        # Preserve the legacy pure status observation during an execution-commit
+        # / capability gap. Mutation and recovery still require the capability.
+        with self.journal._connection() as journal_db, self._connection() as db:
+            entries = self._journal_snapshot(journal_db)
+            snapshot = self._snapshot(db)
+            store_id = self.journal._capabilities(journal_db).get("execution_store_v2")
+            if store_id is not None and store_id != snapshot.binding.store_id:
+                raise GovernanceError("governance_execution_binding_mismatch")
+            recovery = self._recovery(
+                snapshot, entries, required_profile=self.journal._coverage_profile(journal_db)
+            )
+        return bool(recovery.unplanned or recovery.orphans) or any(
             operation.state != "completed"
             or operation.cleanup is not None
-            and operation.cleanup.state != "verified"
-            for operation in self.snapshot().operations.values()
+            and not coverage_satisfies(operation.cleanup, recovery.required_profile)
+            for operation in recovery.snapshot.operations.values()
         )
 
     def discard_uncommitted(self, operation_id, *, expected_cleanup=None, artifact_absence=None):
