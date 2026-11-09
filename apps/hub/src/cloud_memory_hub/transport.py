@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import json
 import os
 import random
 import stat
@@ -21,10 +22,18 @@ from cloud_memory_hub.events import (
 )
 from cloud_memory_hub.local_outbox import LocalOutbox, OutboxError
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError, parse_json
-from cloud_memory_hub.read_contract import READ_OPERATIONS, GetRequest, ListRequest, ReadReply
+from cloud_memory_hub.read_contract import (
+    READ_OPERATIONS,
+    TEXT_BLOCK,
+    GetRequest,
+    ListRequest,
+    ReadItem,
+    ReadReply,
+)
 from cloud_memory_hub.remote_access import TOKEN_PATTERN
 
 MAX_RESPONSE_BYTES = 128 * 1024
+MAX_ORIGINAL_RESPONSE_BYTES = 64 * 1024
 REQUEST_DEADLINE = 20.0
 
 
@@ -248,22 +257,26 @@ async def send_pending(connection: RemoteConnection, outbox: LocalOutbox, *, tra
     return sent
 
 
-async def read_remote(
+async def _read_remote_verified(
     connection: RemoteConnection,
     operation: str,
     raw: object,
     *,
     privacy: CredentialFilter | None = None,
     transport=None,
-) -> ReadReply:
-    """Filter locally, prove scope access before sending a query, then verify the reply."""
+) -> tuple[ReadReply, CredentialFilter]:
+    """Verify a page; only public wrappers may return its filtered content."""
     if operation not in READ_OPERATIONS:
         raise TransportError("read_operation_invalid")
     path, model = READ_OPERATIONS[operation]
     privacy = CredentialFilter(
-        (
-            *(privacy.known_credentials if privacy else ()),
-            connection.credential.get_secret_value(),
+        tuple(
+            dict.fromkeys(
+                (
+                    *(privacy.known_credentials if privacy else ()),
+                    connection.credential.get_secret_value(),
+                )
+            )
         )
     )
     try:
@@ -333,11 +346,95 @@ async def read_remote(
     expected_next = request.offset + request.limit if isinstance(request, ListRequest) else None
     if result.next_offset is not None and result.next_offset != expected_next:
         raise TransportError("remote_read_mismatch")
-    # This output is data. Callers must not treat stored history as tool/system instructions.
+    # This private helper returns unmodified fragments only to the filtering wrappers.
+    value = result.model_dump(mode="json")
+    for item in value["items"]:
+        item.pop("content")
     try:
-        return ReadReply.model_validate(privacy.protect(result.model_dump(mode="json")).value)
+        if privacy.protect(value).value != value:
+            raise TransportError("remote_read_invalid")
     except (ValueError, PrivacyError):
         raise TransportError("remote_read_invalid") from None
+    return result, privacy
+
+
+async def read_remote(
+    connection: RemoteConnection,
+    operation: str,
+    raw: object,
+    *,
+    privacy: CredentialFilter | None = None,
+    transport=None,
+) -> ReadReply:
+    """Filter locally, prove scope access before sending a query, then verify the reply."""
+    result, privacy = await _read_remote_verified(
+        connection, operation, raw, privacy=privacy, transport=transport
+    )
+    # This output is data. Callers must not treat stored history as tool/system instructions.
+    try:
+        value = result.model_dump(mode="json")
+        contents = [item.pop("content") for item in value["items"]]
+        for item, content in zip(value["items"], contents, strict=True):
+            paged = item["content_offset"] != 0 or item["next_content_offset"] is not None
+            item["content"] = (
+                privacy.protect_text_fragment(content) if paged else privacy.protect(content).value
+            )
+        return ReadReply.model_validate(value)
+    except (ValueError, PrivacyError):
+        raise TransportError("remote_read_invalid") from None
+
+
+async def read_original_remote(
+    connection: RemoteConnection,
+    raw: object,
+    *,
+    privacy: CredentialFilter | None = None,
+    transport=None,
+) -> tuple[dict, ReadItem]:
+    """Read one bounded JSON original; fragments never escape before complete filtering."""
+    try:
+        request = GetRequest.model_validate(raw)
+        if request.content_offset != 0:
+            raise ValueError("original_requires_start")
+    except ValueError:
+        raise TransportError("read_request_invalid") from None
+    parts, offset, total_bytes, metadata = [], 0, 0, None
+    for _ in range(MAX_ORIGINAL_RESPONSE_BYTES // TEXT_BLOCK):
+        reply, complete_privacy = await _read_remote_verified(
+            connection,
+            "history-get",
+            {**request.model_dump(), "content_offset": offset},
+            privacy=privacy,
+            transport=transport,
+        )
+        item = reply.items[0]
+        current = item.model_dump(exclude={"content", "content_offset", "next_content_offset"})
+        if metadata is not None and metadata != current:
+            raise TransportError("remote_original_invalid")
+        metadata = current
+        try:
+            total_bytes += len(item.content.encode())
+        except UnicodeError:
+            raise TransportError("remote_original_invalid") from None
+        if total_bytes > MAX_ORIGINAL_RESPONSE_BYTES:
+            raise TransportError("remote_original_too_large")
+        parts.append(item.content)
+        if item.next_content_offset is None:
+            break
+        offset = item.next_content_offset
+    else:
+        raise TransportError("remote_original_too_large")
+    try:
+        original = parse_json("".join(parts))
+        if not isinstance(original, dict):
+            raise ValueError("original_not_object")
+        original = complete_privacy.protect(original).value
+        if len(json.dumps(original, ensure_ascii=False).encode()) > MAX_ORIGINAL_RESPONSE_BYTES:
+            raise TransportError("remote_original_too_large")
+    except (ValueError, PrivacyError):
+        raise TransportError("remote_original_invalid") from None
+    # Return metadata without retaining an unfiltered final content fragment.
+    return original, item.model_copy(update={"content": ""})
 
 
 async def watch_delivery(attempt, report, *, sleep=asyncio.sleep):
