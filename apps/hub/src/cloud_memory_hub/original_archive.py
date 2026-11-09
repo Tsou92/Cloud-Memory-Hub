@@ -2,6 +2,7 @@
 
 import json
 
+from one_memory.memory_server.contracts import WriteRequest
 from one_memory.memory_server.durable_queue import DurableWriteQueue
 
 from cloud_memory_hub.events import EventEnvelope
@@ -9,6 +10,7 @@ from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.remote_access import AccessError
 
 ARCHIVE_VERSION = 2
+_IGNORED_REQUEST_FIELDS = {"event_at", "time_quality", "priority"}
 
 
 def validate_original(row, instance_id):
@@ -43,44 +45,73 @@ def create_archive_indexes(db):
     db.execute("CREATE INDEX cmh_original_scope ON cmh_event_receipts(scope_id)")
 
 
-def _recover_original(request, row, instance_id):
+def require_frozen_match(event: EventEnvelope, request: WriteRequest | None) -> None:
+    """Prove the entire frozen input, allowing only existing scheduling differences."""
     # Import lazily: the ingest boundary calls validate_original during replay.
     from cloud_memory_hub.remote_ingest import write_request
 
-    if request is None or not request.input_records:
-        raise AccessError("original_migration_source_unproven", 409)
-    header, messages, metadata = None, [], None
-    for index, record in enumerate(request.input_records):
-        text, marker, tail = record.verbatim.rpartition("\n\n<cmh_source_reference>\n")
-        footer = "\n</cmh_source_reference>"
-        if not marker or not tail.endswith(footer):
-            raise AccessError("original_migration_source_unproven", 409)
-        provenance = json.loads(tail[: -len(footer)])
-        current = provenance["event"]
-        if provenance["message_index"] != index or (header is not None and current != header):
-            raise AccessError("original_migration_source_unproven", 409)
-        header = current
-        message = {"role": record.role, "text": text}
-        if "message_metadata" in provenance:
-            message["metadata"] = provenance["message_metadata"]
-        if index == 0 and "content_metadata" in provenance:
-            metadata = provenance["content_metadata"]
-        messages.append(message)
-    content = (
-        {"messages": messages}
-        if header["kind"] == "conversation_turn"
-        else {"text": messages[0]["text"]}
-    )
-    if metadata is not None:
-        content["metadata"] = metadata
-    event = EventEnvelope.model_validate({**header, "content": content})
+    try:
+        if not isinstance(request, WriteRequest) or not request.input_records:
+            raise ValueError("missing_frozen_inputs")
+        rebuilt = write_request(event)
+        if rebuilt.model_dump(exclude=_IGNORED_REQUEST_FIELDS) != request.model_dump(
+            exclude=_IGNORED_REQUEST_FIELDS
+        ):
+            raise ValueError("frozen_input_mismatch")
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise AccessError("original_migration_source_unproven", 409) from None
+
+
+def _event_from_footer(request):
+    try:
+        if not isinstance(request, WriteRequest) or not request.input_records:
+            raise ValueError("missing_frozen_inputs")
+        header, messages, metadata = None, [], None
+        for index, record in enumerate(request.input_records):
+            text, marker, tail = record.verbatim.rpartition("\n\n<cmh_source_reference>\n")
+            footer = "\n</cmh_source_reference>"
+            if not marker or not tail.endswith(footer):
+                raise ValueError("missing_source_footer")
+            provenance = json.loads(tail[: -len(footer)])
+            current = provenance["event"]
+            if provenance["message_index"] != index or (header is not None and current != header):
+                raise ValueError("source_footer_mismatch")
+            header = current
+            message = {"role": record.role, "text": text}
+            if "message_metadata" in provenance:
+                message["metadata"] = provenance["message_metadata"]
+            if index == 0 and "content_metadata" in provenance:
+                metadata = provenance["content_metadata"]
+            messages.append(message)
+        content = (
+            {"messages": messages}
+            if header["kind"] == "conversation_turn"
+            else {"text": messages[0]["text"]}
+        )
+        if metadata is not None:
+            content["metadata"] = metadata
+        event = EventEnvelope.model_validate({**header, "content": content})
+        event.canonical_payload()
+        return event
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        raise AccessError("original_migration_source_unproven", 409) from None
+
+
+def recover_event(request: WriteRequest | None) -> EventEnvelope:
+    """Recover queue input identity, never proof that a receipt was accepted."""
+    event = _event_from_footer(request)
+    require_frozen_match(event, request)
+    return event
+
+
+def _recover_original(request, row, instance_id):
+    # Keep real receipt validation before frozen matching, preserving the old
+    # archive-invalid error priority when both the receipt and input are damaged.
+    event = _event_from_footer(request)
     # Missing optional empty objects cannot be guessed. Only exact equality proves
     # recovery; an unprovable old representation requires an original source replay.
     validate_original({**dict(row), "payload_json": event.canonical_payload()}, instance_id)
-    rebuilt = write_request(event)
-    ignored = {"event_at", "time_quality", "priority"}
-    if rebuilt.model_dump(exclude=ignored) != request.model_dump(exclude=ignored):
-        raise AccessError("original_migration_source_unproven", 409)
+    require_frozen_match(event, request)
     return event.canonical_payload()
 
 

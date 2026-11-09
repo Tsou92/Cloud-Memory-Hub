@@ -20,8 +20,8 @@ from cloud_memory_hub.chroma_governance import (
     queue_topic,
     require_sequence,
 )
-from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.governance_journal import GovernanceError
+from cloud_memory_hub.governance_request_owner import verify_request_owner
 from cloud_memory_hub.memory_graph import PREFIX as MEMORY
 from cloud_memory_hub.original_archive import validate_original
 from cloud_memory_hub.profile_evidence import PREFIX as PROFILE
@@ -126,27 +126,25 @@ class Purger:
             with main_database(queue.database_path).read(row_factory=sqlite3.Row) as jobs:
                 for receipt in sorted(owners):
                     job = jobs.execute(
-                        "SELECT idempotency_key,source_key FROM memory_write_jobs WHERE job_id=?",
+                        "SELECT job_id,idempotency_key,source_key "
+                        "FROM memory_write_jobs WHERE job_id=?",
                         (receipt,),
                     ).fetchone()
-                    if job is None or not job["source_key"].startswith("cmh:"):
+                    if job is None or not isinstance(job["source_key"], str):
                         raise GovernanceError("governance_purge_request_unproven")
                     source_id = job["source_key"][4:]
                     source = db.execute(
-                        "SELECT device_id,scope_id FROM cmh_sources WHERE source_id=?",
+                        "SELECT source_id,device_id,scope_id FROM cmh_sources WHERE source_id=?",
                         (source_id,),
                     ).fetchone()
-                    parts = job["idempotency_key"].split(":")
-                    if (
-                        source is None
-                        or source["scope_id"] != scope_id
-                        or len(parts) != 4
-                        or parts[:3] != ["cmh", self.ingest.access.instance_id, source["device_id"]]
-                    ):
-                        raise GovernanceError("governance_purge_request_unproven")
                     try:
-                        canonical_uuid(parts[3])
-                    except ValueError:
+                        owner = verify_request_owner(
+                            job,
+                            source,
+                            instance_id=self.ingest.access.instance_id,
+                            scope_id=scope_id,
+                        )
+                    except GovernanceError:
                         raise GovernanceError("governance_purge_request_unproven") from None
                     row = db.execute(
                         "SELECT * FROM cmh_event_receipts WHERE receipt_id=?", (receipt,)
@@ -154,13 +152,15 @@ class Purger:
                     if row is not None:
                         event = validate_original(row, self.ingest.access.instance_id)
                         if (
-                            event.scope_id != scope_id
-                            or event.source_id != source_id
-                            or event.event_id != parts[3]
-                            or row["request_id"] != job["idempotency_key"]
+                            event.scope_id != owner.scope_id
+                            or event.source_id != owner.source_id
+                            or event.device_id != owner.device_id
+                            or event.event_id != owner.event_id
+                            or row["receipt_id"] != owner.job_id
+                            or row["request_id"] != owner.request_id
                         ):
                             raise GovernanceError("governance_purge_request_unproven")
-                    requests.add(job["idempotency_key"])
+                    requests.add(owner.request_id)
         return requests
 
     async def _sdk_delete(self, sdk, native):
