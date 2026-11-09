@@ -19,6 +19,7 @@ from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.events import EventEnvelope
 from httpx import ASGITransport, AsyncClient
 from hy_memory.agent.mem_agent import AgentResult, MemAgent
+from hy_memory.data.cache_sqlite import SqliteCache
 from one_memory.api import _sdk_library_bridge
 from one_memory.hy_memory_bridge import HyMemoryIngestResult, HyMemoryOutput, _joined_thread
 from one_memory.memory_processing import MemoryTaskRunner
@@ -33,6 +34,46 @@ from probe_original_archive import environment
 from probe_original_archive import phase as archive_phase
 
 MARK = "CMH_SYNTHETIC_PURGE_MARK"
+DIAGNOSTIC = "Synthetic separate diagnostic detail for the orchard maintenance record "
+DIAGNOSTIC_TABLES = ("pipeline_logs_v2", "memory_operations_v2")
+
+
+def diagnostic_rows(path, request_id):
+    with sqlite3.connect(path) as db:
+        return {
+            table: [
+                list(row)
+                for row in db.execute(
+                    f"SELECT * FROM {table} WHERE request_id=? ORDER BY id", (request_id,)
+                )
+            ]
+            for table in DIAGNOSTIC_TABLES
+        }
+
+
+async def store_diagnostics(cache, request, identity, text):
+    # Native cache writes model a diagnostic-enabled period. Normal production
+    # defaults and asynchronous diagnostic-file coverage are not inferred here.
+    assert await SqliteCache.store_pipeline_log(
+        cache,
+        request_id=request.request_id,
+        user_id=request.user_id,
+        agent_id=request.agent_id,
+        session_id=request.session_id,
+        step="EXTRACT",
+        prompt=text,
+        response=text,
+        memory_ids=[identity],
+    )
+    assert await cache.store_memory_operation(
+        request_id=request.request_id,
+        user_id=request.user_id,
+        agent_id=request.agent_id,
+        op="ADD",
+        memory_id=identity,
+        content=text,
+        layer="l2_semantic",
+    )
 
 
 async def check_forget_history(app, sdk, web, device, first):
@@ -102,11 +143,13 @@ async def check_forget_history(app, sdk, web, device, first):
 
 
 def leftover(root, needle):
+    # Probe state/logs retain synthetic baselines outside managed storage.
     # data_level0.bin slack is the documented Chroma gap (ADR-0032).
     return sorted(
         str(path.relative_to(root))
         for path in root.rglob("*")
         if path.is_file()
+        and path.relative_to(root).parts[0] in {"data", "config", "governance"}
         and path.name != "data_level0.bin"
         and needle.encode() in path.read_bytes()
     )
@@ -255,6 +298,18 @@ async def phase(root, mode):
                         )
                         await lineage.observe(receipt, frozen)
                         queue.settle(receipt, state=COMPLETED)
+                        with patch.dict(os.environ, {"MEMORY_MEMORY_OPERATIONS_ENABLED": "true"}):
+                            await _joined_thread(
+                                sdk._loop_thread.run,
+                                store_diagnostics(
+                                    sdk._cache,
+                                    request,
+                                    result["memory_ids"][0],
+                                    DIAGNOSTIC + str(len(rows)),
+                                ),
+                            )
+                        diagnostics = diagnostic_rows(sdk._cache._db_path, request.request_id)
+                        assert all(diagnostics.values()), "diagnostic_fixture_empty"
                         rows.append(
                             {
                                 "receipt": receipt,
@@ -262,6 +317,7 @@ async def phase(root, mode):
                                 "memory": result["memory_ids"][0],
                                 "raw": result["memory_id"],
                                 "event": current,
+                                "diagnostics": diagnostics,
                             }
                         )
                     queue.clear_terminal_payloads()
@@ -352,6 +408,18 @@ async def phase(root, mode):
                 identity = row["request_id"]
                 outcome = await _joined_thread(sdk.get_write_outcome, identity)
                 assert (outcome is None) == (index == 1), "purge_result_cache_mismatch"
+                diagnostics = diagnostic_rows(sdk._cache._db_path, identity)
+                assert diagnostics == (
+                    {table: [] for table in DIAGNOSTIC_TABLES} if index == 1 else row["diagnostics"]
+                ), "purge_diagnostic_cache_mismatch"
+            with sqlite3.connect(sdk._config.history.db_path) as history:
+                assert not history.execute(
+                    "SELECT 1 FROM memory_history WHERE memory_id IN (?,?)",
+                    (second["memory"], second["raw"]),
+                ).fetchone(), "purge_history_restored"
+                assert history.execute(
+                    "SELECT 1 FROM memory_history WHERE memory_id=?", (first["raw"],)
+                ).fetchone(), "unrelated_history_removed"
             # New revisions must not resurrect either forgotten or purged
             # originals, including after restoring the old business volumes.
             for row in state["rows"]:
@@ -464,6 +532,31 @@ def main():
                 "SELECT 1 FROM write_outcomes WHERE request_id=?", (request_id,)
             ).fetchone(), "cache_restore_fixture_invalid"
         run(root, "read")
+        assert leftover(root, DIAGNOSTIC + "1") == [], "purge_diagnostic_residue"
+        # The purged request has only diagnostic rows; unrelated outcomes stay.
+        with sqlite3.connect(cache) as source, sqlite3.connect(current_cache) as destination:
+            source.backup(destination)
+            destination.execute("DELETE FROM write_outcomes WHERE request_id=?", (request_id,))
+        assert all(diagnostic_rows(current_cache, request_id).values())
+        run(root, "read")
+        assert leftover(root, DIAGNOSTIC + "1") == [], "diagnostic_only_restore_residue"
+        # Independently restore history, leaving vectors, cache and Hub data new.
+        histories = list((backup / "data").rglob("history.sqlite3"))
+        assert len(histories) == 1, "history_location_unproven"
+        old_history = histories[0]
+        current_history = root / "data" / old_history.relative_to(backup / "data")
+        with (
+            sqlite3.connect(old_history) as source,
+            sqlite3.connect(current_history) as destination,
+        ):
+            source.backup(destination)
+            assert destination.execute(
+                "SELECT 1 FROM memory_history WHERE memory_id=?", (state["rows"][1]["raw"],)
+            ).fetchone(), "history_restore_fixture_invalid"
+        original_text = state["rows"][1]["event"]["content"]["messages"][0]["text"]
+        assert leftover(root, original_text), "history_original_restore_fixture_invalid"
+        run(root, "read")
+        assert leftover(root, original_text) == [], "history_only_restore_residue"
         # Restore old business data: startup must reapply both forget and purge.
         for name in ("data", "config"):
             shutil.rmtree(root / name)
@@ -472,7 +565,8 @@ def main():
         run(root, "read")
         assert leftover(root, MARK + " fact 1") == [], "restore_replay_residue"
     print(
-        "Forget, purge, restart, full/cache-only restore, identical/conflicting request retries, "
+        "Forget, purge, restart, full/cache-only/diagnostics-only/history-only restore, "
+        "identical/conflicting request retries, "
         "accepted revision scope/retention/cancellation, source/content reimport prevention "
         "and restored forget exclusion from new SDK history passed across processes "
         "(synthetic extraction and supervisor)."
