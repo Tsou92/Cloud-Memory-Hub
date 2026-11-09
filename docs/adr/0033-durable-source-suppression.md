@@ -1,6 +1,6 @@
 # ADR-0033：原文删除后的稳定来源屏蔽
 
-日期：2026-11-09。状态：设计已确定，实施与验证中。关联 FR-10、FR-11；补充 [ADR-0032](0032-governance-execution.md)。
+日期：2026-11-09。状态：已实现，完成本地安装与 NAS 验证，见[记录](../reviews/2026-11-09-source-suppression.md)。关联 FR-10、FR-11；补充 [ADR-0032](0032-governance-execution.md)。
 
 ## 故障证据与复用
 
