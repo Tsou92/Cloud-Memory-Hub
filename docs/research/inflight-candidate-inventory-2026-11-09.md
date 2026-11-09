@@ -1,12 +1,24 @@
 # 在途任务有界候选清单方案
 
-日期：2026-11-09。状态：只读设计，尚未实现或验证。关联 FR-10、FR-11、ENG-01；承接 [ADR-0034](../adr/0034-inflight-ingest-and-content-reimport.md)、[来源规则](../adr/0033-durable-source-suppression.md) 和 [治理请求身份](../adr/0036-governance-request-identity.md)。
+日期：2026-11-09。状态：只读模块已实现并通过专项验证；尚未接入执行。关联 FR-10、FR-11、ENG-01；承接 [ADR-0034](../adr/0034-inflight-ingest-and-content-reimport.md)、[来源规则](../adr/0033-durable-source-suppression.md) 和 [治理请求身份](../adr/0036-governance-request-identity.md)。
 
 ## 目的与非结论
 
 新增一个只读观察步骤，在治理写入计划之前确定：哪些队列任务属于本项目、哪些对应已确认原文、哪些仅命中来源或内容规则，以及哪些任务无法确认归属。恢复路径复用同一观察步骤。
 
 本方案不取消任务、不清理正文、不改任务状态，也不判断 SDK 是否已经产生副作用。`hy_invoked=0`、任务状态、错误码、结果缓存缺失、`outcome=None` 或结果为空，一概不能作为无产出证据。旧 queue 与新 SDK、旧 cache 与新 vectors 混合恢复时，这条边界同样成立。
+
+## 第一实施切片与兼容性
+
+本切片先提供内部只读观察模块及真实两库合同测试，不增加 HTTP 入口，不改变 execute/resume 的决策，不取消任务或清理正文；下一切片再将已验证观察结果接入计划前和恢复入口。因此不能将模块存在或其测试通过宣称为 G-A/G-C 已修复。范围值仅在服务内部创建，不提供客户端反序列化接口；生产调用仍须满足下文的锁与权威范围前提。
+
+复用固定上游的 `main_database` 只读连接、`WriteRequest`、终态集合及 reaped marker，复用 Hub 的 `validate_original`、footer 还原和 `write_request`。上游不知道 Hub 项目/回执/签名规则，故只补充这层连接观察，不另建任务状态机或存储。两个数据库分别持有显式只读快照，顺序固定为接纳库再 Core；同一 Core reader 内不得调用会再次 checkout 的 queue 方法。
+
+正常终态与可执行任务分别校验。终态任务的严格原生清理标记（唯一键、64 位十六进制摘要）允许 `event_proof=unavailable` 的 identity-only 观察；有回执时仍须验证回执身份。此时不进行无法证明的内容匹配，不把它作为可取消任务或 SDK 无副作用证明。非终态的同样标记、缺正文、未知状态或无法还原一律产生 blocker。确认范围内终态身份仍列入第一组，避免正常 purge 后的合法清理身份被误当损坏；规则组只允许有完整事件证明的匹配。
+
+预算分数量和实际读取字节两层：来源、回执、去重后的项目任务和全局非终态元数据分别有 10,000 行上限；元数据与正文合计最多 32 MiB。每次取正文前先读 SQL 字节长度，检查后才读取；异常超长元数据必须在 SQL 投影中截断或拒绝，不能将其完整传进 Python 后才检查。预算越界抛固定错误，不返回部分清单作为完整结论。数量/字节上限不等于 SQL 执行时间承诺，后续另做实际查询成本验证。
+
+新模块没有数据库或协议迁移。既有原文迁移和 purge 请求校验只提取共用纯函数，保留原错误合同。恢复旧操作缺当前内容策略证明时报告规则覆盖不足，不重签历史；本模块不负责决定自动恢复是否继续。
 
 ## 内部范围输入与调用顺序
 
@@ -90,13 +102,13 @@ LIMIT ?;
 ```sql
 SELECT job_id, source_key, state
 FROM memory_write_jobs
-WHERE source_key GLOB 'cmh:*'
+WHERE (source_key GLOB 'cmh:*' OR idempotency_key GLOB 'cmh:*')
   AND state NOT IN (...)
 ORDER BY source_key, state, queue_seq, job_id
 LIMIT ?;
 ```
 
-该查询使用大小写精确的 Hub 来源前缀；不读取 payload_json、evidence 正文或 SDK 数据。结果受现有队列数量预算约束；取回列的长度同样计入元数据预算。对出现的来源 ID 分批执行目录精确查找：
+该查询使用大小写精确的 Hub 来源或请求前缀，覆盖请求仍可识别但来源键损坏的行；不宣称能归属两个标识都不再有 Hub 前缀的任意损坏行。不读取 payload_json、evidence 正文或 SDK 数据。结果受现有队列数量预算约束；取回列的长度同样计入元数据预算。对出现的来源 ID 分批执行目录精确查找：
 
 ```sql
 SELECT source_id, device_id, scope_id, status
@@ -161,13 +173,13 @@ Candidate
 
 - `confirmed_original_candidates`：对应的 cmhe 物理 ID 已在内部 ConfirmedScope.records 中。新执行由权威 inventory／预览一致性证明，恢复由已验证签名范围证明。
 - `rule_only_candidates`：来源或内容规则命中，但对应 cmhe 不在该物理范围。即使同来源三元组匹配，也不能自动当作已确认 revision。
-- `blockers`：归属、事件正文、状态、规则覆盖或预算无法确认。缺正文时即使已有 cmhe 锚点，也必须保留其无法校验的状态，不能把身份候选解释为可执行任务。
+- `blockers`：归属、事件正文、状态、规则覆盖或预算无法确认。非终态缺正文时即使已有 cmhe 锚点，也必须保留其无法校验的状态，不能把身份候选解释为可执行任务；正常终态清理标记适用前述 identity-only 规则。
 
 同来源版本关系通常会让各 revision 进入预览；如果观察发现额外 revision，仍属于第二组。已接纳的换 ID／换来源事件命中内容规则，也属于第二组。必须扩展预览并重新确认，或返回 409 要求重新预览，不能静默扩大物理删除范围。本方案不自行决定是否允许取消这组任务。
 
 只有元数据审计完成、所有候选的归属核验完成，ownership coverage 才可标记完整。这仍然只表示队列归属观察完整，不表示全部 SDK 产出已发现、没有副作用或删除已经完成。
 
-## 最小验证矩阵（待实现）
+## 最小验证矩阵（分步验证）
 
 | 场景 | 预期观察 |
 | --- | --- |
@@ -189,4 +201,4 @@ Candidate
 | hy_invoked=0、未知状态、SDK 缓存缺失或新旧存储混合恢复 | 不据此判断无副作用；sdk_effect 始终 not_checked |
 | 恢复路径已有未完成操作且发现 blocker | 保留原状态和现场，不重签或伪造 completed |
 
-本文件没有对应产品实现，矩阵也未执行；仅复用现有源码合同提出最小观察步骤。后续实现须补充真实队列、签名范围和两库恢复组合的专项证据，再讨论取消与 SDK 产出恢复。
+只读模块与共享校验已实现；真实两库专项覆盖归属、原文、队列回建、规则分组、快照、正常终态及预算，见[验证记录](../reviews/2026-11-09-inflight-candidates.md)。矩阵中的 execute 落计划前拒绝、恢复操作保护、取消及 SDK 产出判断尚未接线，不计为通过。
