@@ -119,3 +119,7 @@ probe-entity-inventory: prepare-upstream
 .PHONY: probe-productivity-forget-guard
 probe-productivity-forget-guard: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_productivity_forget_guard.py
+
+.PHONY: probe-chroma-delete-replay
+probe-chroma-delete-replay: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_chroma_delete_replay.py

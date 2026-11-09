@@ -26,7 +26,7 @@ execute 与 resume 共用治理串行锁；内部恢复不重复取锁。恢复�
 
 以上使用真实 Hub、HTTP、SDK 和持久存储，提炼、实体识别及 embedding 为合成替身，没有真实历史或外部模型调用。实体治理本身尚未实现，此次完成的是拒绝遗漏范围的检查；不将其他项目的正常实体误判为本项目副本，也不宣称检查了所有无归属损坏行。
 
-当前本轮安装与 NAS 验证待完成；NAS 常驻实例仍为 60ad0ce。6 个已接纳任务及旧队列恢复缺口继续保留，不能将本轮修复当作存量队列清扫完成。来源修订范围会与本轮一起进入下一安装制品，客户端闭环、离线传播及完整备份恢复仍按 roadmap 推进。
+本轮后续已与来源修订及日志修复一起进入 cde427c，通过本地/NAS 五项安装探针和完整容器检查；常驻空实例停服备份后升级并重启健康，见[安装记录](2026-11-09-chroma-purge-sequence.md)。6 个已接纳任务及旧队列恢复缺口继续保留，不能将本轮修复当作存量队列清扫完成；客户端闭环、离线传播及完整备份恢复仍按 roadmap 推进。
 
 ## 安装前发现的已完成 forget 恢复缺口
 
@@ -34,7 +34,7 @@ execute 与 resume 共用治理串行锁；内部恢复不重复取锁。恢复�
 
 这与原 6 项队列预期失败不同；根因是 completed purge 会重放而 completed forget 不会。已按 [ADR-0032 恢复补充](../adr/0032-governance-execution.md) 修复：启动重新应用签名范围的原生节点抑制，核对节点归属，不删除主动可查的原文，失败不就绪。SDK get_by_id 会将读取/解码错误吞为 None，因此对 None 额外点查原生 Chroma ID；存在但无法解码时不能当作已缺失。
 
-新增 9 项测试已红转绿，覆盖真实新事件提炼输入、普通重启对照、重复启动、无关 raw 和原文保留、更新返回 False/异常、错误 owner/id、损坏节点，以及真实缺失和 purger=None。独立复跑原失败探针（含 purger=None）确认恢复后 raw/fact 均 archived，下一轮 history_context 不含已忘记原文、仍包含无关历史，原有 404/409 行为保持。完整回归与安装结果待补充。
+新增 9 项测试已红转绿，覆盖真实新事件提炼输入、普通重启对照、重复启动、无关 raw 和原文保留、更新返回 False/异常、错误 owner/id、损坏节点，以及真实缺失和 purger=None。独立复跑原失败探针（含 purger=None）确认恢复后 raw/fact 均 archived，下一轮 history_context 不含已忘记原文、仍包含无关历史，原有 404/409 行为保持。本切片全量 822 通过；后续 cde427c 的本地/NAS 组合安装探针已覆盖该恢复路径，见上述安装记录。
 
 ## 生产力忘记的明确能力缺口
 
@@ -42,8 +42,8 @@ execute 与 resume 共用治理串行锁；内部恢复不重复取锁。恢复�
 
 按 ADR-0032 增加提前拒绝保护：检查完整关联闭包中的 `cmhp/cmht/cmhc/cmhv`，不是只看请求选择。新操作在计划和意图前拒绝，已提交旧计划、已完成恢复及同 ID 重试均不得绕过；未提交孤立计划仍按 ADR-0036 丢弃重验。拒绝合同与完整生产力忘记能力分开验收，后者仍未完成，不能凭 Hub 404 或保护性拒绝宣称通过。
 
-新增 20 项专项测试红转绿，覆盖 working/coding 的真实 HTTP 闭包、签名状态及原生数据不变、真实 reconciler 候选/提示仍属未完成能力、旧操作重试及重启保护、孤立计划恢复和前缀分类。另有 `make probe-productivity-forget-guard`：4 个独立进程通过，复用真实 SDK 存储、受控 writer 产出和合成 embedding；不将该替身称为完整原生提炼验证。探针依赖 `probe_original_archive.py`、`probe_sdk_reconciliation.py`，尚待镜像与 NAS 执行。
+新增 20 项专项测试红转绿，覆盖 working/coding 的真实 HTTP 闭包、签名状态及原生数据不变、真实 reconciler 候选/提示仍属未完成能力、旧操作重试及重启保护、孤立计划恢复和前缀分类。另有 `make probe-productivity-forget-guard`：4 个独立进程通过，复用真实 SDK 存储、受控 writer 产出和合成 embedding；不将该替身称为完整原生提炼验证。探针依赖 `probe_original_archive.py`、`probe_sdk_reconciliation.py`；后续已在 cde427c 的本地与 NAS 镜像内执行通过。
 
 本轮源码切片的最终 `make check-runtime` 为 822 通过、5 跳过、6 个既有队列预期失败、289 条上游弃用警告；专项组合 126 通过、6 预期失败，独立审查与原始恢复复现通过。工程门禁通过。
 
-组合治理安装探针新增“恢复后继续真实 SDK 写入”断言时，发现 purge 后新写入 ID 可见性异常；未放宽断言，也没有用 forget-only 通过替代组合场景。独立取证确认：seed 的 queue max/watermark 为 6/6，govern 后为 9/11，后续新 raw/fact 使用 seq 10/11 而部分未进入可读存储。Chroma 的 seq_id 不是 AUTOINCREMENT，直接删掉队列最高行会使后续序号回退。当前暂停本轮安装更新，待单独修复该既有缺陷并通过组合探针后一起发布；上述源码回归不代表安装探针已通过。
+组合治理安装探针新增“恢复后继续真实 SDK 写入”断言时，发现 purge 后新写入 ID 可见性异常；未放宽断言，也没有用 forget-only 通过替代组合场景。独立取证确认：seed 的 queue max/watermark 为 6/6，govern 后为 9/11，后续新 raw/fact 使用 seq 10/11 而部分未进入可读存储。Chroma 的 seq_id 不是 AUTOINCREMENT，直接删掉队列最高行会使后续序号回退。当时暂停安装；后续按 [ADR-0037](../adr/0037-chroma-purge-sequence.md) 修复，组合探针、本地/NAS 制品验证均通过，并随 cde427c 更新常驻实验实例。
