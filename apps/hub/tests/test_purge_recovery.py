@@ -198,15 +198,16 @@ def test_startup_and_background_resume_share_one_replay(tmp_path, monkeypatch):
             executor._replayed = False
             entered, release = asyncio.Event(), asyncio.Event()
             calls = 0
+            run = executor.purger.run
 
-            async def present(*args, **kwargs):
+            async def replay(*args, **kwargs):
                 nonlocal calls
                 calls += 1
                 entered.set()
                 await release.wait()
-                return True
+                return await run(*args, **kwargs)
 
-            monkeypatch.setattr(executor.purger, "present", present)
+            monkeypatch.setattr(executor.purger, "run", replay)
             first = asyncio.create_task(executor.resume())
             await asyncio.wait_for(entered.wait(), timeout=5)
             second = asyncio.create_task(executor.resume())

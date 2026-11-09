@@ -11,6 +11,7 @@ from cloud_memory_hub.boundary import CloudBoundary
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.governance_execution import ExecutionStore, GovernanceExecutor
+from cloud_memory_hub.governance_inflight import InflightGovernance
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_preview import GovernancePreview
 from cloud_memory_hub.governance_purge import Purger
@@ -127,6 +128,7 @@ def create_hub(config: HubConfig) -> CloudBoundary:
         lineage,
         Purger(ingest, lambda: _sdk_library_bridge(core), config.data_dir),
         drain=lambda: core.state.memory_write_drain,
+        inflight=InflightGovernance(ingest, generation.admissions, governance.journal),
     )
     core.state.cmh_executor = executor
     # Before serving or draining: finish interrupted executions and re-apply

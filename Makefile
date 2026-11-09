@@ -123,3 +123,7 @@ probe-productivity-forget-guard: prepare-upstream
 .PHONY: probe-chroma-delete-replay
 probe-chroma-delete-replay: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_chroma_delete_replay.py
+
+.PHONY: probe-inflight-governance
+probe-inflight-governance: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_inflight_governance.py

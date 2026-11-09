@@ -206,6 +206,9 @@ def test_legacy_forget_then_current_purge_keeps_scope_available_after_restart(
             # keep its signed intent unchanged when the new purge is appended.
             with monkeypatch.context() as legacy_writer:
                 legacy_writer.setattr(governance_execution, "capture_sources", capture_sources)
+                legacy_writer.setattr(
+                    app.core.state.cmh_executor.inflight, "prepare", lambda scope: ()
+                )
                 forgotten = await execute(web, config, event, selected, "forget")
             journal = app.core.state.cmh_governance.journal
             old = ExecutionStore(journal).operations()[forgotten["operation_id"]][1]

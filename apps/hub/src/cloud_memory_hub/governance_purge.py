@@ -5,11 +5,13 @@ an interrupted purge is simply re-run from the start.
 """
 
 import sqlite3
+from hashlib import sha256
 from pathlib import Path
 
 from hy_memory.data.cache_sqlite import SqliteCache
 from one_memory.database_access import main_database
 from one_memory.hy_memory_bridge import _joined_thread
+from one_memory.memory_server.durable_queue import _TERMINAL_WRITE_STATES, _strict_reaped_digest
 
 from cloud_memory_hub.chat_graph import PREFIX as CHAT
 from cloud_memory_hub.chroma_governance import (
@@ -20,12 +22,22 @@ from cloud_memory_hub.chroma_governance import (
     queue_topic,
     require_sequence,
 )
+from cloud_memory_hub.governance_candidates import (
+    _RECEIPT,
+    CandidateBudget,
+    _Budget,
+    _metadata,
+    _payload,
+)
+from cloud_memory_hub.governance_inflight import PayloadTarget
+from cloud_memory_hub.governance_inventory import MAX_CONTENT_BYTES, MAX_RECORDS
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_request_owner import verify_request_owner
 from cloud_memory_hub.memory_graph import PREFIX as MEMORY
 from cloud_memory_hub.original_archive import validate_original
 from cloud_memory_hub.profile_evidence import PREFIX as PROFILE
 from cloud_memory_hub.reconcile_graph import PREFIX as INPUTS
+from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.sdk_reconcile import RESERVED_PREFIXES
 from cloud_memory_hub.source_history import PREFIX as ORIGINAL
 
@@ -102,6 +114,36 @@ def _present_in(path, table, column, values):
     return False
 
 
+def _request_row(db, table, columns, column, value, budget, usage):
+    rows = list(_metadata(db, table, columns, f"{column}=?", (value,), "rowid", 2, budget))
+    for _row in rows:
+        budget.add(usage)
+    if len(rows) > 1:
+        raise GovernanceError("governance_purge_request_unproven")
+    return rows[0] if rows else None
+
+
+def _preflight_request_bodies(reads, budget):
+    """Fit every required body before the first fetch, including both measurements."""
+    sizes = []
+    for db, table, rowid in reads:
+        row = db.execute(
+            f"SELECT typeof(payload_json),length(CAST(payload_json AS BLOB)) "
+            f"FROM {table} WHERE rowid=?",
+            (rowid,),
+        ).fetchone()
+        budget.add("metadata_bytes", 8)
+        if row is None or row[0] != "text" or type(row[1]) is not int:
+            raise GovernanceError("governance_purge_request_unproven")
+        sizes.append(row[1])
+    projected = _Budget(budget.limit)
+    projected.values = budget.values.copy()
+    for size in sizes:
+        # _payload independently remeasures before fetching in the same snapshot.
+        projected.add("metadata_bytes", 8)
+        projected.add("payload_bytes", size)
+
+
 class Purger:
     def __init__(self, ingest, bridge, data_dir):
         self.ingest, self.bridge = ingest, bridge
@@ -119,49 +161,143 @@ class Purger:
 
     def _requests(self, receipts, snapshots, scope_id):
         """Core keeps job identities after payload reaping and Hub receipt purge."""
-        requests = set()
+        requests, _targets = self._request_evidence(receipts, snapshots, scope_id)
+        return set(requests.values())
+
+    def _request_evidence(self, receipts, snapshots, scope_id, *, terminal_payloads=False):
+        """One bounded config/Core snapshot binds every job to its own request."""
         owners = receipts | {receipt for _, receipt in snapshots}
+        if len(owners) > MAX_RECORDS:
+            raise GovernanceError("governance_scan_limit")
+        budget = _Budget(CandidateBudget(max_records=MAX_RECORDS, max_bytes=MAX_CONTENT_BYTES))
         queue = self.ingest._queue()
-        with self.ingest._database() as db:
-            with main_database(queue.database_path).read(row_factory=sqlite3.Row) as jobs:
-                for receipt in sorted(owners):
-                    job = jobs.execute(
-                        "SELECT job_id,idempotency_key,source_key "
-                        "FROM memory_write_jobs WHERE job_id=?",
-                        (receipt,),
-                    ).fetchone()
-                    if job is None or not isinstance(job["source_key"], str):
-                        raise GovernanceError("governance_purge_request_unproven")
-                    source_id = job["source_key"][4:]
-                    source = db.execute(
-                        "SELECT source_id,device_id,scope_id FROM cmh_sources WHERE source_id=?",
-                        (source_id,),
-                    ).fetchone()
+        try:
+            with self.ingest._database() as db:
+                db.execute("PRAGMA query_only=ON")
+                with main_database(queue.database_path).read(row_factory=sqlite3.Row) as jobs:
+                    jobs.execute("BEGIN")
                     try:
-                        owner = verify_request_owner(
-                            job,
-                            source,
-                            instance_id=self.ingest.access.instance_id,
-                            scope_id=scope_id,
+                        sources, identities, originals, terminal = {}, {}, {}, {}
+                        for receipt in sorted(owners):
+                            job = _request_row(
+                                jobs,
+                                "memory_write_jobs",
+                                ("job_id", "idempotency_key", "source_key", "state"),
+                                "job_id",
+                                receipt,
+                                budget,
+                                "jobs",
+                            )
+                            if job is None or not isinstance(job["source_key"], str):
+                                raise GovernanceError("governance_purge_request_unproven")
+                            source_id = job["source_key"][4:]
+                            if source_id not in sources:
+                                sources[source_id] = _request_row(
+                                    db,
+                                    "cmh_sources",
+                                    ("source_id", "device_id", "scope_id"),
+                                    "source_id",
+                                    source_id,
+                                    budget,
+                                    "sources",
+                                )
+                            try:
+                                owner = verify_request_owner(
+                                    job,
+                                    sources[source_id],
+                                    instance_id=self.ingest.access.instance_id,
+                                    scope_id=scope_id,
+                                )
+                            except GovernanceError:
+                                raise GovernanceError("governance_purge_request_unproven") from None
+                            identities[receipt] = owner
+                            row = _request_row(
+                                db,
+                                "cmh_event_receipts",
+                                _RECEIPT,
+                                "receipt_id",
+                                receipt,
+                                budget,
+                                "receipts",
+                            )
+                            if row is not None:
+                                originals[receipt] = row
+                            if terminal_payloads and job["state"] in _TERMINAL_WRITE_STATES:
+                                terminal[receipt] = job
+                        reads = [
+                            (db, "cmh_event_receipts", row["scan_rowid"])
+                            for row in originals.values()
+                        ] + [
+                            (jobs, "memory_write_jobs", row["scan_rowid"])
+                            for row in terminal.values()
+                        ]
+                        _preflight_request_bodies(reads, budget)
+                        for receipt, row in originals.items():
+                            archived = {
+                                **row,
+                                "payload_json": _payload(
+                                    db, "cmh_event_receipts", row["scan_rowid"], budget
+                                ),
+                            }
+                            event = validate_original(archived, self.ingest.access.instance_id)
+                            owner = identities[receipt]
+                            if (
+                                event.scope_id != owner.scope_id
+                                or event.source_id != owner.source_id
+                                or event.device_id != owner.device_id
+                                or event.event_id != owner.event_id
+                                or row["receipt_id"] != owner.job_id
+                                or row["request_id"] != owner.request_id
+                            ):
+                                raise GovernanceError("governance_purge_request_unproven")
+                        targets = []
+                        for receipt, job in terminal.items():
+                            payload = _payload(jobs, "memory_write_jobs", job["scan_rowid"], budget)
+                            digest = (
+                                _strict_reaped_digest(payload)
+                                or sha256(payload.encode()).hexdigest()
+                            )
+                            targets.append(
+                                PayloadTarget(receipt, identities[receipt].request_id, digest)
+                            )
+                        return {job: owner.request_id for job, owner in identities.items()}, tuple(
+                            targets
                         )
-                    except GovernanceError:
-                        raise GovernanceError("governance_purge_request_unproven") from None
-                    row = db.execute(
-                        "SELECT * FROM cmh_event_receipts WHERE receipt_id=?", (receipt,)
-                    ).fetchone()
-                    if row is not None:
-                        event = validate_original(row, self.ingest.access.instance_id)
-                        if (
-                            event.scope_id != owner.scope_id
-                            or event.source_id != owner.source_id
-                            or event.device_id != owner.device_id
-                            or event.event_id != owner.event_id
-                            or row["receipt_id"] != owner.job_id
-                            or row["request_id"] != owner.request_id
-                        ):
-                            raise GovernanceError("governance_purge_request_unproven")
-                    requests.add(owner.request_id)
-        return requests
+                    finally:
+                        jobs.rollback()
+        except GovernanceError as error:
+            if str(error) in {
+                "governance_candidate_budget_exceeded",
+                "governance_candidate_budget_invalid",
+            }:
+                raise GovernanceError("governance_scan_limit") from None
+            if str(error) == "governance_candidate_read_failed":
+                raise GovernanceError("governance_purge_request_unproven") from None
+            raise
+        except (sqlite3.Error, OSError, ValueError, TypeError):
+            raise GovernanceError("governance_purge_request_unproven") from None
+
+    def legacy_terminal_targets(self, records, *, scope_id) -> tuple[PayloadTarget, ...]:
+        """Read exact terminal cleanup targets for an already-signed legacy purge.
+
+        The caller holds governance, worker and intake exclusion. This is not
+        SDK absence proof and never authorizes cancelling a nonterminal job.
+        Snapshot owners are deliberately excluded from whole-job cleanup.
+        """
+        if len(records) > MAX_RECORDS:
+            raise GovernanceError("governance_scan_limit")
+        receipts = {
+            identity[len(ORIGINAL) :] for identity in records if identity.startswith(ORIGINAL)
+        }
+        if not receipts:
+            return ()
+        try:
+            _requests, targets = self._request_evidence(
+                receipts, set(), scope_id, terminal_payloads=True
+            )
+            return targets
+        except (sqlite3.Error, AccessError, OSError, UnicodeError):
+            raise GovernanceError("governance_purge_request_unproven") from None
 
     async def _sdk_delete(self, sdk, native):
         for identity in sorted(native):
@@ -238,11 +374,18 @@ class Purger:
             )
         ) or payload_rows_present(paths["chroma"], paths["chroma_topic"], point_ids(native))
 
-    def _reap_terminal_payloads(self):
-        # Reuse Core's existing terminal-only retention rule. This does not
-        # cancel or resolve pending/unknown work (handled separately in ADR-0034).
-        while self.ingest._queue().clear_terminal_payloads():
-            pass
+    def _reap_terminal_payloads(self, targets):
+        # Only the signed, confirmed jobs may lose their frozen input. Never
+        # trigger Core's global retention pass as a side effect of one purge.
+        queue = self.ingest._queue()
+        for target in targets:
+            result = queue.clear_terminal_payload_for_governance(
+                target.job_id,
+                expected_request_id=target.request_id,
+                expected_payload_digest=target.input_digest,
+            )
+            if result not in {"reaped", "already_reaped"}:
+                raise GovernanceError("governance_inflight_reap_unproven")
 
     async def present(self, records, *, scope_id):
         """Whether any purged record exists again, e.g. after a data restore."""
@@ -263,7 +406,7 @@ class Purger:
 
         return await _joined_thread(lambda: sdk._loop_thread.run(lookup()))
 
-    async def run(self, records, contents, *, scope_id):
+    async def run(self, records, contents, *, scope_id, payload_targets=()):
         native, receipts, snapshots = partition(records)
         sdk = await self.bridge()._get_client()
         paths = self._sdk_paths(sdk)
@@ -272,7 +415,7 @@ class Purger:
         await self._sdk_delete(sdk, native)
         await _joined_thread(self._sdk_side_tables, paths, native, requests)
         await _joined_thread(self._hub_rows, receipts, snapshots)
-        await _joined_thread(self._reap_terminal_payloads)
+        await _joined_thread(self._reap_terminal_payloads, payload_targets)
         files = [
             paths["chroma"],
             paths["history"],
@@ -284,6 +427,7 @@ class Purger:
             if path.exists():
                 await _joined_thread(_vacuum, path)
         # Verify by content, not by ID: copies are what purge must remove.
-        needles = [text.encode() for text in contents if len(text) >= 16]
+        texts = [*contents, *(text for target in payload_targets for text in target.message_texts)]
+        needles = [text.encode() for text in texts if len(text) >= 16]
         await _joined_thread(self._verify, [p for p in files if p.exists()], needles)
         return {"native": len(native), "receipts": len(receipts), "snapshots": len(snapshots)}

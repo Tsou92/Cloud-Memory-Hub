@@ -3,10 +3,12 @@
 import asyncio
 import json
 import sqlite3
+from hashlib import sha256
 from uuid import uuid4
 
 import pytest
 from cloud_memory_hub.app import create_hub
+from cloud_memory_hub.events import EventEnvelope
 from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.governance_execution import ExecutionStore, pending_operations
 from cloud_memory_hub.governance_journal import GovernanceError, Intent
@@ -17,6 +19,7 @@ from one_memory.memory_server.durable_queue import (
     CANCELLED,
     COMPLETED,
     PENDING,
+    REAPED_PAYLOAD_MARKER,
     RUNNING,
     DurableWriteDrain,
 )
@@ -471,6 +474,7 @@ def test_legacy_source_rules_fail_closed_without_rewriting_intents(tmp_path, mon
             # Model a pre-ADR-0033 writer using the same persisted schema.
             with monkeypatch.context() as legacy:
                 legacy.setattr(governance_execution, "capture_sources", lambda *args: ())
+                legacy.setattr(app.core.state.cmh_executor.inflight, "prepare", lambda scope: ())
                 reply = await web.post(
                     EXECUTE, headers=admin, json={**body, "expected_view": view["view_digest"]}
                 )
@@ -606,10 +610,6 @@ def test_restored_old_data_replays_completed_purge_before_serving(tmp_path, monk
     asyncio.run(scenario())
 
 
-class InflightResurrection(AssertionError):
-    """Only the confirmed ADR-0034 gap is an expected failure."""
-
-
 async def inflight_writer(app, monkeypatch):
     """Real SDK/queue/observer; replace model and profile-dependent supervisor only.
 
@@ -661,30 +661,72 @@ async def inflight_writer(app, monkeypatch):
     return outputs
 
 
-async def assert_inflight_is_not_extracted(app, monkeypatch, job):
-    """The final assertion alone is expected to fail while ADR-0034 is open."""
+async def assert_inflight_is_not_extracted(
+    app, monkeypatch, job, *, action, original_payload, web, headers, event
+):
+    """Check real cancellation, retention and Drain admission, not SDK gate coverage.
+
+    The synthetic supervisor below calls private SDK add directly. Zero calls
+    proves the native Drain never starts that writer; it does not prove every
+    supervisor or SDK generation entry is protected by the production gate.
+    """
     queue = app.core.state.memory_write_queue
-    frozen = queue.payload_for(job)
+
+    def row():
+        with sqlite3.connect(queue.database_path) as db:
+            return db.execute(
+                "SELECT idempotency_key,state,hy_invoked,payload_json,attempts,updated_at "
+                "FROM memory_write_jobs WHERE job_id=?",
+                (job,),
+            ).fetchone()
+
+    before = row()
+    assert before is not None and before[1:3] == (CANCELLED, 0)
+    original = await read(web, headers, event["scope_id"], "history", "cmhe:" + job)
+    if action == "purge":
+        # A sole native marker with the exact former payload digest, including
+        # duplicate-key rejection; a marker alongside retained text is not reaped.
+        assert json.loads(before[3], object_pairs_hook=list) == [
+            (REAPED_PAYLOAD_MARKER, sha256(original_payload.encode()).hexdigest())
+        ]
+        assert queue.payload_for(job) is None
+        assert original.status_code == 404, original.text
+    else:
+        assert original.status_code == 200, original.text
+        items = original.json()["items"]
+        assert len(items) == 1 and items[0]["next_content_offset"] is None
+        assert json.loads(items[0]["content"]) == json.loads(
+            EventEnvelope.model_validate(event).canonical_payload()
+        )
+
     outputs = await inflight_writer(app, monkeypatch)
-    assert queue.get(frozen.idempotency_key).state == PENDING
-    queue.settle(job, state=RUNNING, hy_invoked=False)
-    await app.core.state.memory_write_drain.execute(job)
-    # Check real stored SDK nodes, not just the synthetic model invocation.
-    for identity in outputs:
-        assert await sdk_status(app, identity) == ("active", True)
-    state = queue.get(frozen.idempotency_key).state
-    print(f"ADR-0034 drain outcome: state={state}, active_sdk_memories={len(outputs)}")
-    if outputs:
-        raise InflightResurrection("ADR-0034: governed pending job wrote active SDK memory")
+    sdk = await _sdk_library_bridge(app.core)._get_client()
+    add, calls = sdk.add, []
+
+    def observed_add(*args, **kwargs):
+        calls.append(kwargs.get("request_id"))
+        return add(*args, **kwargs)
+
+    monkeypatch.setattr(sdk, "add", observed_add)
+    # Open only the profile/source claim predicates: terminal state itself must
+    # keep these tasks out of the real queue worker, even if a model is ready.
+    drain = DurableWriteDrain(
+        queue,
+        execute=app.core.state.memory_write_drain.execute,
+        source_writes_permitted=lambda source: True,
+        source_claim_enabled=lambda source: True,
+    )
+    assert await drain.run_one(limit=32) == 0
+    assert calls == [] and outputs == []
+    assert row() == before
 
 
-@pytest.mark.xfail(strict=True, raises=InflightResurrection, reason="ADR-0034 G-A: pending job")
 @pytest.mark.parametrize("action", ["forget", "purge"])
 @pytest.mark.parametrize("revision", [1, 2])
-def test_inflight_pending_job_survives_completed_governance(
+def test_inflight_pending_jobs_are_cancelled_by_completed_governance(
     tmp_path, monkeypatch, action, revision
 ):
-    """V1/G-A: original and its previewed revision still require queue cleanup."""
+    """ADR-0038 G-A: every confirmed revision is cancelled, with an empty SDK."""
     config = config_for(tmp_path)
 
     async def scenario():
@@ -694,11 +736,16 @@ def test_inflight_pending_job_survives_completed_governance(
                 web, admin, event, permissions=("events:write", "memory:read", "history:read")
             )
             first = await accepted(web, headers, event)
-            job = first
+            events = {first: event}
             if revision == 2:
-                job = await accepted(
-                    web, headers, {**event, "event_id": str(uuid4()), "revision": 2}
-                )
+                revised = {**event, "event_id": str(uuid4()), "revision": 2}
+                job = await accepted(web, headers, revised)
+                events[job] = revised
+            with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
+                payloads = dict(db.execute("SELECT job_id,payload_json FROM memory_write_jobs"))
+            sdk = await _sdk_library_bridge(app.core)._get_client()
+            namespace = f"cmh:{event['instance_id']}:{event['scope_id']}"
+            assert await t0342b_nodes(sdk, namespace) == []
             body = {
                 "scope_id": event["scope_id"],
                 "action": action,
@@ -706,28 +753,26 @@ def test_inflight_pending_job_survives_completed_governance(
             }
             view = await web.post(PREVIEW, headers=admin, json=body)
             assert view.status_code == 200, view.text
-            if revision == 2:
-                assert "cmhe:" + job in {item["record_id"] for item in view.json()["items"]}
+            assert {"cmhe:" + job for job in events} == {
+                item["record_id"] for item in view.json()["items"]
+            }
             reply = await web.post(
                 EXECUTE, headers=admin, json={**body, "expected_view": view.json()["view_digest"]}
             )
             assert reply.status_code == 200, reply.text
             assert reply.json()["state"] == "completed"
-            if action == "purge":
-                assert (
-                    await read(web, headers, event["scope_id"], "history", "cmhe:" + job)
-                ).status_code == 404
-                # Purge currently claims completion while queue plaintext survives.
-                with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as db:
-                    payload = db.execute(
-                        "SELECT payload_json FROM memory_write_jobs WHERE job_id=?", (job,)
-                    ).fetchone()[0]
-                stored = json.loads(payload)
-                assert (
-                    event["content"]["messages"][0]["text"]
-                    in stored["input_records"][0]["verbatim"]
+            for job, original_event in events.items():
+                await assert_inflight_is_not_extracted(
+                    app,
+                    monkeypatch,
+                    job,
+                    action=action,
+                    original_payload=payloads[job],
+                    web=web,
+                    headers=headers,
+                    event=original_event,
                 )
-            await assert_inflight_is_not_extracted(app, monkeypatch, job)
+            assert await t0342b_nodes(sdk, namespace) == []
 
     asyncio.run(scenario())
 
@@ -799,15 +844,25 @@ def test_inflight_acceptance_between_source_capture_and_plan(tmp_path, monkeypat
     asyncio.run(scenario())
 
 
-@pytest.mark.xfail(strict=True, raises=InflightResurrection, reason="ADR-0034 G-C: restored queue")
 @pytest.mark.parametrize("action", ["forget", "purge"])
-def test_inflight_old_queue_backup_survives_governance_restart(tmp_path, monkeypatch, action):
-    """V3/G-C: restore only the business SQLite queue, retain newer governance."""
+def test_inflight_restored_queue_is_cancelled_before_startup_claim(tmp_path, monkeypatch, action):
+    """ADR-0038 G-C: replay cancellation after restoring only the old queue."""
     config = config_for(tmp_path)
+    purge_text = "Synthetic restored queue payload must be physically erased after completed purge."
+    queue_path = config.data_dir / "one-memory.sqlite3"
+    queue_files = (queue_path, queue_path.with_name(queue_path.name + "-wal"))
 
     async def scenario(backup):
         async with fixture(config) as (app, web):
             admin, headers, _, event = await provision(web, config)
+            if action == "purge":
+                event = {
+                    **event,
+                    "content": {"messages": [{"role": "user", "text": purge_text}]},
+                }
+            await grant_reads(
+                web, admin, event, permissions=("events:write", "memory:read", "history:read")
+            )
             first = await accepted(web, headers, event)
             body = {
                 "scope_id": event["scope_id"],
@@ -815,22 +870,76 @@ def test_inflight_old_queue_backup_survives_governance_restart(tmp_path, monkeyp
                 "record_ids": ["cmhe:" + first],
             }
             with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as source:
+                original_payload = source.execute(
+                    "SELECT payload_json FROM memory_write_jobs WHERE job_id=?", (first,)
+                ).fetchone()[0]
                 source.backup(backup)
+            sdk = await _sdk_library_bridge(app.core)._get_client()
+            namespace = f"cmh:{event['instance_id']}:{event['scope_id']}"
+            assert await t0342b_nodes(sdk, namespace) == []
             view = await web.post(PREVIEW, headers=admin, json=body)
             assert view.status_code == 200, view.text
             reply = await web.post(
                 EXECUTE, headers=admin, json={**body, "expected_view": view.json()["view_digest"]}
             )
             assert reply.status_code == 200, reply.text
+            assert reply.json()["state"] == "completed"
             operation = reply.json()["operation_id"]
+            await assert_inflight_is_not_extracted(
+                app,
+                monkeypatch,
+                first,
+                action=action,
+                original_payload=original_payload,
+                web=web,
+                headers=headers,
+                event=event,
+            )
         # Closed service; no file deletion, WAL copying or Chroma cache reset.
         with sqlite3.connect(config.data_dir / "one-memory.sqlite3") as restored:
             backup.backup(restored)
+            assert restored.execute(
+                "SELECT state,payload_json FROM memory_write_jobs WHERE job_id=?", (first,)
+            ).fetchone() == (PENDING, original_payload)
+        if action == "purge":
+            assert any(
+                purge_text.encode() in path.read_bytes() for path in queue_files if path.exists()
+            )
+        startup_calls = []
+
+        def no_startup_add(*args, **kwargs):
+            startup_calls.append(kwargs.get("request_id"))
+            raise AssertionError("restored cancelled intent must never enter SDK")
+
+        monkeypatch.setattr(type(sdk), "add", no_startup_add)
         async with fixture(config) as (app, web):
-            await app.core.state.cmh_executor.resume()
+            # The production lifespan must replay before claim; no explicit
+            # resume call or test-side queue mutation supplies the cancellation.
             store = app.core.state.cmh_executor.store
             assert store.operations()[operation][0] == "completed"
-            await assert_inflight_is_not_extracted(app, monkeypatch, first)
+            await assert_inflight_is_not_extracted(
+                app,
+                monkeypatch,
+                first,
+                action=action,
+                original_payload=original_payload,
+                web=web,
+                headers=headers,
+                event=event,
+            )
+            assert startup_calls == []
+            assert (
+                await t0342b_nodes(await _sdk_library_bridge(app.core)._get_client(), namespace)
+                == []
+            )
+        if action == "purge":
+            # A reaped logical row can still leave its former body in SQLite's
+            # free pages or WAL. Completed recovery must vacuum/verify those too.
+            assert all(
+                purge_text.encode() not in path.read_bytes()
+                for path in queue_files
+                if path.exists()
+            )
 
     with sqlite3.connect(":memory:") as backup:
         asyncio.run(scenario(backup))
