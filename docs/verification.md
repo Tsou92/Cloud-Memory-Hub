@@ -89,6 +89,8 @@
 
 同轮补充 `test_forget_recovery.py` 9 项与 `test_productivity_forget_guard.py` 20 项：真实旧业务恢复后的下一轮 SDK 提炼输入不再使用已忘记普通原文；生产力范围暂不能停止内部合并输入，须在新执行、重试及旧操作恢复时明确拒绝。安装探针分别覆盖实体副本、生产力拒绝和跨进程组合恢复；保护性拒绝不计作 FR-10 完整能力通过。
 
+2026-11-09 组合探针继续写入时发现 Chroma 日志最高序号/未消费删除丢失，新增 `test_chroma_purge_sequence.py`、`test_chroma_delete_replay.py`、`test_chroma_governance.py`，共 16 项通过；关联 FR-10、FR-11、ENG-01。实际 Core/SDK 读回、1000 节点跨进程索引重放、旧损坏状态拒绝、映射/集合/事务/预算及独立审查范围见[验证记录](reviews/2026-11-09-chroma-purge-sequence.md)。
+
 2026-11-03 基础画像增加 test_profile_evidence.py 和 make probe-profile-evidence，关联 FR-08、FR-09、FR-10、FR-11、FR-12。覆盖原生差异/迁移、实际旧输入冻结、部分副作用、取消/故障/预算、结构化 KV 摘要、Chroma 空身份格式，以及只有画像产出的 SDK 跨进程持久结果与禁止写入重放。见 [ADR-0028](adr/0028-basic-profile-evidence.md) 和[验证记录](reviews/2026-11-03-profile-evidence.md)；尚不等于 Hub 画像来源图或删除闭环。
 
 后续 Hub 接线新增 test_profile_archive.py、test_profile_graph.py 和 make probe-profile-graph，验证同作用域跨 Agent 的独立产出索引、原始来源、当前画像来源校验、事务中断/无重写补档与隔离；普通合并快照同时补齐本次聊天历史父边，避免遗漏快照中的派生内容。见 [ADR-0029](adr/0029-basic-profile-lineage.md) 和[记录](reviews/2026-11-03-profile-lineage.md)。不据此宣称完整输入时序、安全删除或恢复已完成。

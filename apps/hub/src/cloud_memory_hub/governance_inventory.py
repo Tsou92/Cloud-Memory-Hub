@@ -13,9 +13,10 @@ from chromadb.errors import NotFoundError
 from hy_memory.data.vector_store_chroma import ChromaVectorStore, _run_in_vdb_pool
 from hy_memory.models.memory import MemoryLayer, MemoryStatus
 from hy_memory.pipelines._retrieval.config import entity_collection_name
-from one_memory.hy_memory_bridge import _joined_thread
+from one_memory.hy_memory_bridge import HY_MEMORY_NAMESPACE, _joined_thread
 
 from cloud_memory_hub.chain_inventory import require_chain_origins
+from cloud_memory_hub.chroma_governance import require_sequence
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.governance_plan import RelationNode
 from cloud_memory_hub.privacy import PrivacyError, parse_json
@@ -140,6 +141,9 @@ async def _require_modeled_scope(sdk, namespace):
     vector = sdk._vector_store
     if not isinstance(vector, ChromaVectorStore):
         raise GovernanceError("governance_backend_unsupported")
+    await _joined_thread(
+        require_sequence, Path(sdk._config.vector_store.persist_directory) / "chroma.sqlite3"
+    )
     await _require_no_entity_copies(vector, namespace)
 
 
@@ -147,11 +151,20 @@ async def require_modeled_scope(bridge, namespace):
     """Bounded recovery preflight; the caller already holds exclusive admission.
 
     Recovery may have removed part of the lineage, so it cannot rebuild the full
-    inventory. Check only writer configuration and one scoped companion ID.
+    inventory. Check writer configuration, log sequence and one scoped companion ID.
     """
     try:
         if version("hy-memory") != "2.0.5.dev3":
             raise GovernanceError("governance_sdk_version_unsupported")
+        # The pinned bridge fixes this path before constructing the SDK. Inspect
+        # an existing log before SDK initialization can acquire a Chroma write
+        # lock or reopen its segments; the actual configured path is rechecked
+        # below after initialization (including a newly created empty store).
+        existing = (
+            Path(bridge.data_dir) / "hy-memory" / HY_MEMORY_NAMESPACE / "vector" / "chroma.sqlite3"
+        )
+        if existing.exists():
+            await _joined_thread(require_sequence, existing)
         sdk = await bridge._get_client()
         await _joined_thread(lambda: sdk._loop_thread.run(_require_modeled_scope(sdk, namespace)))
     except GovernanceError:

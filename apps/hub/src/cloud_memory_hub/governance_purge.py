@@ -12,6 +12,14 @@ from one_memory.database_access import main_database
 from one_memory.hy_memory_bridge import _joined_thread
 
 from cloud_memory_hub.chat_graph import PREFIX as CHAT
+from cloud_memory_hub.chroma_governance import (
+    append_target_deletes,
+    payload_rows_present,
+    point_ids,
+    purge_payload_rows,
+    queue_topic,
+    require_sequence,
+)
 from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.governance_journal import GovernanceError
 from cloud_memory_hub.memory_graph import PREFIX as MEMORY
@@ -104,6 +112,7 @@ class Purger:
             raise GovernanceError("governance_purge_cache_unsupported")
         return {
             "chroma": Path(sdk._config.vector_store.persist_directory) / "chroma.sqlite3",
+            "chroma_topic": queue_topic(sdk._vector_store),
             "history": Path(sdk._config.history.db_path),
             "cache": Path(sdk._cache._db_path),
         }
@@ -160,12 +169,12 @@ class Purger:
             if result.get("error_code") or result.get("partial"):
                 raise GovernanceError("governance_purge_incomplete")
             # deleted_count 0 without error: already absent from a retried run.
+        await _joined_thread(
+            lambda: sdk._loop_thread.run(append_target_deletes(sdk._vector_store, native))
+        )
 
     def _sdk_side_tables(self, paths, native, requests):
-        with sqlite3.connect(paths["chroma"], timeout=30) as db:
-            # Chroma's write-ahead queue keeps full metadata until purge_log;
-            # rows at or below max_seq_id are already applied to segments.
-            _delete_in(db, "embeddings_queue", "id", native)
+        purge_payload_rows(paths["chroma"], paths["chroma_topic"], point_ids(native))
         with sqlite3.connect(paths["history"], timeout=30) as db:
             _delete_in(db, "memory_history", "memory_id", native)
         if paths["cache"].exists():
@@ -226,9 +235,8 @@ class Purger:
             for store, table, column, values in (
                 ("cache", "write_outcomes", "request_id", requests),
                 ("history", "memory_history", "memory_id", native),
-                ("chroma", "embeddings_queue", "id", native),
             )
-        )
+        ) or payload_rows_present(paths["chroma"], paths["chroma_topic"], point_ids(native))
 
     def _reap_terminal_payloads(self):
         # Reuse Core's existing terminal-only retention rule. This does not
@@ -259,6 +267,7 @@ class Purger:
         native, receipts, snapshots = partition(records)
         sdk = await self.bridge()._get_client()
         paths = self._sdk_paths(sdk)
+        await _joined_thread(require_sequence, paths["chroma"])
         requests = await _joined_thread(self._requests, receipts, snapshots, scope_id)
         await self._sdk_delete(sdk, native)
         await _joined_thread(self._sdk_side_tables, paths, native, requests)
