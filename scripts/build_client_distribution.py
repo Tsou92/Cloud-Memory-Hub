@@ -100,6 +100,9 @@ def validate_wheel(path: Path, expected: str) -> None:
 
 def build_wheel(source: Path, output: Path, constraints: Path, python: str, expected: str) -> Path:
     before = set(output.glob("*.whl"))
+    # uv 0.12.5 propagates build constraints through an environment value that
+    # splits an absolute path at spaces. Keep staged paths relative to one cwd.
+    build_root = constraints.parent
     run(
         [
             *UV,
@@ -109,11 +112,12 @@ def build_wheel(source: Path, output: Path, constraints: Path, python: str, expe
             python,
             "--no-python-downloads",
             "--build-constraints",
-            str(constraints),
+            constraints.name,
             "--out-dir",
-            str(output),
-            str(source),
-        ]
+            str(output.relative_to(build_root)),
+            str(source.relative_to(build_root)),
+        ],
+        cwd=build_root,
     )
     created = set(output.glob("*.whl")) - before
     if len(created) != 1:
