@@ -193,7 +193,7 @@
     {
       "path": "patches/0038-raw-lexical-timeout-fallback.patch",
       "scope": "preserve_authorized_lexical_candidates_on_optional_raw_semantic_timeout_without_extending_read_deadlines",
-      "digest": "sha256:778b6680a7a26fc15ccb23f4d0fa6a26e63266c6b2abdff32c91b5586850cfc0"
+      "digest": "sha256:ed8e77e64bfc5a2e0efac47c28c2a00959c72ce25452e7613e28bb7698039792"
     }
   ]
 }
