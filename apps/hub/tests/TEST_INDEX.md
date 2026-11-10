@@ -2,6 +2,12 @@
 
 本索引记录新增发布修复的相关测试，不代替全套测试收集或真实客户端验收。
 
+## ADR-0062：客户端只读处理进度
+
+- 需求：FR-01、FR-02、FR-07、FR-12、R2-04；设计见 [ADR-0062](../../../docs/adr/0062-client-processing-status.md)。
+- `test_client_processing.py`：真实本地 HTTP 回执时间、最近五条项目／来源采样、仅 GET／队列字节不变、损坏数据和伪造回执拒绝、旧 Hub 时间缺失、部分失败、并发和截止时间。关联客户端配置、传输、接纳和永久拒绝／本地投递回归共 188 项通过；真实 NAS、新安装包与两机另行验收。
+- 证据见[处理进度记录](../../../docs/reviews/2026-11-10-client-processing-status.md)。
+
 ## ADR-0060：自助配对与客户端安装
 
 - 需求：FR-01、FR-02、FR-03、FR-06、FR-07、FR-12、ENG-01；设计见 [ADR-0060](../../../docs/adr/0060-self-service-pairing.md)。

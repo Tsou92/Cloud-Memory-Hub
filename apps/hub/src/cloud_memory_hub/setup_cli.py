@@ -69,6 +69,11 @@ def main():
         print(json.dumps(result, ensure_ascii=False))
         if args.command == "status" and result["remote"]["status"] == "unavailable":
             return 3 if result["remote"]["retryable"] else 2
+        if args.command == "status" and result["processing"]["status"] in {
+            "partial",
+            "unavailable",
+        }:
+            return 3 if any(item.get("retryable") for item in result["processing"]["events"]) else 2
         return 0
     except ClientSetupError as error:
         print(json.dumps({"error": str(error), "retryable": False}), file=sys.stderr)

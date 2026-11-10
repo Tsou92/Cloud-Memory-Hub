@@ -51,6 +51,24 @@ Codex 桌面所用 TOML 配置使用同一命令加 `--format codex`。将输出
 | 服务 `installed/loaded/running` | 本机服务配置、加载与进程状态，不代表在线 |
 | `remote.authorized` | 本次真实检查时，设备及当前项目／来源授权可用 |
 | `remote.unavailable` | 本次检查失败，结合固定错误码处理，不能解释为没有记忆 |
+| `processing.not_checked` | 尚未查询事件处理进度；不加 `--check-remote` 时不会联网 |
+| `processing.checked` | 已核对当前来源最近最多五条本地事件；空样本只代表没有待核对项 |
+| `processing.partial/unavailable` | 部分／全部回执查询失败，已验证的其他项仍保留 |
+
+带 `--check-remote` 时，`processing.events` 展示按本地入队顺序采样的最多五条事件。
+每项区分 `local_status` 与 `remote_status`：本地待传事件也可能已有服务器回执（例如上次
+响应丢失），状态检查不会修改或确认队列。明确没有回执显示 `no_receipt`；路由、权限、网络
+和本地已接纳回执缺失分别报告错误，不当作尚未上传。
+
+服务器 `processing_state` 保留 `pending`、`running`、`waiting_for_model`、
+`waiting_for_permission`、`completed` 等实际任务状态。`completed` 只表示服务器任务完成，
+不证明记忆提炼、检索或另一端读取已经成功。`server_enqueued_at` 为任务首次入队时间，
+`processing_updated_at` 为任务最近更新时间；旧 Hub 未提供时间时为 `null`。
+`latest_known_enqueued_at_in_sample` 和 `latest_known_completed_update_at_in_sample` 只汇总
+这份样本中已知的时间，不是该设备全历史最后同步成功时间。`checked_at` 只是此次查询时间。
+
+此命令只读回执元数据，不发送原文、触发上传、确认队列或建立状态缓存。
+部分失败也返回非零退出码：存在可重试失败时为 `3`，其余检查失败为 `2`。
 
 排障先运行带 `--check-remote` 的状态命令。`device_authentication_required` 检查网页设备是否被撤销或重新签发；`source_permission_required` 检查项目授权与来源；暂时网络错误检查 NAS 和 HTTPS 网络连接。不要通过删除队列或重建身份消除错误。
 
@@ -62,4 +80,4 @@ Codex 桌面所用 TOML 配置使用同一命令加 `--format codex`。将输出
 
 在 A 端让 Agent 保存一条不含敏感信息的合成进展；收到 `accepted` 后，在 B 端用 `memory_recent` 读取。交接使用 `handoff_save` 返回的完整 `handoff_id`，再由 B 端 `handoff_load` 读取。原文和交接不必等待模型提炼；语义搜索由 NAS 模型处理后可用。
 
-已在本机排队的内容不等于已经共享。不要将实际 Agent 未调用工具的问题与网络问题混为一谈；当前也不提供离线记忆读取缓存。对应设计与验收边界见 [ADR-0060](adr/0060-self-service-pairing.md)。
+已在本机排队的内容不等于已经共享。不要将实际 Agent 未调用工具的问题与网络问题混为一谈；当前也不提供离线记忆读取缓存。对应设计与验收边界见 [ADR-0060](adr/0060-self-service-pairing.md) 与[处理状态合同](adr/0062-client-processing-status.md)。
