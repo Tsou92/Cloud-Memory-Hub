@@ -1,0 +1,1868 @@
+diff --git a/hy_memory/agent/anthropic_messages.py b/hy_memory/agent/anthropic_messages.py
+new file mode 100644
+index 0000000..4a1dc8b
+--- /dev/null
++++ b/hy_memory/agent/anthropic_messages.py
+@@ -0,0 +1,236 @@
++"""Small Messages protocol adapter; extraction and tool execution stay upstream."""
++
++import json
++from urllib.parse import urlsplit, urlunsplit
++
++
++class AnthropicRequestError(RuntimeError):
++    """Safe diagnostic with no request, response body, URL or credentials."""
++
++    def __init__(self, code, *, status_code=None):
++        super().__init__(code)
++        self.status_code = status_code
++
++
++def messages_url(base_url):
++    parts = urlsplit(base_url or "https://api.anthropic.com")
++    if (
++        parts.scheme not in {"http", "https"}
++        or not parts.hostname
++        or parts.username
++        or parts.password
++        or parts.query
++        or parts.fragment
++    ):
++        raise AnthropicRequestError("anthropic_endpoint_invalid")
++    path = parts.path.rstrip("/")
++    if not path.endswith("/v1/messages"):
++        path += "/messages" if path.endswith("/v1") else "/v1/messages"
++    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
++
++
++def _text_blocks(content):
++    if content is None or content == "":
++        return []
++    if isinstance(content, str):
++        return [{"type": "text", "text": content}]
++    if isinstance(content, list) and all(
++        isinstance(block, dict)
++        and block.get("type") == "text"
++        and isinstance(block.get("text"), str)
++        for block in content
++    ):
++        return [
++            {"type": "text", "text": block["text"]}
++            for block in content
++            if block["text"]
++        ]
++    raise AnthropicRequestError("anthropic_message_content_unsupported")
++
++
++def _tool_use(call):
++    try:
++        function = call["function"]
++        arguments = function.get("arguments", {})
++        if isinstance(arguments, str):
++            arguments = json.loads(arguments)
++        if (
++            not isinstance(call["id"], str)
++            or not call["id"]
++            or not isinstance(function["name"], str)
++            or not function["name"]
++            or not isinstance(arguments, dict)
++        ):
++            raise ValueError
++        return {
++            "type": "tool_use",
++            "id": call["id"],
++            "name": function["name"],
++            "input": arguments,
++        }
++    except (KeyError, TypeError, ValueError, AttributeError):
++        raise AnthropicRequestError("anthropic_tool_call_invalid") from None
++
++
++def build_payload(
++    messages,
++    *,
++    model,
++    max_tokens,
++    temperature=None,
++    stop=None,
++    tools=None,
++    tool_choice=None,
++    extra_body=None,
++):
++    system, turns = [], []
++    for message in messages:
++        role = message.get("role")
++        blocks = _text_blocks(message.get("content"))
++        if role == "system":
++            system.extend(blocks)
++            continue
++        if role == "tool":
++            identity = message.get("tool_call_id")
++            if not isinstance(identity, str) or not identity:
++                raise AnthropicRequestError("anthropic_tool_result_invalid")
++            blocks = [
++                {"type": "tool_result", "tool_use_id": identity, "content": blocks}
++            ]
++            role = "user"
++        elif role == "assistant":
++            blocks.extend(_tool_use(call) for call in message.get("tool_calls") or [])
++        elif role != "user":
++            raise AnthropicRequestError("anthropic_message_role_unsupported")
++        if not blocks:
++            raise AnthropicRequestError("anthropic_message_empty")
++        if turns and turns[-1]["role"] == role:
++            turns[-1]["content"].extend(blocks)
++        else:
++            turns.append({"role": role, "content": blocks})
++    if not turns:
++        raise AnthropicRequestError("anthropic_messages_empty")
++    body = {"model": model, "messages": turns, "max_tokens": max_tokens}
++    if system:
++        body["system"] = system
++    if temperature is not None:
++        body["temperature"] = temperature
++    if stop:
++        body["stop_sequences"] = stop
++    if tools and tool_choice != "none":
++        converted = []
++        try:
++            for tool in tools:
++                function = tool["function"]
++                if tool.get("type", "function") != "function" or not function["name"]:
++                    raise ValueError
++                schema = function.get(
++                    "parameters", {"type": "object", "properties": {}}
++                )
++                if not isinstance(schema, dict):
++                    raise ValueError
++                item = {"name": function["name"], "input_schema": schema}
++                if function.get("description"):
++                    item["description"] = function["description"]
++                converted.append(item)
++        except (KeyError, TypeError, ValueError):
++            raise AnthropicRequestError("anthropic_tool_schema_invalid") from None
++        body["tools"] = converted
++        if tool_choice in (None, "auto"):
++            body["tool_choice"] = {"type": "auto"}
++        elif tool_choice == "required":
++            body["tool_choice"] = {"type": "any"}
++        elif (
++            isinstance(tool_choice, dict)
++            and tool_choice.get("type") == "function"
++            and isinstance(tool_choice.get("function"), dict)
++            and isinstance(tool_choice["function"].get("name"), str)
++        ):
++            body["tool_choice"] = {
++                "type": "tool",
++                "name": tool_choice["function"]["name"],
++            }
++        else:
++            raise AnthropicRequestError("anthropic_tool_choice_unsupported")
++    # No automatic thinking opt-in or OpenAI-specific extra fields. Explicit
++    # thinking-off is the only extension needed by the shared model profile.
++    if extra_body:
++        if extra_body != {"thinking": {"type": "disabled"}}:
++            raise AnthropicRequestError("anthropic_extra_body_unsupported")
++        body["thinking"] = {"type": "disabled"}
++    return body
++
++
++def parse_response(payload, *, model):
++    try:
++        if (
++            not isinstance(payload, dict)
++            or payload.get("type") != "message"
++            or payload.get("role") != "assistant"
++            or not isinstance(payload["content"], list)
++        ):
++            raise ValueError
++        texts, calls = [], []
++        for block in payload["content"]:
++            kind = block["type"]
++            if kind == "text":
++                if not isinstance(block["text"], str):
++                    raise ValueError
++                texts.append(block["text"])
++            elif kind == "tool_use":
++                if (
++                    not isinstance(block["id"], str)
++                    or not block["id"]
++                    or not isinstance(block["name"], str)
++                    or not block["name"]
++                    or not isinstance(block["input"], dict)
++                ):
++                    raise ValueError
++                calls.append(
++                    {
++                        "id": block["id"],
++                        "type": "function",
++                        "function": {
++                            "name": block["name"],
++                            "arguments": json.dumps(block["input"], ensure_ascii=False),
++                        },
++                    }
++                )
++            elif kind not in {"thinking", "redacted_thinking"}:
++                raise ValueError
++        reason = payload["stop_reason"]
++        finish = {
++            "end_turn": "stop",
++            "stop_sequence": "stop",
++            "max_tokens": "length",
++            "tool_use": "tool_calls",
++        }.get(reason)
++        if finish is None or (reason == "tool_use") != bool(calls):
++            raise ValueError
++        if not "".join(texts).strip() and not calls and finish != "length":
++            raise ValueError
++        if len({call["id"] for call in calls}) != len(calls):
++            raise ValueError
++        usage = payload["usage"]
++        counts = [
++            usage["input_tokens"],
++            usage["output_tokens"],
++            usage.get("cache_creation_input_tokens", 0),
++            usage.get("cache_read_input_tokens", 0),
++        ]
++        if any(type(value) is not int or value < 0 for value in counts):
++            raise ValueError
++        inputs, outputs = counts[0] + counts[2] + counts[3], counts[1]
++        return {
++            "content": "".join(texts),
++            "tool_calls": calls or None,
++            "model": payload.get("model") or model,
++            "response_id": payload.get("id") or "",
++            "choices_count": 1,
++            "finish_reason": finish,
++            "tokens_used": inputs + outputs,
++            "prompt_tokens": inputs,
++            "completion_tokens": outputs,
++        }
++    except (KeyError, TypeError, ValueError, AttributeError):
++        raise AnthropicRequestError("anthropic_response_invalid") from None
+diff --git a/hy_memory/agent/llm_provider.py b/hy_memory/agent/llm_provider.py
+index 52a70b8..742800b 100644
+--- a/hy_memory/agent/llm_provider.py
++++ b/hy_memory/agent/llm_provider.py
+@@ -12,14 +12,14 @@ Agent Memory - LLM Provider
+ 
+ 示例：
+     provider = LLMProvider(config)
+-    
++
+     # 调用 LLM。不传 temperature —— 由 config.llm 统一决定（含"完全不传"的情形，
+     # 见 _resolve_temperature）。调用点写死会绕过用户配置。
+     response = await provider.complete(
+         prompt="请总结以下内容：...",
+         max_tokens=500,
+     )
+-    
++
+     print(response.content)
+     print(response.tokens_used)
+ """
+@@ -43,7 +43,10 @@ logger = logging.getLogger(__name__)
+ def _log_llm_content_enabled() -> bool:
+     """Return whether sensitive LLM prompt/response bodies may be logged."""
+     return os.getenv("MEMORY_LOG_LLM_CONTENT", "false").strip().lower() in {
+-        "1", "true", "yes", "on",
++        "1",
++        "true",
++        "yes",
++        "on",
+     }
+ 
+ 
+@@ -63,6 +66,7 @@ class LLMRetryError(RuntimeError):
+ def _attempt_record(attempt_no: int, exc: BaseException) -> Dict[str, Any]:
+     """把单次 attempt 的异常规范成可落库的 dict（含 HTTP 状态码等常见字段）。"""
+     import time as _t
++
+     rec: Dict[str, Any] = {
+         "attempt": attempt_no,
+         "error_type": type(exc).__name__,
+@@ -83,7 +87,8 @@ def _attempt_record(attempt_no: int, exc: BaseException) -> Dict[str, Any]:
+             if _body:
+                 body = str(_body)
+                 rec["response_body"] = (
+-                    body[:1000] if _log_llm_content_enabled()
++                    body[:1000]
++                    if _log_llm_content_enabled()
+                     else f"<redacted len={len(body)} sha256={_content_fingerprint(body)}>"
+                 )
+         except Exception:
+@@ -96,15 +101,20 @@ def _is_retryable_llm_error(exc: BaseException) -> bool:
+     status = getattr(exc, "status_code", None)
+     if isinstance(status, int):
+         return status == 408 or status == 429 or status >= 500
+-    return isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)) or any(
++    return isinstance(
++        exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)
++    ) or any(
+         token in str(exc).lower()
+         for token in ("timeout", "timed out", "connection", "read operation")
+     )
+ 
+ 
+ def _build_retry_error(
+-    max_retries: int, model: str, backend: str,
+-    attempts: List[Dict[str, Any]], last_exc: Optional[BaseException],
++    max_retries: int,
++    model: str,
++    backend: str,
++    attempts: List[Dict[str, Any]],
++    last_exc: Optional[BaseException],
+ ) -> "LLMRetryError":
+     actual_attempts = len(attempts)
+     msg = (
+@@ -161,14 +171,16 @@ def _serialize_tool_calls(tool_calls_raw) -> Optional[List[Dict[str, Any]]]:
+     for tc in tool_calls_raw:
+         try:
+             fn = getattr(tc, "function", None)
+-            result.append({
+-                "id": getattr(tc, "id", "") or "",
+-                "type": getattr(tc, "type", "function") or "function",
+-                "function": {
+-                    "name": getattr(fn, "name", "") if fn else "",
+-                    "arguments": getattr(fn, "arguments", "") if fn else "",
+-                },
+-            })
++            result.append(
++                {
++                    "id": getattr(tc, "id", "") or "",
++                    "type": getattr(tc, "type", "function") or "function",
++                    "function": {
++                        "name": getattr(fn, "name", "") if fn else "",
++                        "arguments": getattr(fn, "arguments", "") if fn else "",
++                    },
++                }
++            )
+         except Exception as e:
+             logger.warning(f"[llm] failed to serialize tool_call: {e}")
+     return result or None
+@@ -176,7 +188,9 @@ def _serialize_tool_calls(tool_calls_raw) -> Optional[List[Dict[str, Any]]]:
+ 
+ class LLMBackend(Enum):
+     """LLM protocol backend."""
++
+     OPENAI = "openai"
++    ANTHROPIC = "anthropic"
+ 
+ 
+ @dataclass
+@@ -184,6 +198,7 @@ class LLMResponse:
+     """
+     LLM 响应
+     """
++
+     content: str
+     tokens_used: int = 0
+     prompt_tokens: int = 0
+@@ -208,6 +223,7 @@ class LLMConfig:
+     """
+     LLM 配置
+     """
++
+     backend: LLMBackend = LLMBackend.OPENAI
+     model: str = "gpt-3.5-turbo"
+     api_key: str = ""
+@@ -250,8 +266,7 @@ class LLMProvider:
+             except Exception:
+                 pass
+             raise ValueError(
+-                f"LLM returned empty choices (no completion). "
+-                f"Response: {raw}"
++                f"LLM returned empty choices (no completion). Response: {raw}"
+             )
+         msg = choices[0].message
+         usage = response.usage
+@@ -290,7 +305,7 @@ class LLMProvider:
+     def __init__(self, config: Optional[MemoryConfig] = None):
+         """
+         初始化 LLM Provider
+-        
++
+         Args:
+             config: 配置对象
+         """
+@@ -298,27 +313,32 @@ class LLMProvider:
+         self._llm_config = self._build_llm_config()
+         self._client = None
+         self._clients = weakref.WeakKeyDictionary()
+-        
++
+         # 统计
+         self._total_calls = 0
+         self._total_tokens = 0
+         self._errors = 0
+-        
+-        logger.debug(f"LLMProvider initialized, backend={self._llm_config.backend.value}")
+-    
++
++        logger.debug(
++            f"LLMProvider initialized, backend={self._llm_config.backend.value}"
++        )
++
+     def _build_llm_config(self) -> LLMConfig:
+         """从配置构建 LLM 配置"""
+         llm = self.config.llm
+         return LLMConfig(
+-            backend=LLMBackend.OPENAI,
++            backend=(
++                LLMBackend.ANTHROPIC
++                if llm.provider == "anthropic"
++                else LLMBackend.OPENAI
++            ),
+             model=llm.model,
+             api_key=llm.api_key,
+             base_url=llm.base_url,
+             # 不再把 None 兜成 0.7：None 是"不传"的合法表达，兜掉会让
+             # MEMORY_LLM_TEMPERATURE=none 这类配置失效
+             temperature=(
+-                None if getattr(llm, "omit_temperature", False)
+-                else llm.temperature
++                None if getattr(llm, "omit_temperature", False) else llm.temperature
+             ),
+             timeout=llm.timeout or 120,
+             max_retries=llm.max_retries if llm.max_retries is not None else 5,
+@@ -326,7 +346,7 @@ class LLMProvider:
+             extra_headers=llm.extra_headers,
+             extra_body=llm.extra_body,
+         )
+-    
++
+     def _resolve_temperature(self, temperature: Optional[float]) -> Optional[float]:
+         """把调用点的 temperature 收敛到**配置**上。
+ 
+@@ -350,7 +370,7 @@ class LLMProvider:
+         tools: Optional[List[Dict[str, Any]]] = None,
+         tool_choice: Optional[Any] = None,
+         audit_stage: Optional[str] = None,
+-        **kwargs
++        **kwargs,
+     ) -> LLMResponse:
+         """
+         调用 LLM 完成文本生成
+@@ -371,21 +391,25 @@ class LLMProvider:
+         """
+         _last_exc: Optional[BaseException] = None
+         _attempts: List[Dict[str, Any]] = []
+-        for attempt in range(self._llm_config.max_retries):
++        for attempt in range(max(1, self._llm_config.max_retries)):
+             try:
+                 if attempt == 0:
+                     logger.debug(
+                         f"[llm] model={self._llm_config.model} "
+                         f"backend={self._llm_config.backend.value} "
+-                        f"base_url={self._llm_config.base_url or 'default'} "
++                        f"base_url={self._diagnostic_endpoint()} "
+                         f"prompt_len={len(prompt)} tools={len(tools) if tools else 0}"
+                     )
+-                if _log_llm_content_enabled():
++                if (
++                    _log_llm_content_enabled()
++                    and self._llm_config.backend != LLMBackend.ANTHROPIC
++                ):
+                     logger.debug(f"[llm] prompt:\n{prompt}")
+                 else:
+                     logger.debug(
+                         "[llm] prompt content hidden; len=%d sha256=%s",
+-                        len(prompt), _content_fingerprint(prompt),
++                        len(prompt),
++                        _content_fingerprint(prompt),
+                     )
+ 
+                 with model_call_stage(audit_stage):
+@@ -396,7 +420,7 @@ class LLMProvider:
+                         stop=stop,
+                         tools=tools,
+                         tool_choice=tool_choice,
+-                        **kwargs
++                        **kwargs,
+                     )
+ 
+                 self._total_calls += 1
+@@ -407,12 +431,16 @@ class LLMProvider:
+                     f"tokens={response.tokens_used}, "
+                     f"tool_calls={len(response.tool_calls) if response.tool_calls else 0}"
+                 )
+-                if _log_llm_content_enabled():
++                if (
++                    _log_llm_content_enabled()
++                    and self._llm_config.backend != LLMBackend.ANTHROPIC
++                ):
+                     logger.debug(f"[llm] response content: {response.content!r}")
+                 else:
+                     logger.debug(
+                         "[llm] response content hidden; len=%d sha256=%s",
+-                        len(response.content), _content_fingerprint(response.content),
++                        len(response.content),
++                        _content_fingerprint(response.content),
+                     )
+ 
+                 return response
+@@ -435,14 +463,22 @@ class LLMProvider:
+ 
+         # 所有重试都失败 —— 异常携带每一次 attempt 的错误（供上层落进 EXTRACT trace）
+         raise _build_retry_error(
+-            self._llm_config.max_retries, self._llm_config.model,
+-            self._llm_config.backend.value, _attempts, _last_exc,
++            self._llm_config.max_retries,
++            self._llm_config.model,
++            self._llm_config.backend.value,
++            _attempts,
++            _last_exc,
+         )
+ 
+     def _resolve_endpoint(self) -> tuple:
+         """Return the configured OpenAI-compatible endpoint unchanged."""
+         return self._llm_config.api_key, (self._llm_config.base_url or None)
+ 
++    def _diagnostic_endpoint(self) -> str:
++        if self._llm_config.backend == LLMBackend.ANTHROPIC:
++            return "anthropic_messages"
++        return self._llm_config.base_url or "default"
++
+     async def _call_llm(
+         self,
+         prompt: str,
+@@ -451,7 +487,7 @@ class LLMProvider:
+         stop: List[str] = None,
+         tools: Optional[List[Dict[str, Any]]] = None,
+         tool_choice: Optional[Any] = None,
+-        **kwargs
++        **kwargs,
+     ) -> LLMResponse:
+         """单轮 prompt → 统一走 Chat Completions。
+ 
+@@ -480,10 +516,16 @@ class LLMProvider:
+         tools: Optional[List[Dict[str, Any]]] = None,
+         tool_choice: Optional[Any] = None,
+     ) -> LLMResponse:
+-        """OpenAI Chat Completions 的唯一实现。
+-
+-        All supported endpoints use the OpenAI-compatible Chat Completions API.
+-        """
++        """Dispatch the protocol while retaining the shared caller retry loop."""
++        if self._llm_config.backend == LLMBackend.ANTHROPIC:
++            return await self._anthropic_messages(
++                messages,
++                max_tokens=max_tokens,
++                temperature=temperature,
++                stop=stop,
++                tools=tools,
++                tool_choice=tool_choice,
++            )
+         try:
+             from openai import AsyncOpenAI
+         except ImportError:
+@@ -576,6 +618,79 @@ class LLMProvider:
+             tool_calls=_serialize_tool_calls(getattr(msg, "tool_calls", None)),
+         )
+ 
++    async def _anthropic_messages(
++        self,
++        messages,
++        *,
++        max_tokens,
++        temperature=None,
++        stop=None,
++        tools=None,
++        tool_choice=None,
++    ) -> LLMResponse:
++        import httpx
++
++        from .anthropic_messages import (
++            AnthropicRequestError,
++            build_payload,
++            messages_url,
++            parse_response,
++        )
++
++        config = self._llm_config
++        if not config.api_key:
++            raise AnthropicRequestError("anthropic_api_key_missing")
++        payload = build_payload(
++            messages,
++            model=config.model,
++            max_tokens=max_tokens,
++            temperature=self._resolve_temperature(temperature),
++            stop=stop,
++            tools=tools,
++            tool_choice=tool_choice,
++            extra_body=config.extra_body,
++        )
++        endpoint = messages_url(config.base_url)
++        headers = {
++            key: value
++            for key, value in (config.extra_headers or {}).items()
++            if key.lower() not in {"authorization", "x-api-key", "anthropic-version"}
++        }
++        headers.update({"x-api-key": config.api_key, "anthropic-version": "2023-06-01"})
++        try:
++            factory = getattr(self.config, "http_transport_factory", None)
++            transport = factory() if callable(factory) else None
++            # Reuse Core's audited transport and the SDK concurrency limiter.
++            # The shared outer loop owns retries; each attempt closes its client.
++            async with httpx.AsyncClient(
++                transport=transport, timeout=config.timeout
++            ) as client:
++                async with llm_slot():
++                    async with asyncio.timeout(config.timeout):
++                        response = await client.post(
++                            endpoint, headers=headers, json=payload
++                        )
++            if not 200 <= response.status_code < 300:
++                raise AnthropicRequestError(
++                    "anthropic_http_error",
++                    status_code=response.status_code,
++                )
++            try:
++                data = response.json()
++            except ValueError:
++                raise AnthropicRequestError("anthropic_response_invalid") from None
++            return LLMResponse(**parse_response(data, model=config.model))
++        except AnthropicRequestError:
++            raise
++        except (TimeoutError, httpx.TimeoutException):
++            raise AnthropicRequestError("anthropic_timeout", status_code=408) from None
++        except httpx.TransportError:
++            raise AnthropicRequestError(
++                "anthropic_connection_error", status_code=503
++            ) from None
++        except Exception:
++            raise AnthropicRequestError("anthropic_request_failed") from None
++
+     async def close(self) -> None:
+         clients = [
+             client
+@@ -616,13 +731,13 @@ class LLMProvider:
+         """
+         _last_exc: Optional[BaseException] = None
+         _attempts: List[Dict[str, Any]] = []
+-        for attempt in range(self._llm_config.max_retries):
++        for attempt in range(max(1, self._llm_config.max_retries)):
+             try:
+                 if attempt == 0:
+                     logger.debug(
+                         f"[llm] model={self._llm_config.model} "
+                         f"backend={self._llm_config.backend.value} "
+-                        f"base_url={self._llm_config.base_url or 'default'} "
++                        f"base_url={self._diagnostic_endpoint()} "
+                         f"msgs={len(messages)} tools={len(tools) if tools else 0}"
+                     )
+ 
+@@ -661,8 +776,11 @@ class LLMProvider:
+                     await asyncio.sleep(delay)
+ 
+         raise _build_retry_error(
+-            self._llm_config.max_retries, self._llm_config.model,
+-            self._llm_config.backend.value, _attempts, _last_exc,
++            self._llm_config.max_retries,
++            self._llm_config.model,
++            self._llm_config.backend.value,
++            _attempts,
++            _last_exc,
+         )
+ 
+     async def chat(
+@@ -670,16 +788,16 @@ class LLMProvider:
+         messages: List[Dict[str, str]],
+         max_tokens: int = 500,
+         temperature: Optional[float] = None,
+-        **kwargs
++        **kwargs,
+     ) -> LLMResponse:
+         """
+         多轮对话
+-        
++
+         Args:
+             messages: 消息列表 [{"role": "user/assistant", "content": "..."}]
+             max_tokens: 最大 token 数
+             temperature: 温度参数
+-        
++
+         Returns:
+             LLM 响应
+         """
+@@ -689,16 +807,13 @@ class LLMProvider:
+             role = msg.get("role", "user")
+             content = msg.get("content", "")
+             prompt_parts.append(f"{role}: {content}")
+-        
++
+         prompt = "\n".join(prompt_parts)
+-        
++
+         return await self.complete(
+-            prompt=prompt,
+-            max_tokens=max_tokens,
+-            temperature=temperature,
+-            **kwargs
++            prompt=prompt, max_tokens=max_tokens, temperature=temperature, **kwargs
+         )
+-    
++
+     def get_stats(self) -> Dict[str, Any]:
+         """获取统计信息"""
+         return {
+@@ -706,11 +821,9 @@ class LLMProvider:
+             "total_tokens": self._total_tokens,
+             "errors": self._errors,
+             "avg_tokens_per_call": (
+-                self._total_tokens / self._total_calls
+-                if self._total_calls > 0 else 0
++                self._total_tokens / self._total_calls if self._total_calls > 0 else 0
+             ),
+             "error_rate": (
+-                self._errors / self._total_calls
+-                if self._total_calls > 0 else 0
++                self._errors / self._total_calls if self._total_calls > 0 else 0
+             ),
+         }
+diff --git a/memhub/apps/core/src/one_memory/hy_memory_bridge.py b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+index 902f577..4b5daa6 100644
+--- a/memhub/apps/core/src/one_memory/hy_memory_bridge.py
++++ b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+@@ -2119,9 +2119,10 @@ def build_hy_memory_config(
+     config.metrics_enabled = False
+     if profile.provider_kind is ProviderKind.HY_DEFAULT:
+         raise UnsupportedHyMemoryProviderError("hy_default_not_available")
+-    if profile.provider_kind is ProviderKind.ANTHROPIC:
+-        raise UnsupportedHyMemoryProviderError("anthropic_provider_adapter_not_available")
+-    if profile.provider_kind is ProviderKind.OPENAI_COMPATIBLE and not api_key:
++    if (
++        profile.provider_kind in {ProviderKind.OPENAI_COMPATIBLE, ProviderKind.ANTHROPIC}
++        and not api_key
++    ):
+         raise HyMemoryBridgeError("model_api_key_missing")
+     if not profile.embedding_model:
+         raise HyMemoryBridgeError("embedder_not_configured")
+@@ -2133,7 +2134,9 @@ def build_hy_memory_config(
+     # caller's back, so the acceptance run opts out of it via this env flag.
+     # The product default is unchanged: this is scoped to the isolated run.
+     single_attempt = os.environ.get("ONE_MEMORY_ACCEPTANCE_SINGLE_ATTEMPT") == "1"
+-    config.llm.provider = "openai"
++    config.llm.provider = (
++        "anthropic" if profile.provider_kind is ProviderKind.ANTHROPIC else "openai"
++    )
+     config.llm.model = profile.model
+     config.llm.api_key = provider_key
+     config.llm.base_url = base_url
+@@ -2141,6 +2144,10 @@ def build_hy_memory_config(
+     config.llm.max_retries = 0 if single_attempt else 2
+     config.llm.retry_delay = 0.0 if single_attempt else 1.0
+     config.llm.temperature = 0
++    # Messages gateways may require a model-specific temperature. Use their
++    # default rather than forwarding an OpenAI-oriented generation setting.
++    if profile.provider_kind is ProviderKind.ANTHROPIC:
++        config.llm.omit_temperature = True
+     # Output capacity is independent of context size. Mixed-author windows need
+     # more space than HY's 2K default; truncation is still a hard failure.
+     config.llm.agent_max_tokens = 8192
+diff --git a/memhub/apps/core/src/one_memory/model_probe.py b/memhub/apps/core/src/one_memory/model_probe.py
+index b12d418..dd3ea0a 100644
+--- a/memhub/apps/core/src/one_memory/model_probe.py
++++ b/memhub/apps/core/src/one_memory/model_probe.py
+@@ -153,14 +153,6 @@ class ModelProber:
+                 stages=(stage,),
+                 capabilities=capabilities,
+             )
+-        if profile.provider_kind is ProviderKind.ANTHROPIC:
+-            stage = ProbeStage(
+-                stage="provider",
+-                ok=False,
+-                code=ProbeCode.STRUCTURED_OUTPUT_UNSUPPORTED,
+-                latency_ms=0,
+-            )
+-            return await asyncio.to_thread(self._finish, profile, (stage,), ModelCapabilities())
+         secret = await asyncio.to_thread(self._secret, profile_id)
+         await self._check_operation()
+         if profile.provider_kind is not ProviderKind.OLLAMA and secret is None:
+@@ -184,17 +176,21 @@ class ModelProber:
+             follow_redirects=False,
+             transport=self.transport,
+         ) as client:
+-            endpoint = await self._request_stage(
+-                client,
+-                "model",
+-                *_models_request(profile, secret),
+-                expected_model=profile.model,
+-                listing_optional=True,
+-            )
+-            if not endpoint.ok:
+-                return await asyncio.to_thread(
+-                    self._finish, profile, (endpoint,), ModelCapabilities()
++            # Messages-only gateways need not implement a models listing.
++            # The generation request below is the authority for availability.
++            endpoint = None
++            if profile.provider_kind is not ProviderKind.ANTHROPIC:
++                endpoint = await self._request_stage(
++                    client,
++                    "model",
++                    *_models_request(profile, secret),
++                    expected_model=profile.model,
++                    listing_optional=True,
+                 )
++                if not endpoint.ok:
++                    return await asyncio.to_thread(
++                        self._finish, profile, (endpoint,), ModelCapabilities()
++                    )
+             # 网关没有列表接口时，这一步没有验证过任何东西，
+             # 模型可用性只能由后面的生成调用来证明。
+             structured = await self._request_stage(
+@@ -202,9 +198,11 @@ class ModelProber:
+                 "structured_output",
+                 *_structured_request(profile, secret),
+                 require_structured_json=True,
++                require_anthropic_message=profile.provider_kind is ProviderKind.ANTHROPIC,
+             )
+-            schema_refused = False
+-            if structured.code is ProbeCode.STRUCTURED_OUTPUT_UNSUPPORTED:
++            # Prompted JSON does not prove schema-constrained output support.
++            schema_refused = profile.provider_kind is ProviderKind.ANTHROPIC
++            if not schema_refused and structured.code is ProbeCode.STRUCTURED_OUTPUT_UNSUPPORTED:
+                 # The gateway will not take the parameter. That says nothing
+                 # about whether the model can generate: a compatible endpoint
+                 # may reject `response_format: json_schema` while returning
+@@ -280,7 +278,7 @@ class ModelProber:
+                     require_embedding=True,
+                 )
+         capabilities = ModelCapabilities(
+-            endpoint_reachable=True,
++            endpoint_reachable=endpoint is not None or structured.ok,
+             model_available=structured.ok,
+             # Two different questions, and one answer used to serve both. The
+             # generation call above proves the model works; whether a schema
+@@ -290,7 +288,10 @@ class ModelProber:
+             embedding_available=embedding.ok,
+         )
+         return await asyncio.to_thread(
+-            self._finish, profile, (endpoint, structured, embedding), capabilities
++            self._finish,
++            profile,
++            ((endpoint,) if endpoint is not None else ()) + (structured, embedding),
++            capabilities,
+         )
+ 
+     def _secret(self, profile_id: str) -> str | None:
+@@ -312,6 +313,7 @@ class ModelProber:
+         payload: dict[str, object] | None,
+         *,
+         require_structured_json: bool = False,
++        require_anthropic_message: bool = False,
+         require_embedding: bool = False,
+         expected_model: str | None = None,
+         listing_optional: bool = False,
+@@ -376,7 +378,25 @@ class ModelProber:
+         if require_structured_json:
+             try:
+                 body = response.json()
+-                content = _response_content(body)
++                if require_anthropic_message:
++                    from hy_memory.agent.anthropic_messages import (
++                        AnthropicRequestError,
++                        parse_response,
++                    )
++
++                    # A successful probe must meet the actual SDK response
++                    # contract, including usage and complete text output.
++                    try:
++                        normalized = parse_response(
++                            body, model=str((payload or {}).get("model", ""))
++                        )
++                    except AnthropicRequestError:
++                        return _stage(stage, False, ProbeCode.INVALID_RESPONSE, started)
++                    if normalized["finish_reason"] != "stop":
++                        return _stage(stage, False, ProbeCode.INVALID_RESPONSE, started)
++                    content = normalized["content"]
++                else:
++                    content = _response_content(body)
+                 parsed = json.loads(content) if isinstance(content, str) else content
+             except (ValueError, TypeError):
+                 return _stage(
+@@ -511,15 +531,20 @@ def _structured_request(
+             },
+         )
+     if profile.provider_kind is ProviderKind.ANTHROPIC:
++        from hy_memory.agent.anthropic_messages import messages_url
++
+         return (
+             "POST",
+-            f"{base_url}/v1/messages",
++            messages_url(base_url),
+             _headers(profile.provider_kind, secret),
+-            {
+-                "model": profile.model,
+-                "max_tokens": 64,
+-                "messages": [{"role": "user", "content": "Return memory_probe=true as JSON"}],
+-            },
++            attach_disable_thinking(
++                profile,
++                {
++                    "model": profile.model,
++                    "max_tokens": 64,
++                    "messages": [{"role": "user", "content": "Return memory_probe=true as JSON"}],
++                },
++            ),
+         )
+     payload: dict[str, object] = {
+         "model": profile.model,
+@@ -697,8 +722,14 @@ def _response_content(body: object) -> object:
+         if isinstance(choice_message, dict):
+             return choice_message.get("content")
+     content = body.get("content")
+-    if isinstance(content, list) and content and isinstance(content[0], dict):
+-        return content[0].get("text")
++    if isinstance(content, list):
++        return "".join(
++            block["text"]
++            for block in content
++            if isinstance(block, dict)
++            and block.get("type") == "text"
++            and isinstance(block.get("text"), str)
++        )
+     return body
+ 
+ 
+diff --git a/memhub/apps/core/src/one_memory/model_profiles.py b/memhub/apps/core/src/one_memory/model_profiles.py
+index 8175cf8..ca69298 100644
+--- a/memhub/apps/core/src/one_memory/model_profiles.py
++++ b/memhub/apps/core/src/one_memory/model_profiles.py
+@@ -832,9 +832,16 @@ class ModelProfileStore:
+                 or version["secret_ref"] != expected_secret_ref
+             ):
+                 raise ModelProfileConflictError("model_profile_changed")
+-            if profile.provider_kind not in {ProviderKind.OPENAI_COMPATIBLE, ProviderKind.OLLAMA}:
++            if profile.provider_kind not in {
++                ProviderKind.OPENAI_COMPATIBLE,
++                ProviderKind.OLLAMA,
++                ProviderKind.ANTHROPIC,
++            }:
+                 raise ModelProfileUnavailableError("model_provider_not_supported")
+-            if profile.provider_kind is ProviderKind.OPENAI_COMPATIBLE and not expected_secret_ref:
++            if (
++                profile.provider_kind in {ProviderKind.OPENAI_COMPATIBLE, ProviderKind.ANTHROPIC}
++                and not expected_secret_ref
++            ):
+                 raise ModelProfileUnavailableError("model_secret_required")
+             if not all(
+                 row[key] for key in ("endpoint_reachable", "model_available", "embedding_available")
+@@ -876,7 +883,7 @@ class ModelProfileStore:
+ 
+     def activate(self, profile_id: str, secrets: SecretStore) -> ModelProfile:
+         profile = self.require(profile_id, secrets)
+-        if profile.provider_kind in {ProviderKind.HY_DEFAULT, ProviderKind.ANTHROPIC}:
++        if profile.provider_kind is ProviderKind.HY_DEFAULT:
+             raise ModelProfileUnavailableError("model_provider_not_supported")
+         if not profile.embedding_model:
+             raise ModelProfileUnavailableError("embedding_model_required")
+@@ -1150,6 +1157,8 @@ def attach_disable_thinking(
+             payload["reasoning_effort"] = "none"
+     elif profile.provider_kind is ProviderKind.OLLAMA:
+         payload["think"] = False
++    elif profile.provider_kind is ProviderKind.ANTHROPIC:
++        payload["thinking"] = {"type": "disabled"}
+     return payload
+ 
+ 
+diff --git a/memhub/apps/core/src/one_memory/model_request_audit.py b/memhub/apps/core/src/one_memory/model_request_audit.py
+index 3a60296..ec28e21 100644
+--- a/memhub/apps/core/src/one_memory/model_request_audit.py
++++ b/memhub/apps/core/src/one_memory/model_request_audit.py
+@@ -294,6 +294,28 @@ def _response_usage(content: bytes) -> _ResponseUsage:
+     usage = body.get("usage")
+     if not isinstance(usage, dict):
+         usage = {}
++    if body.get("type") == "message":
++        input_tokens = _non_negative_int(usage.get("input_tokens"))
++        output_tokens = _non_negative_int(usage.get("output_tokens"))
++        cache_read = _non_negative_int(usage.get("cache_read_input_tokens"))
++        cache_created = _non_negative_int(usage.get("cache_creation_input_tokens"))
++        prompt_tokens = (
++            input_tokens + (cache_read or 0) + (cache_created or 0)
++            if input_tokens is not None
++            else None
++        )
++        return {
++            "provider_request_id": body.get("id") if isinstance(body.get("id"), str) else None,
++            "prompt_tokens": prompt_tokens,
++            "completion_tokens": output_tokens,
++            "total_tokens": (
++                prompt_tokens + output_tokens
++                if prompt_tokens is not None and output_tokens is not None
++                else None
++            ),
++            "cached_prompt_tokens": cache_read,
++            "reasoning_tokens": None,
++        }
+     prompt_details = usage.get("prompt_tokens_details")
+     completion_details = usage.get("completion_tokens_details")
+     cached = (
+@@ -318,6 +340,8 @@ def _request_kind(request: httpx.Request) -> str:
+     path = request.url.path.rstrip("/")
+     if path.endswith("/chat/completions"):
+         return "chat_completion"
++    if path.endswith("/messages"):
++        return "messages"
+     if path.endswith("/embeddings"):
+         return "embedding"
+     return "model_http"
+diff --git a/memhub/apps/core/tests/test_hy_memory_bridge.py b/memhub/apps/core/tests/test_hy_memory_bridge.py
+index 7e592ac..996faf6 100644
+--- a/memhub/apps/core/tests/test_hy_memory_bridge.py
++++ b/memhub/apps/core/tests/test_hy_memory_bridge.py
+@@ -1625,17 +1625,23 @@ def test_search_ids_does_not_create_nodes_tasks_or_collections(tmp_path) -> None
+     assert client.calls == []
+ 
+ 
+-def test_anthropic_profile_is_not_claimed_supported_by_current_sdk(
+-    tmp_path,
+-) -> None:
++def test_anthropic_profile_uses_messages_and_keeps_embedding_local(tmp_path) -> None:
+     profile = snapshot(
+         ProviderKind.ANTHROPIC,
+-        base_url="https://api.anthropic.com",
++        base_url="https://messages.example.test",
+         has_api_key=True,
+-    )
+-
+-    with pytest.raises(UnsupportedHyMemoryProviderError):
+-        build_hy_memory_config(profile, api_key="secret", data_dir=tmp_path)
++        embedding_provider=ProviderKind.LOCAL_ONNX,
++    )
++    config = build_hy_memory_config(profile, api_key="synthetic-secret", data_dir=tmp_path)  # pragma: allowlist secret
++    assert config.llm.provider == "anthropic"
++    assert config.llm.base_url == "https://messages.example.test"
++    assert config.llm.api_key == "synthetic-secret"  # pragma: allowlist secret
++    assert config.llm.omit_temperature is True
++    assert config.llm.extra_body == {"thinking": {"type": "disabled"}}
++    assert config.embedder.api_key == "local-onnx"  # pragma: allowlist secret
++    assert config.embedder.base_url == "http://127.0.0.1/local-onnx"
++    with pytest.raises(HyMemoryBridgeError, match="model_api_key_missing"):
++        build_hy_memory_config(profile, api_key=None, data_dir=tmp_path)
+ 
+ 
+ def test_hy_default_does_not_fall_back_to_ambient_openai(
+diff --git a/memhub/apps/core/tests/test_model_probe.py b/memhub/apps/core/tests/test_model_probe.py
+index dafd72e..7b6b804 100644
+--- a/memhub/apps/core/tests/test_model_probe.py
++++ b/memhub/apps/core/tests/test_model_probe.py
+@@ -10,6 +10,7 @@ from one_memory.model_probe import ModelProber, ProbeCode, _structured_request
+ from one_memory.model_profiles import (
+     ModelProfileInput,
+     ModelProfileStore,
++    ModelProfileUnavailableError,
+     ProviderKind,
+ )
+ from one_memory.secrets import InMemorySecretStore
+@@ -17,6 +18,163 @@ from one_memory.secrets import InMemorySecretStore
+ API_KEY = "probe-secret-value"
+ 
+ 
++@pytest.mark.parametrize("suffix", ["", "/v1", "/v1/messages"])
++@pytest.mark.parametrize("disable_thinking", [False, True])
++def test_anthropic_messages_only_probe_activates_prompted_json_with_local_embedding(
++    tmp_path, monkeypatch, suffix, disable_thinking
++):
++    store = ModelProfileStore(tmp_path / "one-memory.sqlite3")
++    secrets = InMemorySecretStore()
++    profile = store.create(
++        ModelProfileInput(
++            name="Messages provider",
++            provider_kind=ProviderKind.ANTHROPIC,
++            base_url="https://messages.example.test" + suffix,
++            model="synthetic-model",
++            api_key=SecretStr(API_KEY),
++            disable_thinking=disable_thinking,
++        ),
++        secrets,
++    )
++    encoded = []
++    monkeypatch.setattr(
++        "one_memory.local_embedding.LocalEmbedder.encode",
++        lambda _self, texts: encoded.append(texts) or [[0.0] * 512],
++    )
++    requests = []
++
++    def respond(request):
++        requests.append(request)
++        assert request.method == "POST" and request.url.path == "/v1/messages"
++        assert request.headers["x-api-key"] == API_KEY
++        assert request.headers["anthropic-version"] == "2023-06-01"
++        assert "authorization" not in request.headers
++        body = json.loads(request.content)
++        assert body["model"] == "synthetic-model"
++        assert not {"response_format", "reasoning_effort", "temperature"} & body.keys()
++        assert body.get("thinking") == ({"type": "disabled"} if disable_thinking else None)
++        return httpx.Response(
++            200,
++            json={
++                "type": "message",
++                "role": "assistant",
++                "stop_reason": "end_turn",
++                "usage": {"input_tokens": 10, "output_tokens": 6},
++                "content": [
++                    {"type": "thinking", "thinking": "not JSON"},
++                    {"type": "text", "text": '{"memory_probe":'},
++                    {"type": "text", "text": "true}"},
++                ],
++            },
++        )
++
++    result = asyncio.run(
++        ModelProber(store=store, secrets=secrets, transport=httpx.MockTransport(respond)).probe(
++            profile.profile_id
++        )
++    )
++    assert len(requests) == 1 and encoded == [["probe"]]
++    assert result.capabilities.model_available and result.capabilities.endpoint_reachable
++    assert result.capabilities.embedding_available
++    assert result.capabilities.structured_output is False
++    assert all(stage.ok for stage in result.stages)
++    active = store.activate(profile.profile_id, secrets)
++    assert active.is_active and active.embedding_provider_kind is ProviderKind.LOCAL_ONNX
++    assert API_KEY not in result.model_dump_json()
++
++
++@pytest.mark.parametrize(
++    "status,stop,code",
++    [
++        (401, "end_turn", ProbeCode.UNAUTHORIZED),
++        (429, "end_turn", ProbeCode.RATE_LIMITED),
++        (200, "max_tokens", ProbeCode.INVALID_RESPONSE),
++        (200, "tool_use", ProbeCode.INVALID_RESPONSE),
++    ],
++)
++def test_anthropic_probe_failure_does_not_activate_or_fallback(
++    tmp_path, monkeypatch, status, stop, code
++):
++    store = ModelProfileStore(tmp_path / "one-memory.sqlite3")
++    secrets = InMemorySecretStore()
++    profile = store.create(
++        ModelProfileInput(
++            name="Messages provider",
++            provider_kind=ProviderKind.ANTHROPIC,
++            model="synthetic-model",
++            api_key=SecretStr(API_KEY),
++        ),
++        secrets,
++    )
++    monkeypatch.setattr("one_memory.local_embedding.LocalEmbedder.encode", lambda *args: [[0.0]])
++    requests = []
++
++    def respond(request):
++        requests.append(request)
++        assert request.url.path == "/v1/messages"
++        return httpx.Response(
++            status,
++            json={
++                "type": "message",
++                "role": "assistant",
++                "stop_reason": stop,
++                "usage": {"input_tokens": 10, "output_tokens": 6},
++                "content": [{"type": "text", "text": '{"memory_probe":true}'}],
++            },
++        )
++
++    result = asyncio.run(
++        ModelProber(store=store, secrets=secrets, transport=httpx.MockTransport(respond)).probe(
++            profile.profile_id
++        )
++    )
++    assert len(requests) == 1 and result.stages[0].code is code
++    assert not result.capabilities.model_available
++    with pytest.raises(ModelProfileUnavailableError, match="model_profile_probe_required"):
++        store.activate(profile.profile_id, secrets)
++
++
++@pytest.mark.parametrize("invalid", ["missing_usage", "missing_content", "invalid_block"])
++def test_anthropic_probe_uses_the_sdk_response_contract(tmp_path, monkeypatch, invalid):
++    store = ModelProfileStore(tmp_path / "one-memory.sqlite3")
++    secrets = InMemorySecretStore()
++    profile = store.create(
++        ModelProfileInput(
++            name="Messages provider",
++            provider_kind=ProviderKind.ANTHROPIC,
++            model="synthetic-model",
++            api_key=SecretStr(API_KEY),
++        ),
++        secrets,
++    )
++    monkeypatch.setattr("one_memory.local_embedding.LocalEmbedder.encode", lambda *args: [[0.0]])
++    body = {
++        "type": "message",
++        "role": "assistant",
++        "stop_reason": "end_turn",
++        "usage": {"input_tokens": 10, "output_tokens": 6},
++        "content": [{"type": "text", "text": '{"memory_probe":true}'}],
++    }
++    if invalid == "missing_usage":
++        del body["usage"]
++    elif invalid == "missing_content":
++        del body["content"]
++        body["memory_probe"] = True
++    else:
++        body["content"].append({"type": "unknown"})
++    result = asyncio.run(
++        ModelProber(
++            store=store,
++            secrets=secrets,
++            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=body)),
++        ).probe(profile.profile_id)
++    )
++    assert result.stages[0].code is ProbeCode.INVALID_RESPONSE
++    assert not result.capabilities.model_available
++    with pytest.raises(ModelProfileUnavailableError, match="model_profile_probe_required"):
++        store.activate(profile.profile_id, secrets)
++
++
+ def test_probe_still_measures_embedding_when_structured_output_fails(tmp_path) -> None:
+     database = tmp_path / "one-memory.sqlite3"
+     store = ModelProfileStore(database)
+@@ -290,7 +448,7 @@ def test_remote_provider_without_key_fails_before_network(tmp_path) -> None:
+ 
+     result = asyncio.run(ModelProber(store=store, secrets=secrets).probe(profile.profile_id))
+ 
+-    assert result.stages[0].code is ProbeCode.STRUCTURED_OUTPUT_UNSUPPORTED
++    assert result.stages[0].code is ProbeCode.MISSING_API_KEY
+     assert result.capabilities.endpoint_reachable is False
+ 
+ 
+@@ -839,4 +997,5 @@ def test_other_provider_probe_payloads_are_unchanged(tmp_path, provider, force_p
+             "model": "unchanged-model",
+             "max_tokens": 64,
+             "messages": [{"role": "user", "content": "Return memory_probe=true as JSON"}],
++            "thinking": {"type": "disabled"},
+         }
+diff --git a/memhub/apps/core/tests/test_model_profiles.py b/memhub/apps/core/tests/test_model_profiles.py
+index 53ae697..4c45059 100644
+--- a/memhub/apps/core/tests/test_model_profiles.py
++++ b/memhub/apps/core/tests/test_model_profiles.py
+@@ -18,6 +18,50 @@ from one_memory.secrets import InMemorySecretStore
+ API_KEY = "key-that-must-never-enter-sqlite"
+ 
+ 
++@pytest.mark.parametrize("with_key", [True, False])
++def test_anthropic_transaction_activation_preserves_key_and_revision_boundary(tmp_path, with_key):
++    database = tmp_path / "one-memory.sqlite3"
++    store = ModelProfileStore(database)
++    secrets = InMemorySecretStore()
++    profile = store.create(
++        ModelProfileInput(
++            name="Messages",
++            provider_kind=ProviderKind.ANTHROPIC,
++            model="synthetic-model",
++            api_key=SecretStr(API_KEY) if with_key else None,
++        ),
++        secrets,
++    )
++    store.record_capabilities(
++        profile.profile_id,
++        expected_revision=profile.revision,
++        capabilities=ModelCapabilities(
++            endpoint_reachable=True,
++            model_available=True,
++            embedding_available=True,
++            structured_output=False,
++        ),
++        secrets=secrets,
++    )
++    snapshot = store.snapshot(profile.profile_id, profile.revision)
++    with sqlite3.connect(database) as connection:
++        connection.execute("BEGIN IMMEDIATE")
++        if not with_key:
++            with pytest.raises(ModelProfileUnavailableError, match="model_secret_required"):
++                store.activate_in_connection(connection, snapshot, expected_secret_ref=None)
++        else:
++            store.activate_in_connection(
++                connection, snapshot, expected_secret_ref=store.secret_ref(profile.profile_id)
++            )
++    active = store.active(secrets)
++    assert (active is not None) is with_key
++    if active is not None:
++        assert active.revision == profile.revision
++        assert active.embedding_provider_kind is ProviderKind.LOCAL_ONNX
++        assert not active.capabilities.structured_output
++    assert API_KEY.encode() not in database.read_bytes()
++
++
+ def test_profile_uses_one_model_and_keeps_key_out_of_database(tmp_path) -> None:
+     database = tmp_path / "one-memory.sqlite3"
+     secrets = InMemorySecretStore()
+diff --git a/memhub/apps/core/tests/test_model_request_audit.py b/memhub/apps/core/tests/test_model_request_audit.py
+index fea6272..d8de2b3 100644
+--- a/memhub/apps/core/tests/test_model_request_audit.py
++++ b/memhub/apps/core/tests/test_model_request_audit.py
+@@ -24,6 +24,49 @@ def _transport(tmp_path, response):
+     )
+ 
+ 
++def test_messages_usage_includes_cache_without_recording_private_content(tmp_path):
++    private = "synthetic-private-provider-content"
++    store, transport = _transport(
++        tmp_path,
++        lambda _request: httpx.Response(
++            200,
++            json={
++                "id": "message-response-1",
++                "type": "message",
++                "content": [{"type": "text", "text": private}],
++                "usage": {
++                    "input_tokens": 20,
++                    "output_tokens": 7,
++                    "cache_read_input_tokens": 30,
++                    "cache_creation_input_tokens": 10,
++                },
++            },
++        ),
++    )
++
++    async def scenario():
++        async with httpx.AsyncClient(transport=transport) as client:
++            with audit_precipitation_request("messages-request"):
++                await client.post(
++                    "https://messages.example.test/v1/messages",
++                    json={
++                        "model": "synthetic-model",
++                        "max_tokens": 20,
++                        "messages": [{"role": "user", "content": private}],
++                    },
++                )
++
++    asyncio.run(scenario())
++    row = store.report(request_id="messages-request")["requests"][0]
++    assert row["request_kind"] == "messages"
++    assert row["prompt_tokens"] == 60
++    assert row["completion_tokens"] == 7
++    assert row["total_tokens"] == 67
++    assert row["cached_prompt_tokens"] == 30
++    assert row["reasoning_tokens"] is None
++    assert private.encode() not in store.database.read_bytes()
++
++
+ def test_records_one_physical_request_with_provider_usage_and_no_content(tmp_path, monkeypatch):
+     private = "private conversation text"
+     monkeypatch.setattr(
+diff --git a/memhub/apps/web/src/ModelSettings.test.tsx b/memhub/apps/web/src/ModelSettings.test.tsx
+index 90e0254..91a4627 100644
+--- a/memhub/apps/web/src/ModelSettings.test.tsx
++++ b/memhub/apps/web/src/ModelSettings.test.tsx
+@@ -786,12 +786,35 @@ describe("ModelSettings", () => {
+     );
+     expect(labels.some((text) => text.startsWith("Ollama（本机）"))).toBe(true);
+ 
+-    // ModelProfileStore.activate() 对这两个 provider 抛
+-    // model_provider_not_supported。之前它们以 disabled 的形态留在下拉里，
+-    // 等于把两条死路摆在明面上让人去读懂括号里的「暂不支持」。
+-    expect(labels.some((text) => text.includes("Anthropic"))).toBe(false);
++    expect(labels.some((text) => text === "Anthropic Messages")).toBe(true);
+     expect(labels.some((text) => text.includes("HY Memory"))).toBe(false);
+-    expect(providerSelect.options.length).toBe(2);
++    expect(providerSelect.options.length).toBe(3);
++  });
++
++  it("saves an Anthropic endpoint with built-in embedding without activating it", async () => {
++    const user = userEvent.setup();
++    render(<ModelSettings />);
++    await user.selectOptions(screen.getByLabelText("协议"), "anthropic");
++    await user.type(screen.getByLabelText("配置名称"), "Messages provider");
++    await user.type(screen.getByLabelText("生成模型名"), "synthetic-haiku");
++    await user.clear(screen.getByLabelText("Base URL"));
++    await user.type(
++      screen.getByLabelText("Base URL"),
++      "https://messages.example.invalid",
++    );
++    await user.type(screen.getByLabelText(/^API Key/), "synthetic-secret");
++    await user.click(screen.getByRole("button", { name: "保存配置" }));
++    expect(create).toHaveBeenCalledWith(
++      expect.objectContaining({
++        provider_kind: "anthropic",
++        base_url: "https://messages.example.invalid",
++        model: "synthetic-haiku",
++        api_key: "synthetic-secret", // pragma: allowlist secret
++      }),
++    );
++    expect(create.mock.calls[0][0].embedding_model).toBeUndefined();
++    expect(probeProfile).not.toHaveBeenCalled();
++    expect(activate).not.toHaveBeenCalled();
+   });
+ 
+   it("已保存的配置不印内置向量模型", () => {
+diff --git a/memhub/apps/web/src/ModelSettings.tsx b/memhub/apps/web/src/ModelSettings.tsx
+index ac7675e..8a7aec3 100644
+--- a/memhub/apps/web/src/ModelSettings.tsx
++++ b/memhub/apps/web/src/ModelSettings.tsx
+@@ -54,9 +54,7 @@ const PROVIDERS: Array<{
+   label: string;
+   baseUrl: string;
+   keyRequired: boolean;
+-  // 后端 ModelProfileStore.activate() 目前只放行 openai_compatible 与 ollama，
+-  // 其余会抛 model_provider_not_supported。这里标记出来并在下拉里禁用，
+-  // 避免用户填完整个表单、创建成功、最后在激活那一步才撞墙。
++  // Only expose providers supported by the configured generation backend.
+   activatable: boolean;
+ }> = [
+   {
+@@ -68,10 +66,10 @@ const PROVIDERS: Array<{
+   },
+   {
+     kind: "anthropic",
+-    label: "Anthropic Messages（暂不支持）",
++    label: "Anthropic Messages",
+     baseUrl: "https://api.anthropic.com",
+     keyRequired: true,
+-    activatable: false,
++    activatable: true,
+   },
+   {
+     kind: "ollama",
+@@ -996,9 +994,7 @@ export function ModelSettings({
+                 if (!nameEdited) setName(suggestedName(model, next));
+               }}
+             >
+-              {/* Only what the backend will actually activate. These used to be
+-               * listed and disabled, which put two dead ends on screen and made
+-               * the reader parse a parenthesis to find out they were dead. */}
++              {/* Only expose providers the backend can activate. */}
+               {PROVIDERS.filter((item) => item.activatable).map((item) => (
+                 <option key={item.kind} value={item.kind}>
+                   {item.label}
+diff --git a/memhub/apps/web/src/OnboardingModelStep.test.tsx b/memhub/apps/web/src/OnboardingModelStep.test.tsx
+index 220917b..ef3195e 100644
+--- a/memhub/apps/web/src/OnboardingModelStep.test.tsx
++++ b/memhub/apps/web/src/OnboardingModelStep.test.tsx
+@@ -15,6 +15,21 @@ import {
+ } from "./OnboardingModelStep";
+ 
+ afterEach(cleanup);
++it("allows an Anthropic protocol draft while keeping HY unavailable", () => {
++  const p = props();
++  render(<OnboardingModelStep {...p} advancedOpen />);
++  const option = screen.getByRole("option", { name: "Anthropic Messages" });
++  expect(option).toHaveProperty("disabled", false);
++  expect(
++    screen.getByRole("option", { name: "HY 托管（当前不可用）" }),
++  ).toHaveProperty("disabled", true);
++  fireEvent.change(screen.getByLabelText("协议"), {
++    target: { value: "anthropic" },
++  });
++  expect(p.onDraftChange).toHaveBeenCalledWith({ provider_kind: "anthropic" });
++  expect(p.onTest).not.toHaveBeenCalled();
++  expect(p.onSaveAndEnable).not.toHaveBeenCalled();
++});
+ function props(): OnboardingModelStepProps {
+   return {
+     draft: {
+diff --git a/memhub/apps/web/src/OnboardingModelStep.tsx b/memhub/apps/web/src/OnboardingModelStep.tsx
+index 55fc0bd..cc37ded 100644
+--- a/memhub/apps/web/src/OnboardingModelStep.tsx
++++ b/memhub/apps/web/src/OnboardingModelStep.tsx
+@@ -412,8 +412,8 @@ export function OnboardingModelStep(props: OnboardingModelStepProps) {
+                           OpenAI-compatible
+                         </option>
+                         <option value="ollama">Ollama</option>
+-                        <option value="anthropic" disabled>
+-                          Anthropic（暂不支持）
++                        <option value="anthropic">
++                          Anthropic Messages
+                         </option>
+                         <option value="hy_default" disabled>
+                           HY 托管（当前不可用）
+diff --git a/tests/test_llm_anthropic.py b/tests/test_llm_anthropic.py
+new file mode 100644
+index 0000000..03f16f4
+--- /dev/null
++++ b/tests/test_llm_anthropic.py
+@@ -0,0 +1,390 @@
++"""Offline Messages protocol contract through the shared LLMProvider entrypoints."""
++
++import copy
++import json
++import logging
++
++import httpx
++import pytest
++
++from hy_memory.agent.anthropic_messages import AnthropicRequestError, messages_url
++from hy_memory.agent.extractor import Extractor
++from hy_memory.agent.llm_provider import LLMProvider, LLMRetryError
++from hy_memory.config import MemoryConfig
++
++
++def reply(content=None, *, reason="end_turn", usage=None):
++    return {
++        "id": "msg_synthetic",
++        "type": "message",
++        "role": "assistant",
++        "model": "synthetic-model",
++        "content": content if content is not None else [{"type": "text", "text": "ok"}],
++        "stop_reason": reason,
++        "usage": usage or {"input_tokens": 7, "output_tokens": 3},
++    }
++
++
++def provider(handler, **overrides):
++    config = MemoryConfig()
++    config.llm.provider = "anthropic"
++    config.llm.model = "synthetic-model"
++    config.llm.api_key = "synthetic-secret-key"  # pragma: allowlist secret
++    config.llm.base_url = "https://model.example.test/v1"
++    config.llm.omit_temperature = True
++    config.llm.max_retries = 3
++    config.llm.retry_delay = 0
++    config.llm.extra_headers = None
++    config.llm.extra_body = None
++    for key, value in overrides.items():
++        setattr(config.llm, key, value)
++    config.http_transport_factory = lambda: httpx.MockTransport(handler)
++    return LLMProvider(config)
++
++
++@pytest.mark.parametrize(
++    "base",
++    [
++        "https://model.example.test",
++        "https://model.example.test/",
++        "https://model.example.test/v1/",
++        "https://model.example.test/v1/messages",
++    ],
++)
++def test_messages_endpoint_normalization(base):
++    assert messages_url(base) == "https://model.example.test/v1/messages"
++
++
++@pytest.mark.parametrize(
++    "base",
++    [
++        "https://secret@model.test",
++        "https://model.test/?key=secret",
++        "https://model.test/#secret",
++        "file:///tmp/model",
++    ],
++)
++def test_endpoint_rejects_credential_locations_without_echo(base):
++    with pytest.raises(AnthropicRequestError, match="^anthropic_endpoint_invalid$"):
++        messages_url(base)
++
++
++@pytest.mark.asyncio
++async def test_json_extraction_reuses_parser_and_normalizes_usage(caplog, monkeypatch):
++    seen = []
++
++    def handler(request):
++        seen.append(request)
++        return httpx.Response(
++            200,
++            json=reply(
++                [
++                    {"type": "thinking", "thinking": "synthetic-private-thinking"},
++                    {"type": "text", "text": '```json\n{"basic_info":'},
++                    {"type": "text", "text": '{"preference":"tea"}}\n```'},
++                ],
++                usage={
++                    "input_tokens": 7,
++                    "output_tokens": 3,
++                    "cache_creation_input_tokens": 4,
++                    "cache_read_input_tokens": 5,
++                },
++            ),
++        )
++
++    monkeypatch.setenv("MEMORY_LOG_LLM_CONTENT", "true")
++    caplog.set_level(logging.DEBUG, logger="hy_memory.agent.llm_provider")
++    client = provider(
++        handler,
++        extra_body={"thinking": {"type": "disabled"}},
++        extra_headers={"Authorization": "forbidden", "x-trace": "synthetic"},
++    )
++    result = await client.complete(
++        "synthetic-private-prompt", max_tokens=64, stop=["END"]
++    )
++    assert Extractor._parse_json(None, result.content) == {
++        "basic_info": {"preference": "tea"}
++    }
++    assert (result.prompt_tokens, result.completion_tokens, result.tokens_used) == (
++        16,
++        3,
++        19,
++    )
++    assert result.reasoning_content == "" and result.reasoning_tokens == 0
++    assert result.finish_reason == "stop" and result.choices_count == 1
++    assert client.get_stats()["total_tokens"] == 19
++    body = json.loads(seen[0].content)
++    assert body == {
++        "model": "synthetic-model",
++        "max_tokens": 64,
++        "messages": [
++            {
++                "role": "user",
++                "content": [{"type": "text", "text": "synthetic-private-prompt"}],
++            }
++        ],
++        "stop_sequences": ["END"],
++        "thinking": {"type": "disabled"},
++    }
++    assert seen[0].url.path == "/v1/messages"
++    assert seen[0].headers["x-api-key"] == "synthetic-secret-key"
++    assert seen[0].headers["anthropic-version"] == "2023-06-01"
++    assert "authorization" not in seen[0].headers
++    for private in (
++        "synthetic-secret-key",
++        "synthetic-private-prompt",
++        "preference",
++        "tea",
++        "synthetic-private-thinking",
++    ):
++        assert private not in caplog.text
++
++
++@pytest.mark.asyncio
++async def test_two_round_tool_use_and_tool_results_without_mutating_input():
++    seen = []
++
++    def handler(request):
++        seen.append(json.loads(request.content))
++        if len(seen) == 1:
++            return httpx.Response(
++                200,
++                json=reply(
++                    [
++                        {"type": "text", "text": "checking"},
++                        {
++                            "type": "tool_use",
++                            "id": "tool_1",
++                            "name": "lookup",
++                            "input": {"query": "tea"},
++                        },
++                        {
++                            "type": "tool_use",
++                            "id": "tool_2",
++                            "name": "lookup",
++                            "input": {"query": "coffee"},
++                        },
++                    ],
++                    reason="tool_use",
++                ),
++            )
++        return httpx.Response(200, json=reply())
++
++    client = provider(handler)
++    tools = [
++        {
++            "type": "function",
++            "function": {
++                "name": "lookup",
++                "description": "Find fact",
++                "parameters": {
++                    "type": "object",
++                    "properties": {"query": {"type": "string"}},
++                },
++            },
++        }
++    ]
++    messages = [
++        {"role": "system", "content": "first instruction"},
++        {"role": "system", "content": [{"type": "text", "text": "second instruction"}]},
++        {"role": "user", "content": "find preference"},
++    ]
++    original = copy.deepcopy(messages)
++    first = await client.complete_messages(
++        messages, tools=tools, tool_choice="required"
++    )
++    assert messages == original
++    assert first.finish_reason == "tool_calls"
++    assert first.tool_calls[0]["function"]["arguments"] == '{"query": "tea"}'
++    messages += [
++        {"role": "assistant", "content": first.content, "tool_calls": first.tool_calls},
++        {"role": "tool", "tool_call_id": "tool_1", "content": "tea=yes"},
++        {"role": "tool", "tool_call_id": "tool_2", "content": "coffee=no"},
++    ]
++    second = await client.complete_messages(messages, tools=tools, tool_choice="auto")
++    assert second.content == "ok" and client.get_stats()["total_calls"] == 2
++    assert seen[0]["system"] == [
++        {"type": "text", "text": "first instruction"},
++        {"type": "text", "text": "second instruction"},
++    ]
++    assert all(turn["role"] != "system" for turn in seen[0]["messages"])
++    assert seen[0]["tool_choice"] == {"type": "any"}
++    assert seen[0]["tools"][0]["input_schema"] == tools[0]["function"]["parameters"]
++    assistant = seen[1]["messages"][-2]["content"]
++    assert assistant[1] == {
++        "type": "tool_use",
++        "id": "tool_1",
++        "name": "lookup",
++        "input": {"query": "tea"},
++    }
++    results = seen[1]["messages"][-1]
++    assert results == {
++        "role": "user",
++        "content": [
++            {
++                "type": "tool_result",
++                "tool_use_id": "tool_1",
++                "content": [{"type": "text", "text": "tea=yes"}],
++            },
++            {
++                "type": "tool_result",
++                "tool_use_id": "tool_2",
++                "content": [{"type": "text", "text": "coffee=no"}],
++            },
++        ],
++    }
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "status,attempts", [(400, 1), (401, 1), (403, 1), (408, 3), (429, 3), (503, 3)]
++)
++async def test_http_errors_obey_shared_retry_and_hide_response(
++    status, attempts, caplog
++):
++    seen = []
++
++    def handler(request):
++        seen.append(request)
++        return httpx.Response(
++            status, text="synthetic-private-body synthetic-secret-key"
++        )
++
++    client = provider(handler)
++    with pytest.raises(LLMRetryError) as error:
++        await client.complete("synthetic-private-prompt")
++    assert len(seen) == attempts
++    assert len(error.value.attempts) == attempts
++    assert error.value.attempts[0]["status_code"] == status
++    diagnostics = str(error.value) + repr(error.value.attempts) + caplog.text
++    assert (
++        "synthetic-private-body" not in diagnostics
++        and "synthetic-secret-key" not in diagnostics
++    )
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError])
++async def test_transient_transport_retry_keeps_one_request_per_attempt(error_type):
++    seen = []
++
++    def handler(request):
++        seen.append(request)
++        assert request.extensions["timeout"]["read"] == 17
++        if len(seen) == 1:
++            raise error_type("synthetic-secret-key", request=request)
++        return httpx.Response(200, json=reply())
++
++    client = provider(handler, timeout=17)
++    assert (
++        await client.complete_messages([{"role": "user", "content": "hello"}])
++    ).content == "ok"
++    assert len(seen) == 2 and client.get_stats()["errors"] == 1
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "payload",
++    [
++        {},
++        {"content": "bad"},
++        reply([]),
++        {**reply(), "type": "error"},
++        {**reply(), "role": "user"},
++        reply([{"type": "text", "text": 7}]),
++        reply(reason="refusal"),
++        reply(
++            [
++                {
++                    "type": "tool_use",
++                    "id": "call",
++                    "name": "lookup",
++                    "input": "not an object",
++                }
++            ],
++            reason="tool_use",
++        ),
++        reply(reason="tool_use"),
++        reply(usage={"input_tokens": -1, "output_tokens": 1}),
++    ],
++)
++async def test_invalid_success_body_is_not_success_or_retry(payload):
++    seen = []
++
++    def handler(request):
++        seen.append(request)
++        return httpx.Response(200, json=payload)
++
++    with pytest.raises(LLMRetryError, match="anthropic_response_invalid"):
++        await provider(handler).complete("hello")
++    assert len(seen) == 1
++
++
++@pytest.mark.asyncio
++async def test_truncation_remains_visible_and_zero_retries_still_attempts_once():
++    seen = []
++
++    def handler(request):
++        seen.append(request)
++        return httpx.Response(200, json=reply([], reason="max_tokens"))
++
++    result = await provider(handler, max_retries=0).complete("hello")
++    assert len(seen) == 1 and result.finish_reason == "length"
++
++
++@pytest.mark.asyncio
++async def test_openai_extra_body_is_never_forwarded():
++    seen = []
++
++    def handler(request):
++        seen.append(request)
++        return httpx.Response(200, json=reply())
++
++    with pytest.raises(LLMRetryError, match="anthropic_extra_body_unsupported"):
++        await provider(handler, extra_body={"reasoning_effort": "none"}).complete(
++            "hello"
++        )
++    assert not seen
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("entrypoint", ["complete", "complete_messages"])
++async def test_openai_zero_retries_means_one_attempt(entrypoint):
++    seen = []
++
++    def handler(request):
++        seen.append(request)
++        return httpx.Response(
++            200,
++            json={
++                "id": "chatcmpl_synthetic",
++                "object": "chat.completion",
++                "created": 1,
++                "model": "synthetic-model",
++                "choices": [
++                    {
++                        "index": 0,
++                        "finish_reason": "stop",
++                        "message": {"role": "assistant", "content": "ok"},
++                    }
++                ],
++                "usage": {
++                    "prompt_tokens": 2,
++                    "completion_tokens": 1,
++                    "total_tokens": 3,
++                },
++            },
++        )
++
++    client = provider(handler, provider="openai", max_retries=0)
++    try:
++        argument = (
++            "hello"
++            if entrypoint == "complete"
++            else [{"role": "user", "content": "hello"}]
++        )
++        result = await getattr(client, entrypoint)(argument)
++        assert result.content == "ok" and len(seen) == 1
++        assert seen[0].url.path == "/v1/chat/completions"
++    finally:
++        await client.close()
