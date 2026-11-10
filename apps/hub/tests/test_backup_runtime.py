@@ -137,6 +137,16 @@ def test_manual_request_is_not_overwritten_while_pending(tmp_path):
     assert runtime.status(root)["pending_request"] == first["request_id"]
 
 
+def test_competing_control_writer_fails_without_waiting(tmp_path):
+    root = tmp_path / "backups"
+    with runtime._control(root):
+        started = time.monotonic()
+        with pytest.raises(runtime.BackupRuntimeError, match="control_busy"):
+            runtime.configure(root)
+        assert time.monotonic() - started < 1
+    assert runtime.status(root)["schedule"]["enabled"] is False
+
+
 def test_two_due_backups_stop_child_first_then_restart_and_keep_plan(tmp_path, monkeypatch):
     root = tmp_path / "backups"
     instant = [datetime(2026, 1, 1, tzinfo=UTC)]

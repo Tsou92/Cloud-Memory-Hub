@@ -16,7 +16,11 @@ from cloud_memory_hub.config import HubConfig, read_private_file
 from cloud_memory_hub.diagnostics import initialize_diagnostics, install_process_exception_hooks
 from cloud_memory_hub.governance_authority import activate_authority, require_separate_directory
 from cloud_memory_hub.remote_access import DeviceAccessStore
-from cloud_memory_hub.storage_lease import StorageLease, StorageLeaseError
+from cloud_memory_hub.storage_lease import (
+    StorageLease,
+    StorageLeaseError,
+    require_restore_complete,
+)
 
 
 @contextmanager
@@ -181,6 +185,9 @@ def _main() -> None:
         return
     if args.config_dir or args.governance_dir or args.writers_stopped:
         parser.error("serve uses CMH_CONFIG_DIR / CMH_GOVERNANCE_DIR environment settings")
+    require_restore_complete(
+        Path(os.environ.get("CMH_DATA_DIR", "/data")), config_dir, governance_dir
+    )
     config = HubConfig.from_environment()
     config.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.command == "supervise":
@@ -189,6 +196,7 @@ def _main() -> None:
         serve_supervised(config, Path(os.environ.get("CMH_BACKUP_DIR", "/backups")))
         return
     with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
+        require_restore_complete(config.data_dir, config.config_dir, config.governance_dir)
         import uvicorn
 
         from cloud_memory_hub.app import create_hub
@@ -213,8 +221,8 @@ def main() -> None:
     except StorageLeaseError as error:
         # Preserve the public lease-conflict recovery code without formatting
         # arbitrary exceptions or copying their message into diagnostic output.
-        if error.args == ("storage_in_use",):
-            print("cloud-memory-hub: storage_in_use", file=sys.stderr)
+        if error.args in {("storage_in_use",), ("restore_incomplete",)}:
+            print("cloud-memory-hub: " + error.args[0], file=sys.stderr)
         else:
             logging.getLogger(__name__).error("hub_storage_unavailable", exc_info=True)
         raise SystemExit(2) from None

@@ -8,10 +8,23 @@ from pathlib import Path
 from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
 
 LOCK_NAME = ".cmh-storage.lock"
+RESTORE_MARKER = ".cmh-restore-incomplete.json"
 
 
 class StorageLeaseError(RuntimeError):
     """Fixed public codes without filesystem or credential details."""
+
+
+def require_restore_complete(*directories: Path) -> None:
+    """Any marker, including an unreadable or dangling one, fences startup."""
+    for directory in directories:
+        try:
+            (directory / RESTORE_MARKER).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise StorageLeaseError("restore_incomplete") from None
+        raise StorageLeaseError("restore_incomplete")
 
 
 class StorageLease:
