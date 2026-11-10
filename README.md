@@ -2,7 +2,9 @@
 
 部署在 NAS 上、连接不同设备与 Agent 的共享记忆服务。
 
-**当前阶段：G2 MVP 实现与接入验收。通用 MCP、CLI 和可安装 Skill 已实现，完整产品尚未发布。**
+**当前交付：MVP 已部署并配置可用。两台 Mac 共享记忆、通用 MCP／Skill 接入与任务交接均有实测证据；完整产品及 G2 剩余能力仍在后续范围。**
+
+已验证的日常入口为指定项目中的 Claude Code CLI 自动钩子，以及 Codex 桌面的 Skill／CLI 工作流。Codex 桌面原生 MCP 与每轮自动触发尚未验证；已有 Agent 会话需要新会话或重新连接，才能加载更新后的 MCP 配置。
 
 当前主线按用户确认收敛为多设备共享记忆、通用接入和任务交接。Agent 保存的记忆更新可直接读取；交接正文可按 ID 在另一端接续，无需等待 NAS 模型提炼。接入配置见 [Agent 使用说明](docs/agent-access.md)，最新结果见[两台 Mac 验收记录](docs/reviews/2026-11-10-two-host-mvp.md)。
 
@@ -10,9 +12,9 @@ MacBook 与 Mac mini 已分别安装客户端，使用独立设备、来源和�
 
 两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装，原有配置保留并已备份。真实 Claude 模型已按 Skill 约定使用 MCP，保持同一会话读到 Mac mini 的新决定并保存交接；原生 Skill 只读调用也通过。新增当前轮自动 hook 已完成真实 Claude、NAS、Mini 的 4/4 隔离验收并安装到指定项目目录。当前 Codex 桌面对话也已通过 Skill 的本机 CLI 绑定读取 Claude 交接并保存接续，桌面原生 MCP 仍未验证。证据、安装验收及首次探针比对失败的复核见[自动共享记录](docs/reviews/2026-11-10-visible-turn-mvp.md)，宿主边界见[路线图](docs/roadmap.md)与[六入口能力清单](docs/research/g1-client-capabilities.md)。
 
-当前问题召回已升级到两台 Mac：每轮并行读取相关旧记忆和最近原文，真实 Claude 的项目 hook 与对端读回通过。NAS 模型配置已启用，支持自动获取候选列表；真实 Anthropic 提炼、两机双向语义搜索及 Mini 真实 Claude 原生 Skill 读取长期记忆并回答均已通过。当前服务为 `6801367`，客户端 `272038f`；结果与边界见[模型配置记录](docs/reviews/2026-11-10-model-catalog.md)和[显式记忆验收](docs/reviews/2026-11-10-explicit-memory.md)。
+当前问题召回已升级到两台 Mac：每轮并行读取相关旧记忆和最近原文，真实 Claude 的项目 hook 与对端读回通过。NAS 模型配置已启用，支持自动获取候选列表；真实 Anthropic 提炼、两机双向语义搜索及 Mini 真实 Claude 原生 Skill 读取长期记忆并回答均已通过。当前服务为 `6801367`，客户端统一为 `60fb82b`；前序模型结果与边界见[模型配置记录](docs/reviews/2026-11-10-model-catalog.md)和[显式记忆验收](docs/reviews/2026-11-10-explicit-memory.md)。
 
-真实 Claude 已在同一会话的下一轮自动使用另一台 Mac 经断线补传后新提炼的长期记忆；重复发送只产生一份服务端任务。NAS 隔离验证同时确认遗忘内容不会因重投复活。被拒内容阻塞后续队列的问题已完成本地修复和回归，两机客户端升级验证中，见[修复记录](docs/reviews/2026-11-10-terminal-upload-rejections.md)。首次探针的文本比较误判及只读复核如实记录在[联合验收](docs/reviews/2026-11-10-next-turn-and-reconnect.md)。
+真实 Claude 已在同一会话的下一轮自动使用另一台 Mac 经断线补传后新提炼的长期记忆；重复发送只产生一份服务端任务。NAS 隔离验证同时确认遗忘内容不会因重投复活。被拒内容阻塞后续队列的问题已修复并备份升级至两台 Mac，原事件与回执保持；新版两机 MCP 7/7、实际项目钩子及双向读回通过。已有宿主会话需重连加载新 MCP，不能将配置切换视为热升级，见[修复记录](docs/reviews/2026-11-10-terminal-upload-rejections.md)。首次探针的文本比较误判及只读复核如实记录在[联合验收](docs/reviews/2026-11-10-next-turn-and-reconnect.md)。
 
 管理入口继续复用固定版本的 MemHub Core 和管理网页。完整自动采集、离线读取缓存、历史导入及删除传播仍在开发；当前不应导入真实历史或用作唯一记忆存储。旧日志治理等系统性完善后置，以下前序记录保留各自当时的验证范围。
 
