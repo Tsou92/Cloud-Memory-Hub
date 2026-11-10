@@ -1,0 +1,14 @@
+diff --git a/memhub/apps/core/tests/test_raw_search_without_model.py b/memhub/apps/core/tests/test_raw_search_without_model.py
+--- a/memhub/apps/core/tests/test_raw_search_without_model.py
++++ b/memhub/apps/core/tests/test_raw_search_without_model.py
+@@ -140,7 +140,9 @@
+         ):
+             await imported(app, client)
+             body = await search(client, "MIT 协议")
+-            assert body["state"] == "grounded"
++            assert body["state"] == "grounded", {
++                key: body.get(key) for key in ("state", "paths", "total_ms", "truncated")
++            }
+             assert any(LICENCE in text for text in texts(body))
+
+             missed = await search(client, SYNONYM)

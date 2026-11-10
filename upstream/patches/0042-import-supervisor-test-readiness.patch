@@ -1,0 +1,97 @@
+diff --git a/memhub/apps/core/tests/test_import_supervisor.py b/memhub/apps/core/tests/test_import_supervisor.py
+--- a/memhub/apps/core/tests/test_import_supervisor.py
++++ b/memhub/apps/core/tests/test_import_supervisor.py
+@@ -65,11 +65,13 @@
+         )
+         self.events = events
+         self.gate = gate
++        self.scan_started = asyncio.Event()
+
+     async def detect(self) -> bool:
+         return True
+
+     async def scan(self, _: ScanOptions) -> AsyncIterator[ScanEvent]:
++        self.scan_started.set()
+         if self.gate is not None:
+             await self.gate.wait()
+         for event in self.events:
+@@ -107,11 +109,12 @@
+     async def scenario() -> None:
+         evidence_store, job_store = stores(tmp_path)
+         gates = {source_id: asyncio.Event() for source_id in ("alpha", "beta", "gamma")}
+-        supervisor = ImportSupervisor(
+-            adapters={
+-                source_id: ControlledAdapter([scanned(f"{source_id}-1")], gate, source_id=source_id)
+-                for source_id, gate in gates.items()
+-            },
++        adapters = {
++            source_id: ControlledAdapter([scanned(f"{source_id}-1")], gate, source_id=source_id)
++            for source_id, gate in gates.items()
++        }
++        supervisor = ImportSupervisor(
++            adapters=adapters,
+             evidence_store=evidence_store,
+             job_store=job_store,
+             max_concurrent_jobs=8,
+@@ -119,10 +122,11 @@
+         jobs = [job_store.create(user_id="local", source_id=source_id) for source_id in gates]
+         for job in jobs:
+             supervisor.enqueue(job.job_id)
+-        for _ in range(40):
+-            if all(job_store.require(job.job_id).status is ImportStatus.RUNNING for job in jobs):
+-                break
+-            await asyncio.sleep(0)
++        await asyncio.wait_for(
++            asyncio.gather(*(adapter.scan_started.wait() for adapter in adapters.values())),
++            timeout=2,
++        )
++        assert not any(gate.is_set() for gate in gates.values())
+         assert {job_store.require(job.job_id).status for job in jobs} == {ImportStatus.RUNNING}
+         for gate in gates.values():
+             gate.set()
+@@ -186,18 +190,16 @@
+         evidence_store, job_store = stores(tmp_path)
+         gate = asyncio.Event()
+         enabled = True
+-        supervisor = ImportSupervisor(
+-            adapters={"fixture": ControlledAdapter([scanned("1")], gate)},
++        adapter = ControlledAdapter([scanned("1")], gate)
++        supervisor = ImportSupervisor(
++            adapters={"fixture": adapter},
+             evidence_store=evidence_store,
+             job_store=job_store,
+             source_enabled=lambda _source_id: enabled,
+         )
+         job = job_store.create(user_id="local", source_id="fixture")
+         supervisor.enqueue(job.job_id)
+-        for _ in range(40):
+-            if job_store.require(job.job_id).status is ImportStatus.RUNNING:
+-                break
+-            await asyncio.sleep(0)
++        await asyncio.wait_for(adapter.scan_started.wait(), timeout=2)
+         assert job_store.require(job.job_id).status is ImportStatus.RUNNING
+
+         enabled = False
+@@ -370,18 +372,16 @@
+     async def scenario() -> None:
+         evidence_store, job_store = stores(tmp_path)
+         gate = asyncio.Event()
+-        supervisor = ImportSupervisor(
+-            adapters={"fixture": ControlledAdapter([scanned("1")], gate)},
++        adapter = ControlledAdapter([scanned("1")], gate)
++        supervisor = ImportSupervisor(
++            adapters={"fixture": adapter},
+             evidence_store=evidence_store,
+             job_store=job_store,
+         )
+         job = job_store.create(user_id="local", source_id="fixture")
+         supervisor.enqueue(job.job_id)
+         waiter = asyncio.create_task(supervisor.wait(job.job_id))
+-        for _ in range(20):
+-            if job_store.require(job.job_id).status is ImportStatus.RUNNING:
+-                break
+-            await asyncio.sleep(0)
++        await asyncio.wait_for(adapter.scan_started.wait(), timeout=2)
+
+         waiter.cancel()
+         with suppress(asyncio.CancelledError):

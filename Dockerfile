@@ -28,7 +28,8 @@ RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
     src/ModelSettings.test.tsx src/OnboardingModelStep.test.tsx src/R6Settings.test.tsx \
     src/HubConsole.test.tsx src/HubQuestion.test.tsx src/hub-api.test.ts src/HubGovernance.test.tsx \
     src/HubConnections.test.tsx src/HubBackups.test.tsx src/hub-backups.test.ts \
-    src/HubAgentConnect.test.tsx src/hub-invitation.test.ts
+    src/HubAgentConnect.test.tsx src/hub-invitation.test.ts \
+    src/HubDashboard.test.tsx src/HubNetwork.test.tsx src/hub-dashboard.test.ts
 
 FROM source AS python-build
 RUN python -m pip install --no-cache-dir uv==0.12.5
@@ -43,6 +44,8 @@ RUN /opt/cmh/venv/bin/python -c \
 RUN /opt/cmh/venv/bin/cloud-memory-connector --help > /dev/null
 RUN /opt/cmh/venv/bin/python -c \
     "from importlib.resources import files; r=files('cloud_memory_hub.onboarding'); assert all(r.joinpath(n).is_file() for n in ('connect.py','install.sh','install.ps1'))"
+RUN /opt/cmh/venv/bin/python -c \
+    "from importlib.resources import files; p=files('cloud_memory_hub').joinpath('web_assets','hub-orb.png'); assert p.read_bytes().startswith(bytes.fromhex('89504e470d0a1a0a'))"
 
 FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS runtime
 RUN apt-get -o Acquire::Retries=0 update \

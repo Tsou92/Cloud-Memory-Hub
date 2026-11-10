@@ -199,6 +199,21 @@
       "path": "patches/0039-sqlite-connection-test-observer.patch",
       "scope": "test_only_weakref_sqlite_connection_count_and_deterministic_gc_snapshot_race_regression",
       "digest": "sha256:e6274571d72eebe4b1c4b7076432adfb776b3c288ceac3f34daea37dba170bab"
+    },
+    {
+      "path": "patches/0040-reference-dashboard.patch",
+      "scope": "reference_dashboard_theme_with_scoped_statistics_complete_authorized_agent_network_and_reduced_motion",
+      "digest": "sha256:24860a0a414eff423ebcef9359a765cd1023d7b5be061b9b4c52bae99651e172"
+    },
+    {
+      "path": "patches/0041-raw-search-failure-diagnostics.patch",
+      "scope": "test_only_raw_search_failure_metadata_without_content_identifiers_retries_or_budget_changes",
+      "digest": "sha256:ce4d6868a57560cc88fc30c834bd410f662b9fafb76d945944a64c1ad12bcf5d"
+    },
+    {
+      "path": "patches/0042-import-supervisor-test-readiness.patch",
+      "scope": "test_only_wait_for_real_adapter_scan_readiness_before_concurrency_freeze_and_waiter_cancellation_assertions",
+      "digest": "sha256:4a9c79568fa4fe77962a3eb730a2378d28889f2047b58ab63f866f15e9550dc4"
     }
   ]
 }

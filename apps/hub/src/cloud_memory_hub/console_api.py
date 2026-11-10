@@ -5,7 +5,7 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 from cloud_memory_hub.console_read import ConsolePageRequest
-from cloud_memory_hub.read_contract import READ_OPERATIONS, ListRequest
+from cloud_memory_hub.read_contract import READ_OPERATIONS, ListRequest, ScopeRequest
 from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.remote_api import read_body, require_admin, response
 
@@ -35,6 +35,10 @@ def console_routes(console):
         body = await read_body(request, ListRequest)
         return await console.summary(body, session_credential=cookie)
 
+    async def dashboard(request, cookie):
+        body = await read_body(request, ScopeRequest)
+        return await console.dashboard(body, session_credential=cookie)
+
     def reading(operation, model):
         async def read(request, cookie):
             body = await read_body(request, model)
@@ -45,6 +49,7 @@ def console_routes(console):
     return [
         Route("/hub/v1/console/bootstrap", endpoint(bootstrap), methods=["GET"]),
         Route("/hub/v1/console/summary", endpoint(summary), methods=["POST"]),
+        Route("/hub/v1/console/dashboard", endpoint(dashboard), methods=["POST"]),
         *[
             Route(
                 "/hub/v1/console/read/" + operation,

@@ -10,7 +10,13 @@ from importlib.resources import files
 from starlette.responses import HTMLResponse, Response
 
 PUBLIC_CONNECT_PATHS = frozenset(
-    {"/hub/connect", "/hub/connect.py", "/hub/install.sh", "/hub/install.ps1"}
+    {
+        "/hub/connect",
+        "/hub/connect.py",
+        "/hub/install.sh",
+        "/hub/install.ps1",
+        "/hub/assets/hub-orb-v1.png",
+    }
 )
 
 PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
@@ -50,10 +56,32 @@ Mac/Linux 调用 /hub/install.sh，Windows 调用 /hub/install.ps1。
 <script>__SCRIPT__</script></html>"""
 
 STYLE = (
-    "body{font-family:system-ui;line-height:1.6;margin:0;padding:20px}"
-    "main{max-width:760px;margin:auto;overflow-wrap:anywhere}"
-    "textarea{width:100%;box-sizing:border-box;font:inherit}"
-    "button,select{font:inherit;padding:6px;max-width:100%}"
+    ":root{color-scheme:dark}*{box-sizing:border-box}"
+    "body{font:15px/1.7 system-ui,-apple-system,'PingFang SC',sans-serif;"
+    "color:#f3f4fc;background:radial-gradient(ellipse at 72% 0,#262640 0,transparent 55%),"
+    "#0c1020;margin:0;padding:40px 20px}"
+    "main{max-width:800px;margin:auto;overflow-wrap:anywhere;background:"
+    "linear-gradient(145deg,#222840e8,#151a2de8);border:1px solid #a0a6dc26;"
+    "border-radius:22px;padding:40px;box-shadow:0 28px 90px #03061066}"
+    "h1{font-size:28px;line-height:1.35;letter-spacing:-.02em;margin:0 0 20px}"
+    "h1:before{content:'∞';display:block;font-size:54px;line-height:1.15;color:#c6b5ff;"
+    "text-shadow:0 0 24px #8670ff66;margin-bottom:20px}"
+    "h2{font-size:20px;margin-top:32px}p,li{color:#b4b8d0}"
+    "label{display:block;color:#e4e5f4;margin:16px 0 8px;font-weight:600}"
+    "textarea,select{font:inherit;color:#f3f4fc;background:#101528;"
+    "border:1px solid #a0a6dc3b;border-radius:10px;padding:12px;max-width:100%}"
+    "textarea{width:100%;resize:vertical;font-size:13px}"
+    "button{font:inherit;cursor:pointer;color:white;border:1px solid #c8bcff55;"
+    "background:linear-gradient(120deg,#7775dc,#9b80e5);border-radius:10px;"
+    "padding:10px 20px;max-width:100%;margin-top:12px;font-weight:600}"
+    "button:hover{filter:brightness(1.12)}button:disabled{opacity:.45;cursor:not-allowed}"
+    "button:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible"
+    "{outline:2px solid #c5afff;outline-offset:3px}"
+    "#notice{padding:12px 16px;border:1px solid #a78bfa33;background:#a78bfa12;"
+    "border-radius:10px;color:#ddd3ff}details{border-top:1px solid #a0a6dc26;"
+    "margin-top:32px;padding-top:20px}summary{cursor:pointer;color:#c9b8ff}"
+    "@media(max-width:600px){body{padding:16px 12px}main{padding:24px 20px}"
+    "h1{font-size:23px}button,select{width:100%}}"
 )
 
 SCRIPT = r"""'use strict';
@@ -114,6 +142,16 @@ def public_connection_response(path: str, method: str, origin: str) -> Response:
     }
     if method not in {"GET", "HEAD"}:
         return Response(status_code=405, headers={**headers, "Allow": "GET, HEAD"})
+    if path == "/hub/assets/hub-orb-v1.png":
+        try:
+            image = files("cloud_memory_hub").joinpath("web_assets", "hub-orb.png").read_bytes()
+        except OSError:
+            return Response(status_code=503, headers=headers)
+        return Response(
+            image,
+            media_type="image/png",
+            headers={**headers, "Cache-Control": "public, max-age=86400"},
+        )
     if path == "/hub/connect":
         script = SCRIPT.replace("__ORIGIN__", json.dumps(origin).replace("<", "\\u003c"))
         digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
