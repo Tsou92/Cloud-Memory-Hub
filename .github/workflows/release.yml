@@ -1,0 +1,192 @@
+name: Reviewed release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag; select this same tag as the workflow ref
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      version: ${{ steps.source.outputs.version }}
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Bind existing tag, clean source and product version
+        id: source
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          SOURCE_COMMIT=$(git rev-parse HEAD)
+          python -m scripts.release_artifacts validate \
+            --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --ref "$GITHUB_REF" --ref-type "$GITHUB_REF_TYPE" \
+            --github-output "$GITHUB_OUTPUT"
+
+  quality:
+    needs: preflight
+    uses: ./.github/workflows/quality.yml
+
+  linux:
+    needs: [preflight, quality]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
+      CMH_IMAGE: cloud-memory-hub:${{ needs.preflight.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Build the versioned amd64 image
+        run: |
+          python -m scripts.release_artifacts validate --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT"
+          docker build --platform linux/amd64 --build-arg "CMH_REVISION=$SOURCE_COMMIT" --tag "$CMH_IMAGE" .
+      - name: Run existing installed-image smoke and restart checks
+        run: python -m scripts.smoke_container
+      - name: Save exact tested image and bind its receipt
+        run: |
+          mkdir "$RUNNER_TEMP/linux-artifact"
+          docker image inspect "$CMH_IMAGE" > "$RUNNER_TEMP/image-inspect.json"
+          docker image save "$CMH_IMAGE" | gzip -n > "$RUNNER_TEMP/linux-artifact/cloud-memory-hub-$RELEASE_TAG-linux-amd64.tar.gz"
+          python -m scripts.release_artifacts image --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --directory "$RUNNER_TEMP/linux-artifact" --inspect "$RUNNER_TEMP/image-inspect.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-linux
+          path: ${{ runner.temp }}/linux-artifact/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  mac:
+    needs: [preflight, quality]
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+          architecture: arm64
+      - name: Build from the existing locked Mac distribution builder
+        run: |
+          python -m pip install uv==0.12.5
+          python -m scripts.release_artifacts validate --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT"
+          python -c 'import platform; assert platform.machine() == "arm64"'
+          python -m scripts.build_client_distribution --release "$RELEASE_VERSION" --python "$(command -v python)" --output "$RUNNER_TEMP/build/cloud-memory-hub-client-$RELEASE_TAG-macos-arm64"
+      - name: Verify final tar and install into a new private directory
+        run: |
+          mkdir "$RUNNER_TEMP/mac-artifact"
+          cp "$RUNNER_TEMP/build/cloud-memory-hub-client-$RELEASE_TAG-macos-arm64.tar.gz" "$RUNNER_TEMP/mac-artifact/"
+          python -m scripts.release_artifacts client --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --directory "$RUNNER_TEMP/mac-artifact" --unpack-to "$RUNNER_TEMP/client-final"
+          python -I "$RUNNER_TEMP/client-final/cloud-memory-hub-client-$RELEASE_TAG-macos-arm64/install.py" --verify-only
+          python -I "$RUNNER_TEMP/client-final/cloud-memory-hub-client-$RELEASE_TAG-macos-arm64/install.py" --target "$RUNNER_TEMP/client-installed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-mac
+          path: ${{ runner.temp }}/mac-artifact/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  assemble:
+    needs: [preflight, linux, mac]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/inputs
+      - name: Assemble source, exact binaries, licenses and checksums
+        run: >-
+          python -m scripts.release_artifacts assemble
+          --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT"
+          --directory "$RUNNER_TEMP/inputs" --output "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: [preflight, assemble]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-${{ needs.preflight.outputs.tag }}
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: verified-release
+          path: ${{ runner.temp }}/release
+      - name: Upload draft, download and verify every asset, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python -m scripts.release_artifacts publish
+          --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT"
+          --directory "$RUNNER_TEMP/release" --repository "$GITHUB_REPOSITORY"
