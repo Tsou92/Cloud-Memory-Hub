@@ -1,5 +1,7 @@
 **
 !Dockerfile
+!LICENSE
+!NOTICE
 !scripts/
 scripts/*
 !scripts/__init__.py
@@ -17,6 +19,8 @@ apps/*
 apps/hub/*
 !apps/hub/pyproject.toml
 !apps/hub/uv.lock
+!apps/hub/LICENSE
+!apps/hub/NOTICE
 !apps/hub/src/
 apps/hub/src/*
 !apps/hub/src/cloud_memory_hub/
