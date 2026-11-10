@@ -1,0 +1,646 @@
+diff --git a/memhub/apps/web/src/HubBackups.test.tsx b/memhub/apps/web/src/HubBackups.test.tsx
+index 237e608..49fd309 100644
+--- a/memhub/apps/web/src/HubBackups.test.tsx
++++ b/memhub/apps/web/src/HubBackups.test.tsx
+@@ -118,7 +118,16 @@ it("saves actual plan edits and sends exactly one queued-only request", async ()
+   render(<HubBackups />);
+   await ready();
+   expect(screen.getByText(/备份时记忆服务会短暂停止/)).toBeTruthy();
+-  expect(screen.getByText(/网页恢复和完整导出入口尚未完成/)).toBeTruthy();
++  expect(
++    screen.getByText(/完整导出、导入和历史版本回滚目前通过 NAS 命令行执行/),
++  ).toBeTruthy();
++  expect(
++    screen
++      .getByRole("link", { name: "查看备份与恢复指南" })
++      .getAttribute("href"),
++  ).toBe(
++    "https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/backup-and-recovery.md",
++  );
+   expect(screen.queryByRole("button", { name: "恢复" })).toBeNull();
+   await user.clear(screen.getByLabelText("备份周期（分钟）"));
+   await user.type(screen.getByLabelText("备份周期（分钟）"), "60");
+@@ -174,9 +183,7 @@ it("keeps confirmed status and versions marked stale after a 503", async () => {
+   await ready();
+   await user.click(screen.getByRole("button", { name: "刷新版本列表" }));
+   expect(await screen.findByText("已生成，恢复前完整校验")).toBeTruthy();
+-  expect(
+-    screen.getByText(/未经重新校验，不代表当前文件完整或可恢复/),
+-  ).toBeTruthy();
++  expect(screen.getByText(/尚未重新校验文件是否完整/)).toBeTruthy();
+   expect(screen.queryByText("已校验")).toBeNull();
+   statusFailure = true;
+   versionFailure = true;
+diff --git a/memhub/apps/web/src/HubBackups.tsx b/memhub/apps/web/src/HubBackups.tsx
+index 0b0e9aa..a76fcf8 100644
+--- a/memhub/apps/web/src/HubBackups.tsx
++++ b/memhub/apps/web/src/HubBackups.tsx
+@@ -347,7 +347,7 @@ export function HubBackups({ active = true }: { active?: boolean }) {
+         <div>
+           <h3>历史版本</h3>
+           <p>
+-            列表只读取有界清单摘要，未经重新校验，不代表当前文件完整或可恢复。恢复前仍须完整校验；不会自动下载敏感备份。
++            列表展示备份的基本信息，尚未重新校验文件是否完整。恢复前须完整校验；此处不会自动下载备份。
+           </p>
+         </div>
+         <R6Button
+@@ -392,8 +392,16 @@ export function HubBackups({ active = true }: { active?: boolean }) {
+         <div>
+           <h3>恢复与完整导出</h3>
+           <p>
+-            网页恢复和完整导出入口尚未完成。此页面只管理备份计划、排队请求和查看版本，不提供恢复操作。
++            完整导出、导入和历史版本回滚目前通过 NAS
++            命令行执行。此页面可管理备份计划、请求备份和查看版本，暂不提供恢复操作。
+           </p>
++          <a
++            href="https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/backup-and-recovery.md"
++            target="_blank"
++            rel="noreferrer"
++          >
++            查看备份与恢复指南
++          </a>
+         </div>
+       </div>
+     </div>
+diff --git a/memhub/apps/web/src/SdkRawHistory.test.tsx b/memhub/apps/web/src/SdkRawHistory.test.tsx
+index dbe5d4e..d46294d 100644
+--- a/memhub/apps/web/src/SdkRawHistory.test.tsx
++++ b/memhub/apps/web/src/SdkRawHistory.test.tsx
+@@ -9,7 +9,8 @@ const { getSdkRaw, searchSdkRaw } = vi.hoisted(() => ({
+ }));
+ vi.mock("./api", () => ({ getSdkRaw, searchSdkRaw }));
+
+-import { SdkRawHistory } from "./SdkRawHistory";
++import { historyDisplay } from "./history-display";
++import { type RawHistoryReader, SdkRawHistory } from "./SdkRawHistory";
+
+ afterEach(cleanup);
+
+@@ -51,3 +52,224 @@ it("lists and searches SDK raw without legacy conversation APIs", async () => {
+   expect(await screen.findByText("搜索结果")).toBeTruthy();
+   expect(searchSdkRaw).toHaveBeenCalledWith("查询");
+ });
++
++// Synthetic EventEnvelope v1 fixtures; no user history or local configuration.
++const identity = "11111111-1111-4111-8111-111111111111";
++const rawId = `cmhe:${identity}`;
++function original(content: Record<string, unknown>, kind = "operation") {
++  return JSON.stringify({
++    protocol_version: 1,
++    event_id: identity,
++    instance_id: identity,
++    device_id: identity,
++    source_id: identity,
++    scope_id: identity,
++    conversation_id: identity,
++    record_id: identity,
++    revision: 1,
++    kind,
++    occurred_at: null,
++    content,
++    privacy_policy: "cmh-credentials-v1",
++  });
++}
++function operation(kind: string, text: string) {
++  return original({
++    text,
++    metadata: { agent_access_kind: kind, agent_access_version: 1 },
++  });
++}
++function readerFor(content: string): RawHistoryReader {
++  return {
++    list: vi.fn().mockResolvedValue({
++      items: [
++        {
++          raw_id: rawId,
++          content,
++          source: "cloud-memory-hub.agent",
++          session_id: identity,
++          memory_at: null,
++        },
++      ],
++      next_offset: null,
++    }),
++    get: vi.fn(),
++  };
++}
++
++it("shows accepted remember text safely, retaining the exact original and provenance in closed details", async () => {
++  const content = operation(
++    "remember",
++    '<img src=x onerror="alert(1)">\n第二行原话',
++  );
++  const { container } = render(<SdkRawHistory reader={readerFor(content)} />);
++  const body = await screen.findByText(
++    '<img src=x onerror="alert(1)"> 第二行原话',
++  );
++  expect(body.textContent).toBe('<img src=x onerror="alert(1)">\n第二行原话');
++  expect(container.querySelector("img")).toBeNull();
++  const details = container.querySelector("details");
++  expect(details?.open).toBe(false);
++  expect(details?.querySelector("pre")?.textContent).toBe(content);
++  expect(details?.textContent).toContain(
++    `cloud-memory-hub.agent · ${identity}`,
++  );
++  await userEvent.click(screen.getByText("完整原文与来源"));
++  expect(details?.open).toBe(true);
++});
++
++it("renders all handoff fields as readable sections without discarding the original", async () => {
++  const content = operation(
++    "handoff",
++    JSON.stringify({
++      goal: "完成合成计划",
++      state: "已完成第一步",
++      decisions: ["使用青绿色"],
++      next_steps: ["检查移动端"],
++      blockers: ["等待合成样例"],
++    }),
++  );
++  const { container } = render(<SdkRawHistory reader={readerFor(content)} />);
++  await screen.findByText("完成合成计划");
++  for (const text of [
++    "目标",
++    "进展",
++    "决定",
++    "下一步",
++    "阻碍",
++    "已完成第一步",
++    "使用青绿色",
++    "检查移动端",
++    "等待合成样例",
++  ])
++    expect(screen.getByText(text)).toBeTruthy();
++  expect(container.querySelector("details pre")?.textContent).toBe(content);
++});
++
++it("shows native messages with their roles and keeps message metadata in the original", async () => {
++  const content = original(
++    {
++      messages: [
++        { role: "user", text: "用户原话", metadata: { ordinal: 1 } },
++        { role: "assistant", text: "助手原话" },
++        { role: "tool", text: "工具原话" },
++      ],
++      metadata: { adapter_id: "synthetic" },
++    },
++    "conversation_turn",
++  );
++  const { container } = render(<SdkRawHistory reader={readerFor(content)} />);
++  await screen.findByText("用户原话");
++  for (const text of ["用户", "助手", "工具", "助手原话", "工具原话"])
++    expect(screen.getByText(text)).toBeTruthy();
++  expect(container.querySelector("details pre")?.textContent).toBe(content);
++});
++
++it.each([
++  ["malformed JSON", '{"protocol_version":1,"content":'],
++  [
++    "unknown protocol",
++    operation("remember", "future").replace(
++      '"protocol_version":1',
++      '"protocol_version":2',
++    ),
++  ],
++  [
++    "unknown event field",
++    operation("remember", "future").replace(
++      '{"protocol_version"',
++      '{"new_field":"keep me","protocol_version"',
++    ),
++  ],
++  ["unknown operation", operation("future", "keep me")],
++  ["malformed handoff", operation("handoff", '{"goal":"incomplete"}')],
++  [
++    "unknown handoff field",
++    operation(
++      "handoff",
++      JSON.stringify({
++        goal: "目标",
++        state: "进展",
++        decisions: [],
++        next_steps: [],
++        blockers: [],
++        extra: "keep me",
++      }),
++    ),
++  ],
++  [
++    "invalid message role",
++    original(
++      { messages: [{ role: ["user"], text: "keep me" }] },
++      "conversation_turn",
++    ),
++  ],
++])("keeps %s visible unchanged", async (_reason, content) => {
++  const { container } = render(<SdkRawHistory reader={readerFor(content)} />);
++  expect(await screen.findByText(content)).toBeTruthy();
++  expect(container.querySelector("details")).toBeNull();
++});
++
++it("does not reinterpret ordinary SDK JSON or plain text as a Hub event", async () => {
++  const content = operation("remember", "不是Hub来源的协议样例");
++  expect(
++    historyDisplay({ raw_id: "sdk-raw", content, truncated: false }),
++  ).toBeNull();
++  expect(
++    historyDisplay({ raw_id: rawId, content: "普通原话", truncated: false }),
++  ).toBeNull();
++  getSdkRaw.mockResolvedValue({
++    items: [
++      {
++        raw_id: rawId,
++        content,
++        source: "sdk",
++        session_id: "session",
++        memory_at: null,
++      },
++    ],
++  });
++  const { container } = render(<SdkRawHistory />);
++  expect(await screen.findByText(content)).toBeTruthy();
++  expect(container.querySelector("details")).toBeNull();
++});
++
++it("waits for the complete original before projecting, keeping the existing continuation cursor", async () => {
++  const content = operation("remember", "分段原话");
++  const reader = readerFor(content);
++  const boundary = Math.floor(content.length / 2);
++  vi.mocked(reader.list).mockResolvedValue({
++    items: [
++      {
++        raw_id: rawId,
++        content: content.slice(0, boundary),
++        source: "synthetic",
++        session_id: identity,
++        memory_at: null,
++        next_content_offset: boundary,
++      },
++    ],
++    next_offset: null,
++  });
++  vi.mocked(reader.get).mockResolvedValue({
++    raw_id: rawId,
++    content: content.slice(boundary),
++    source: "synthetic",
++    session_id: identity,
++    memory_at: null,
++    next_content_offset: null,
++  });
++  const { container } = render(<SdkRawHistory reader={reader} />);
++  expect(
++    await screen.findByText("原文尚未完整读取，可继续读取下方内容。"),
++  ).toBeTruthy();
++  expect(container.querySelector("details")).toBeNull();
++  expect(
++    historyDisplay({ raw_id: rawId, content, truncated: true }),
++  ).toBeNull();
++  await userEvent.click(screen.getByRole("button", { name: "继续读取原文" }));
++  expect(await screen.findByText("分段原话")).toBeTruthy();
++  expect(reader.get).toHaveBeenCalledWith(rawId, boundary);
++  expect(container.querySelector("details pre")?.textContent).toBe(content);
++  expect(screen.queryByRole("button", { name: "继续读取原文" })).toBeNull();
++});
+diff --git a/memhub/apps/web/src/SdkRawHistory.tsx b/memhub/apps/web/src/SdkRawHistory.tsx
+index 21e7cce..7196a9e 100644
+--- a/memhub/apps/web/src/SdkRawHistory.tsx
++++ b/memhub/apps/web/src/SdkRawHistory.tsx
+@@ -1,6 +1,7 @@
+ import type { SdkRawContextItem, SdkRawRecord } from "@one-memory/contracts";
+ import { type FormEvent, useEffect, useRef, useState } from "react";
+ import { getSdkRaw, searchSdkRaw } from "./api";
++import { type HistoryDisplay, historyDisplay } from "./history-display";
+
+ export type HistoryRecord = Pick<
+   SdkRawRecord,
+@@ -133,13 +134,7 @@ export function SdkRawHistory({ reader }: { reader?: RawHistoryReader } = {}) {
+       <ol>
+         {items.map((item) => (
+           <li key={item.raw_id}>
+-            <p>{item.content}</p>
+-            <small>
+-              {item.source} · {item.session_id}
+-              {item.memory_at
+-                ? ` · ${new Date(item.memory_at).toLocaleString("zh-CN")}`
+-                : ""}
+-            </small>
++            <HistoryContent item={item} hubOriginal={!!reader} />
+             {reader &&
+               recent.find((row) => row.raw_id === item.raw_id)
+                 ?.next_content_offset != null && (
+@@ -193,6 +188,103 @@ function asContextItem(item: HistoryRecord): SdkRawContextItem {
+         ? null
+         : new Date(item.memory_at * 1000).toISOString(),
+     score: 0,
+-    truncated: false,
++    truncated: item.next_content_offset != null,
+   };
+ }
++
++function HistoryContent({
++  item,
++  hubOriginal,
++}: {
++  item: SdkRawContextItem;
++  hubOriginal: boolean;
++}) {
++  const display = hubOriginal ? historyDisplay(item) : null;
++  const provenance = (
++    <small>
++      {item.source} · {item.session_id}
++      {item.memory_at
++        ? ` · ${new Date(item.memory_at).toLocaleString("zh-CN")}`
++        : ""}
++    </small>
++  );
++  if (!display)
++    return (
++      <>
++        {hubOriginal && item.truncated && (
++          <p>原文尚未完整读取，可继续读取下方内容。</p>
++        )}
++        <p>{item.content}</p>
++        {provenance}
++      </>
++    );
++  return (
++    <div className="history-readable">
++      <ReadableOriginal display={display} />
++      <details className="history-original">
++        <summary>完整原文与来源</summary>
++        {provenance}
++        <pre>{item.content}</pre>
++      </details>
++    </div>
++  );
++}
++
++function ReadableOriginal({ display }: { display: HistoryDisplay }) {
++  if (display.kind === "remember")
++    return <p className="history-readable__text">{display.text}</p>;
++  if (display.kind === "conversation")
++    return (
++      <>
++        {display.messages.map((message, index) => (
++          // biome-ignore lint/suspicious/noArrayIndexKey: Archived message positions are immutable, including duplicates.
++          <div key={index}>
++            <strong>
++              {{ user: "用户", assistant: "助手", tool: "工具" }[message.role]}
++            </strong>
++            <p className="history-readable__text">{message.text}</p>
++          </div>
++        ))}
++      </>
++    );
++  const document = display.handoff;
++  return (
++    <dl>
++      <dt>目标</dt>
++      <dd className="history-readable__text">{document.goal}</dd>
++      <dt>进展</dt>
++      <dd className="history-readable__text">{document.state}</dd>
++      {(
++        [
++          ["决定", document.decisions],
++          ["下一步", document.next_steps],
++          ["阻碍", document.blockers],
++        ] as const
++      ).map(([label, entries]) => (
++        <HandoffList key={label} label={label} entries={entries} />
++      ))}
++    </dl>
++  );
++}
++
++function HandoffList({ label, entries }: { label: string; entries: string[] }) {
++  return (
++    <>
++      <dt>{label}</dt>
++      <dd>
++        {entries.length ? (
++          <ul>
++            {entries.map((entry, index) => (
++              // biome-ignore lint/suspicious/noArrayIndexKey: Archived handoff positions are immutable, including duplicates.
++              <li key={index} className="history-readable__text">
++                {entry}
++              </li>
++            ))}
++          </ul>
++        ) : (
++          "未记录"
++        )}
++      </dd>
++    </>
++  );
++}
+diff --git a/memhub/apps/web/src/history-display.ts b/memhub/apps/web/src/history-display.ts
+new file mode 100644
+index 0000000..61d7153
+--- /dev/null
++++ b/memhub/apps/web/src/history-display.ts
+@@ -0,0 +1,160 @@
++// FR-01/02/05: presentation only, following Hub EventEnvelope, Conversation and
++// AgentAccess v1. Keep the original alongside every recognized projection.
++type JsonObject = Record<string, unknown>;
++type Handoff = {
++  goal: string;
++  state: string;
++  decisions: string[];
++  next_steps: string[];
++  blockers: string[];
++};
++export type HistoryDisplay =
++  | { kind: "remember"; text: string }
++  | { kind: "handoff"; handoff: Handoff }
++  | {
++      kind: "conversation";
++      messages: { role: "user" | "assistant" | "tool"; text: string }[];
++    };
++
++const uuid =
++  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
++const eventKeys = [
++  "protocol_version",
++  "event_id",
++  "instance_id",
++  "device_id",
++  "source_id",
++  "scope_id",
++  "conversation_id",
++  "record_id",
++  "revision",
++  "kind",
++  "occurred_at",
++  "content",
++  "privacy_policy",
++];
++const identityKeys = [
++  "event_id",
++  "instance_id",
++  "device_id",
++  "source_id",
++  "conversation_id",
++  "record_id",
++];
++function object(value: unknown): value is JsonObject {
++  return value !== null && typeof value === "object" && !Array.isArray(value);
++}
++function onlyKeys(value: JsonObject, keys: string[]) {
++  return Object.keys(value).every((key) => keys.includes(key));
++}
++function text(value: unknown, maxLength: number): value is string {
++  return (
++    typeof value === "string" && value.length > 0 && value.length <= maxLength
++  );
++}
++function metadata(value: unknown) {
++  return value === undefined || object(value);
++}
++function handoff(value: unknown): value is Handoff {
++  return (
++    object(value) &&
++    onlyKeys(value, ["goal", "state", "decisions", "next_steps", "blockers"]) &&
++    text(value.goal, 4096) &&
++    !!value.goal.trim() &&
++    text(value.state, 4096) &&
++    !!value.state.trim() &&
++    [value.decisions, value.next_steps, value.blockers].every(
++      (items) =>
++        Array.isArray(items) &&
++        items.length <= 8 &&
++        items.every((item) => text(item, 1024) && !!item.trim()),
++    )
++  );
++}
++
++export function historyDisplay(item: {
++  raw_id: string;
++  content: string;
++  truncated: boolean;
++}): HistoryDisplay | null {
++  // cmhe is an accepted-original receipt, not ordinary SDK text that happens to
++  // resemble JSON. Never project a partially loaded original.
++  if (
++    !item.raw_id.startsWith("cmhe:") ||
++    !uuid.test(item.raw_id.slice(5)) ||
++    item.truncated
++  )
++    return null;
++  try {
++    const event: unknown = JSON.parse(item.content);
++    if (
++      !object(event) ||
++      !onlyKeys(event, eventKeys) ||
++      Object.keys(event).length !== eventKeys.length ||
++      event.protocol_version !== 1 ||
++      event.privacy_policy !== "cmh-credentials-v1" ||
++      !identityKeys.every(
++        (key) => typeof event[key] === "string" && uuid.test(event[key]),
++      ) ||
++      !(
++        event.scope_id === "global" ||
++        (typeof event.scope_id === "string" && uuid.test(event.scope_id))
++      ) ||
++      !Number.isSafeInteger(event.revision) ||
++      Number(event.revision) < 1 ||
++      !(
++        event.occurred_at === null ||
++        (typeof event.occurred_at === "string" &&
++          /(?:Z|[+-]\d{2}:\d{2})$/.test(event.occurred_at) &&
++          Number.isFinite(Date.parse(event.occurred_at)))
++      ) ||
++      !object(event.content)
++    )
++      return null;
++    const content = event.content;
++    if (
++      event.kind === "operation" &&
++      onlyKeys(content, ["text", "metadata"]) &&
++      text(content.text, 1_000_000) &&
++      object(content.metadata) &&
++      content.metadata.agent_access_version === 1
++    ) {
++      if (content.metadata.agent_access_kind === "remember") {
++        return { kind: "remember", text: content.text };
++      }
++      if (content.metadata.agent_access_kind === "handoff") {
++        const document: unknown = JSON.parse(content.text);
++        if (handoff(document)) return { kind: "handoff", handoff: document };
++      }
++    }
++    if (
++      event.kind === "conversation_turn" &&
++      onlyKeys(content, ["messages", "metadata"]) &&
++      metadata(content.metadata) &&
++      Array.isArray(content.messages) &&
++      content.messages.length > 0 &&
++      content.messages.length <= 200 &&
++      content.messages.every(
++        (message) =>
++          object(message) &&
++          onlyKeys(message, ["role", "text", "metadata"]) &&
++          (message.role === "user" ||
++            message.role === "assistant" ||
++            message.role === "tool") &&
++          text(message.text, 1_000_000) &&
++          metadata(message.metadata),
++      )
++    ) {
++      return {
++        kind: "conversation",
++        messages: content.messages.map((message) => ({
++          role: message.role,
++          text: message.text,
++        })),
++      };
++    }
++  } catch {
++    // Unrecognized / malformed content must remain visible in its original form.
++  }
++  return null;
++}
+diff --git a/memhub/apps/web/src/hub-console.css b/memhub/apps/web/src/hub-console.css
+index cda2d75..5f3640f 100644
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -130,7 +130,7 @@
+ .hub-content > .hub-card + .hub-card {
+   margin-top: 20px;
+ }
+-.hub-content form,
++.hub-content form:not(.model-form),
+ .hub-pairing label {
+   display: flex;
+   flex-wrap: wrap;
+@@ -155,3 +155,31 @@
+ .hub-pairing details {
+   margin: 20px 0;
+ }
++
++.hub-content .history-readable__text,
++.hub-content .history-original pre {
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++}
++.hub-content .history-readable dt {
++  margin-top: 16px;
++  font-weight: 600;
++}
++.hub-content .history-readable dd {
++  margin: 6px 0 0;
++}
++.hub-content .history-original {
++  margin-top: 20px;
++}
++.hub-content .history-original summary {
++  cursor: pointer;
++}
++.hub-content .history-original pre {
++  max-width: 100%;
++  max-height: 320px;
++  overflow: auto;
++  padding: 12px;
++  border: 1px solid #d8dbd2;
++  border-radius: 8px;
++  font-size: 12px;
++}
