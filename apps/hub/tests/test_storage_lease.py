@@ -1,5 +1,7 @@
+import fcntl
 import os
-import select
+import resource
+import selectors
 import socket
 import subprocess
 import sys
@@ -59,7 +61,11 @@ def test_unsafe_existing_lock_is_rejected_without_replacing_it(tmp_path, damage)
     assert other.read_bytes() == b"synthetic unrelated contents"
 
 
-def test_real_process_holds_all_roots_and_os_releases_after_kill(tmp_path):
+@pytest.mark.parametrize("minimum_fd", [None, 1024], ids=["normal-fd", "high-fd"])
+def test_real_process_holds_all_roots_and_os_releases_after_kill(tmp_path, minimum_fd):
+    soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if minimum_fd is not None and soft_limit != resource.RLIM_INFINITY and soft_limit <= minimum_fd:
+        pytest.skip("process descriptor limit cannot allocate the high-FD regression pipe")
     roots = [private(tmp_path / name) for name in ("data", "config", "governance")]
     unrelated = private(tmp_path / "independent")
     script = """
@@ -76,8 +82,17 @@ with StorageLease(*(Path(path) for path in sys.argv[1:])):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    readiness_fd = None
     try:
-        assert select.select([child.stdout], [], [], 10)[0]
+        readiness = child.stdout
+        if minimum_fd is not None:
+            # One duplicate proves high descriptor support without exhausting handles.
+            readiness_fd = fcntl.fcntl(child.stdout, fcntl.F_DUPFD, minimum_fd)
+            assert readiness_fd >= minimum_fd
+            readiness = readiness_fd
+        with selectors.DefaultSelector() as selector:
+            selector.register(readiness, selectors.EVENT_READ)
+            assert selector.select(timeout=10)
         assert child.stdout.readline() == b"ready\n"
         for root in roots:
             with pytest.raises(StorageLeaseError, match="^storage_in_use$"):
@@ -90,6 +105,8 @@ with StorageLease(*(Path(path) for path in sys.argv[1:])):
         with StorageLease(*roots):
             pass
     finally:
+        if readiness_fd is not None:
+            os.close(readiness_fd)
         if child.poll() is None:
             child.kill()
             child.wait(timeout=10)
