@@ -94,11 +94,27 @@ def verify(directory: Path) -> dict:
     return manifest
 
 
+def base_interpreter() -> Path:
+    executable = getattr(sys, "_base_executable", None)
+    if not isinstance(executable, str) or not executable or not Path(executable).is_absolute():
+        raise ValueError("python_base_executable_unavailable")
+    try:
+        resolved = Path(executable).resolve(strict=True)
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            raise ValueError("python_base_executable_unavailable")
+    except (OSError, RuntimeError):
+        raise ValueError("python_base_executable_unavailable") from None
+    return resolved
+
+
 def install(directory: Path, target: Path, manifest: dict) -> None:
     if sys.version_info[:2] != (3, 12):
         raise ValueError("python_3_12_required")
     if sys.platform != "darwin" or platform.machine() != manifest["architecture"]:
         raise ValueError("distribution_platform_mismatch")
+    # A uv shim can make venv record the shim directory as its stdlib home.
+    # Resolve this running Python's base; never search PATH for another Python.
+    python_base = base_interpreter()
     target = target.absolute()
     if target.exists() or target.is_symlink():
         raise ValueError("installation_target_exists")
@@ -111,7 +127,7 @@ def install(directory: Path, target: Path, manifest: dict) -> None:
     environment.pop("PYTHONHOME", None)
     try:
         subprocess.run(
-            [sys.executable, "-I", "-m", "venv", str(target / "venv")],
+            [str(python_base), "-I", "-m", "venv", str(target / "venv")],
             check=True,
             env=environment,
         )
