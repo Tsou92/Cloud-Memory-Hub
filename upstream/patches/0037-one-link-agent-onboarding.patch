@@ -1275,7 +1275,7 @@ new file mode 100644
 +    link,
 +    prompt: `请按此连接页说明，使用连接器为${agents[agent]}安装MCP和Skill并验证连接：${link}。保留其他配置，不输出长期凭证，需要重新加载时告诉我。`,
 +    unix: `sh -c ${shellQuote(unixInstallProgram)} cmh-connect ${shellQuote(origin)} ${shellQuote(link)} ${agent}`,
-+    powershell: `$cmhScript = irm -ErrorAction Stop '${origin}/hub/install.ps1'; & ([scriptblock]::Create($cmhScript)) -Link '${link}' -Agent ${agent}`,
++    powershell: `& { $ErrorActionPreference = 'Stop'; $cmhScript = irm -ErrorAction Stop '${origin}/hub/install.ps1'; & ([scriptblock]::Create($cmhScript)) -Link '${link}' -Agent ${agent} }`,
 +  };
 +}
 diff --git a/memhub/apps/web/src/hub-invitation.test.ts b/memhub/apps/web/src/hub-invitation.test.ts
@@ -1349,7 +1349,7 @@ new file mode 100644
 +    `cmh-connect 'https://synthetic.example' '${instructions.link}' codex`,
 +  );
 +  expect(instructions.powershell).toBe(
-+    `$cmhScript = irm -ErrorAction Stop 'https://synthetic.example/hub/install.ps1'; & ([scriptblock]::Create($cmhScript)) -Link '${instructions.link}' -Agent codex`,
++    `& { $ErrorActionPreference = 'Stop'; $cmhScript = irm -ErrorAction Stop 'https://synthetic.example/hub/install.ps1'; & ([scriptblock]::Create($cmhScript)) -Link '${instructions.link}' -Agent codex }`,
 +  );
 +  expect(instructions.prompt).toContain("为Codex安装MCP和Skill并验证连接");
 +});

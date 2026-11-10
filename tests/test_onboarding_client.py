@@ -6,9 +6,11 @@ import importlib.util
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
@@ -127,6 +129,52 @@ class ClientTests(unittest.TestCase):
 
     def claude_path(self):
         return self.home / ".claude/.claude.json"
+
+    @unittest.skipUnless(os.name == "nt", "Windows DACL requires a real Windows filesystem")
+    def test_windows_acl_empty_directory_and_file_roundtrip(self):
+        """Expose safe diagnostics only for this credential-free Windows fixture."""
+        directory = self.home / "synthetic acl directory"
+        directory.mkdir()
+        target = directory / "synthetic-empty.txt"
+        target.touch()
+        actual_run = client.subprocess.run
+        captured = []
+
+        def capture(*args, **kwargs):
+            result = actual_run(*args, **kwargs)
+            captured.append(result)
+            return result
+
+        try:
+            with patch.object(client.subprocess, "run", side_effect=capture):
+                client.windows_acl(directory, apply=True)
+                client.windows_acl(directory)
+                client.windows_acl(target, apply=True)
+                client.windows_acl(target)
+                # Idempotent reapplication must retain the protected current-user DACL.
+                client.windows_acl(directory, apply=True)
+                client.windows_acl(target, apply=True)
+        except client.ConnectError:
+            result = captured[-1] if captured else None
+            raw = (result.stderr if result else b"").decode("utf-8", errors="replace")
+            if "<Objs" in raw:
+                try:
+                    document = ET.fromstring(raw[raw.index("<Objs") :])
+                    raw = "\n".join(
+                        element.text or ""
+                        for element in document.iter()
+                        if element.tag.rsplit("}", 1)[-1] == "S"
+                        and element.attrib.get("S") == "Error"
+                    )
+                except ET.ParseError:
+                    raw = "unparseable_powershell_diagnostic"
+            raw = re.sub(r"_x([0-9A-Fa-f]{4})_", lambda match: chr(int(match[1], 16)), raw)
+            raw = raw.replace(str(directory), "<synthetic-directory>").replace(
+                str(self.home), "<synthetic-home>"
+            )
+            raw = re.sub(r"S-\d+(?:-\d+)+", "<sid>", raw)
+            returncode = result.returncode if result else "not_started"
+            self.fail(f"Synthetic empty-path ACL failed: exit={returncode}; {raw[:2400]}")
 
     def test_stdlib_import_and_skill_template(self):
         expected = (ROOT / "packages/agent-skill/cloud-memory-hub-remote/SKILL.md").read_text(

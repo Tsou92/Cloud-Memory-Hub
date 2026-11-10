@@ -35,6 +35,8 @@ process.stdout.write(elements.get('command').value);
 @contextmanager
 def bootstrap_server(mode, windows):
     marker = "Write-Output 'BOOTSTRAP_EXECUTED'" if windows else "echo BOOTSTRAP_EXECUTED"
+    if mode == "installer_failure":
+        marker += "\nthrow 'synthetic_install_failure'" if windows else "\nexit 19"
     content = (marker + "\n").encode()
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -70,7 +72,7 @@ class CopiedCommandTests(unittest.TestCase):
     def command(self, origin, *, windows):
         assignment = next(
             node
-            for node in ast.parse(SOURCE.read_text()).body
+            for node in ast.parse(SOURCE.read_text(encoding="utf-8")).body
             if isinstance(node, ast.Assign)
             and any(isinstance(name, ast.Name) and name.id == "SCRIPT" for name in node.targets)
         )
@@ -87,18 +89,28 @@ class CopiedCommandTests(unittest.TestCase):
         return result.stdout
 
     def check_download(self, *, windows):
-        for mode in ("not_found", "partial", "complete"):
+        for mode in ("not_found", "partial", "complete", "installer_failure"):
             with self.subTest(mode=mode), bootstrap_server(mode, windows) as origin:
                 command = self.command(origin, windows=windows)
+                if windows:
+                    # A previous interactive attempt must not execute stale code
+                    # when this attempt fails to download a replacement.
+                    command = "$cmhScript = \"Write-Output 'STALE_SCRIPT_EXECUTED'\"; " + command
                 executable = shutil.which("pwsh") or shutil.which("powershell")
                 arguments = (
                     [executable, "-NoProfile", "-NonInteractive", "-Command", command]
                     if windows
                     else ["sh", "-c", command]
                 )
-                result = subprocess.run(arguments, capture_output=True, text=True, timeout=15)
+                result = subprocess.run(
+                    arguments, capture_output=True, text=True, encoding="utf-8", timeout=15
+                )
+                self.assertNotIn("STALE_SCRIPT_EXECUTED", result.stdout)
                 if mode == "complete":
                     self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("BOOTSTRAP_EXECUTED", result.stdout)
+                elif mode == "installer_failure":
+                    self.assertNotEqual(result.returncode, 0)
                     self.assertIn("BOOTSTRAP_EXECUTED", result.stdout)
                 else:
                     self.assertNotEqual(result.returncode, 0)
