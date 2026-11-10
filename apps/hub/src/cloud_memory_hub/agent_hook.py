@@ -1,4 +1,4 @@
-"""Explicit-workspace Claude visible-turn capture and fresh original recall."""
+"""Explicit-workspace Claude capture with relevant memory and fresh original recall."""
 
 import asyncio
 import hashlib
@@ -11,7 +11,8 @@ from cloud_memory_hub.agent_access import AgentAccessError
 from cloud_memory_hub.agent_config import AgentSettings
 from cloud_memory_hub.claude_hook import failure, output_context
 from cloud_memory_hub.privacy import parse_json
-from cloud_memory_hub.recall import render_context
+from cloud_memory_hub.recall import prepare_search_query, render_context
+from cloud_memory_hub.transport import TransportError
 
 MAX_HOOK_BYTES = 64 * 1024
 HOOK_NETWORK_DEADLINE = 8.0
@@ -72,6 +73,45 @@ def visible_message(raw, workspace):
     return event, role, rows[0][2], session, prompt
 
 
+async def _recall(service, text):
+    try:
+        query, truncated = prepare_search_query(service.scope_id, text, service.privacy)
+    except TransportError as error:
+        raise AgentAccessError(error.code) from None
+    requests = (
+        ("memory-search", query.model_dump(mode="json")),
+        ("history-list", {"limit": 5, "offset": 0}),
+    )
+    results = await asyncio.gather(
+        *(service._read(operation, request) for operation, request in requests),
+        return_exceptions=True,
+    )
+    errors = [result for result in results if isinstance(result, BaseException)]
+    for error in errors:
+        if isinstance(error, AgentAccessError) and (not error.retryable or error.code in DENIED):
+            raise error
+    if any(not isinstance(error, AgentAccessError) for error in errors):
+        raise AgentAccessError("recall_unavailable", retryable=True)
+    if len(errors) == len(results):
+        raise errors[0]
+    replies, unavailable = [], []
+    expected = (service.connection.instance_id, service.connection.device_id, service.scope_id)
+    for (operation, _), result in zip(requests, results, strict=True):
+        if isinstance(result, AgentAccessError):
+            unavailable.append(operation)
+            continue
+        if (result.instance_id, result.device_id, result.scope_id) != expected:
+            raise AgentAccessError("recall_authority_changed")
+        if result.operation != operation:
+            raise AgentAccessError("recall_response_invalid")
+        replies.append(result)
+    if len({reply.device_revision for reply in replies}) != 1:
+        raise AgentAccessError("recall_authority_changed")
+    return render_context(
+        replies, query_truncated=truncated, recent=True, unavailable_operations=unavailable
+    )
+
+
 async def process_message(service, message):
     event, role, text, native_session, native_prompt = message
     binding = (
@@ -101,8 +141,7 @@ async def process_message(service, message):
                 status["capture_error"] = delivery_error.code
             if event == "UserPromptSubmit":
                 try:
-                    reply = await service._read("history-list", {"limit": 5, "offset": 0})
-                    context = render_context([reply], recent=True)
+                    context = await _recall(service, text)
                     output = output_context(context.text)
                     status.update(
                         recall=context.state, records=context.records, truncated=context.truncated
