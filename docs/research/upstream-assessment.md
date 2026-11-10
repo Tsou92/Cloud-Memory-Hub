@@ -24,7 +24,7 @@
 
 初评版本必须分开看：当时根目录 SDK 源码为 `2.0.5.dev3`，MemHub 为 `1.0.4`，其 Core 固定依赖 `hy-memory==2.0.4`。现已通过独立测试切换至 Core／SDK `2.0.5.dev3` 的一致组合；不能将不同提交的源码和依赖混用。
 
-上游采用 [Apache-2.0](https://github.com/Tencent-Hunyuan/Hy-Memory/blob/0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766/LICENSE)。引入源码时保留许可、适用的 NOTICE、第三方声明和修改记录。Cloud Memory Hub 自身许可证尚未选定。
+上游采用 [Apache-2.0](https://github.com/Tencent-Hunyuan/Hy-Memory/blob/0244ebe38ce0288a44a8b6fc7f209ab2bf6c3766/LICENSE)。引入源码时保留许可、适用的 NOTICE、第三方声明和修改记录。Cloud Memory Hub 自有源码现采用同一许可，见 [ADR-0061](../adr/0061-project-license.md)；第三方依赖及模型资产仍遵循各自许可。
 
 ## 2. 可复用清单
 

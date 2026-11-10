@@ -1,0 +1,15 @@
+Cloud Memory Hub
+Copyright 2026 Cloud Memory Hub contributors
+
+Cloud Memory Hub original source is licensed under the Apache License, Version 2.0.
+
+This product reuses and modifies Hy-Memory and MemHub by Tencent.
+Copyright (C) 2026 Tencent. All rights reserved.
+Upstream: https://github.com/Tencent-Hunyuan/Hy-Memory
+Upstream license: Apache-2.0
+
+The exact upstream revision, modifications and asset origins are recorded in
+upstream/manifest.json and upstream/patches/. Upstream copyright notices and
+licenses are retained in distribution packages. Third-party dependencies and
+model assets remain under their respective licenses; this notice does not
+relicense them or imply endorsement by their authors.
