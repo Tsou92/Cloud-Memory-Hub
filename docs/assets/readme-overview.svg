@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Cloud Memory Hub：一台 NAS，多设备、多 Agent 共享记忆</title>
+  <desc id="description">你的电脑通过 MCP 或 Skill 连接 NAS 上的 Cloud Memory Hub Docker 服务，共享项目记忆、找回上下文和接续任务。图中是产品连接示意。</desc>
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="1200" y2="520" gradientUnits="userSpaceOnUse"><stop stop-color="#171c33"/><stop offset="1" stop-color="#0b0f1e"/></linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#262b47"/><stop offset="1" stop-color="#171c30"/></linearGradient>
+    <linearGradient id="accent" x1="500" y1="180" x2="700" y2="370" gradientUnits="userSpaceOnUse"><stop stop-color="#7ebaff"/><stop offset=".55" stop-color="#9b8af5"/><stop offset="1" stop-color="#d7a7f5"/></linearGradient>
+    <linearGradient id="link" x1="320" y1="260" x2="880" y2="340" gradientUnits="userSpaceOnUse"><stop stop-color="#789fe6" stop-opacity=".25"/><stop offset=".5" stop-color="#bba2ff"/><stop offset="1" stop-color="#789fe6" stop-opacity=".25"/></linearGradient>
+    <radialGradient id="ambient"><stop stop-color="#8770dd" stop-opacity=".22"/><stop offset="1" stop-color="#8770dd" stop-opacity="0"/></radialGradient>
+    <radialGradient id="orb"><stop stop-color="#8f82d7" stop-opacity=".15"/><stop offset=".72" stop-color="#5e5099" stop-opacity=".3"/><stop offset=".94" stop-color="#a7a1ff" stop-opacity=".48"/><stop offset="1" stop-color="#9ab9ff" stop-opacity=".08"/></radialGradient>
+    <filter id="glow" x="-70%" y="-70%" width="240%" height="240%"><feGaussianBlur stdDeviation="12"/></filter>
+    <g id="laptop" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="2" width="24" height="16" rx="2"/><path d="M1 22h28l-2-4H3l-2 4Z"/></g>
+    <g id="cube" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="m15 1 13 7v15l-13 7-13-7V8L15 1Z"/><path d="m2 8 13 7 13-7M15 15v15M8.5 4.5l13 7"/></g>
+    <g id="database" stroke="currentColor" stroke-width="1.7"><ellipse cx="12" cy="5" rx="10" ry="4"/><path d="M2 5v15c0 2.2 4.5 4 10 4s10-1.8 10-4V5M2 12c0 2.2 4.5 4 10 4s10-1.8 10-4"/></g>
+    <g id="code" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 4-7 8 7 8m12-16 7 8-7 8M18 1l-6 22"/></g>
+    <g id="handoff" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6h19m-5-5 5 5-5 5M22 18H3m5-5-5 5 5 5"/></g>
+  </defs>
+  <rect width="1200" height="520" rx="24" fill="url(#surface)"/>
+  <rect x=".5" y=".5" width="1199" height="519" rx="23.5" stroke="#a0a6dc" stroke-opacity=".2"/>
+  <ellipse cx="600" cy="290" rx="380" ry="235" fill="url(#ambient)"/>
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+    <path d="M51 47c-5-6-11-6-15-2-4 4-4 10 0 14s10 4 15-2l9-10c5-6 11-6 15-2 4 4 4 10 0 14s-10 4-15-2l-9-10Z" stroke="url(#accent)" stroke-width="4" stroke-linecap="round"/>
+    <text x="92" y="60" fill="#f3f4fc" font-size="27" font-weight="650" letter-spacing="-.5">Cloud Memory Hub</text>
+    <rect x="914" y="34" width="238" height="32" rx="16" fill="#a18be6" fill-opacity=".09" stroke="#a18be6" stroke-opacity=".3"/>
+    <circle cx="935" cy="50" r="3.5" fill="#83dabb"/>
+    <text x="948" y="55" fill="#c5c4df" font-size="11.5" letter-spacing="1.1">SELF-HOSTED · MCP · SKILL</text>
+    <text x="48" y="112" fill="#f3f4fc" font-size="29" font-weight="600">换设备，换 Agent，思路不用重来。</text>
+    <text x="49" y="143" fill="#aeb5ce" font-size="15">把项目记忆存进自己的 NAS，让下一段工作从这里继续。</text>
+
+    <path d="M350 257C420 257 429 293 484 293M350 359C420 359 429 318 484 318M716 293C771 293 782 257 850 257M716 318C771 318 782 359 850 359" stroke="url(#link)" stroke-width="1.7"/>
+    <circle cx="428" cy="278" r="3.5" fill="#9dbbff"/><circle cx="780" cy="347" r="3.5" fill="#c5a5fb"/>
+    <circle cx="428" cy="278" r="11" fill="#9dbbff" fill-opacity=".12"/><circle cx="780" cy="347" r="11" fill="#c5a5fb" fill-opacity=".12"/>
+
+    <rect x="48" y="212" width="302" height="90" rx="15" fill="url(#card)" stroke="#abb0e0" stroke-opacity=".19"/>
+    <rect x="65" y="233" width="49" height="49" rx="12" fill="#91a9ed" fill-opacity=".1"/>
+    <use href="#laptop" x="75" y="246" color="#b8c9ef"/>
+    <text x="130" y="248" fill="#f3f4fc" font-size="17" font-weight="600">你常用的设备</text>
+    <text x="130" y="275" fill="#aeb5ce" font-size="13">家里、办公室，都连接同一个 Hub</text>
+
+    <rect x="48" y="314" width="302" height="90" rx="15" fill="url(#card)" stroke="#abb0e0" stroke-opacity=".19"/>
+    <rect x="65" y="335" width="49" height="49" rx="12" fill="#b099ed" fill-opacity=".1"/>
+    <use href="#code" x="75" y="348" color="#c4b3f0"/>
+    <text x="130" y="350" fill="#f3f4fc" font-size="17" font-weight="600">你常用的 Agent</text>
+    <text x="130" y="377" fill="#aeb5ce" font-size="13">通过 MCP / Skill 接入，无需独立 App</text>
+
+    <circle cx="600" cy="292" r="91" fill="#a28dee" fill-opacity=".14" filter="url(#glow)"/>
+    <rect x="484" y="195" width="232" height="225" rx="24" fill="url(#card)" stroke="#ab9de6" stroke-opacity=".42"/>
+    <rect x="531" y="210" width="138" height="25" rx="12.5" fill="#9a8bd7" fill-opacity=".13"/>
+    <text x="600" y="227" text-anchor="middle" fill="#cac0e9" font-size="11.5" letter-spacing="1.2">NAS · DOCKER</text>
+    <circle cx="600" cy="295" r="50" fill="url(#orb)" stroke="url(#accent)" stroke-width="1.5"/>
+    <ellipse cx="600" cy="295" rx="49" ry="19" transform="rotate(-34 600 295)" stroke="#b7a7f7" stroke-opacity=".2"/>
+    <ellipse cx="600" cy="295" rx="48" ry="25" transform="rotate(45 600 295)" stroke="#80baff" stroke-opacity=".16"/>
+    <path d="M598 288c-9-12-19-12-26-5s-7 17 0 24 17 7 26-5l9-12c9-12 19-12 26-5s7 17 0 24-17 7-26-5l-9-12" transform="translate(-3 -2) scale(1)" stroke="#e5dbff" stroke-width="4.3" stroke-linecap="round"/>
+    <text x="600" y="373" text-anchor="middle" fill="#f3f4fc" font-size="18" font-weight="650">你的共享记忆中枢</text>
+    <text x="600" y="397" text-anchor="middle" fill="#aeb5ce" font-size="12.5">保存 · 检索 · 交接</text>
+
+    <rect x="850" y="212" width="302" height="90" rx="15" fill="url(#card)" stroke="#abb0e0" stroke-opacity=".19"/>
+    <rect x="867" y="233" width="49" height="49" rx="12" fill="#80c5be" fill-opacity=".1"/>
+    <use href="#database" x="880" y="245" color="#abdbd6"/>
+    <text x="932" y="248" fill="#f3f4fc" font-size="17" font-weight="600">共享项目记忆</text>
+    <text x="932" y="275" fill="#aeb5ce" font-size="13">保存决策，按当前任务找回上下文</text>
+
+    <rect x="850" y="314" width="302" height="90" rx="15" fill="url(#card)" stroke="#abb0e0" stroke-opacity=".19"/>
+    <rect x="867" y="335" width="49" height="49" rx="12" fill="#b199ed" fill-opacity=".1"/>
+    <use href="#handoff" x="880" y="347" color="#c9b4f2"/>
+    <text x="932" y="350" fill="#f3f4fc" font-size="17" font-weight="600">接续同一项任务</text>
+    <text x="932" y="377" fill="#aeb5ce" font-size="13">带走目标、进度和下一步</text>
+
+    <path d="M48 454h1104" stroke="#a0a6dc" stroke-opacity=".13"/>
+    <text x="49" y="486" fill="#b7bdd3" font-size="13">NAS 部署一次 → 设备各自连接 → 换个 Agent，接着做</text>
+    <text x="1151" y="486" text-anchor="end" fill="#7f88a5" font-size="11.5">连接示意 · 具体接入能力见支持说明</text>
+  </g>
+</svg>
