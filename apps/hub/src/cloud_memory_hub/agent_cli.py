@@ -58,8 +58,15 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(prog="cloud-memory-agent")
     parser.add_argument("--config-file", type=Path, required=True)
-    parser.add_argument("command", choices=["init", *COMMANDS])
+    parser.add_argument("command", choices=["init", "claude-hook", *COMMANDS])
+    parser.add_argument("--workspace", type=Path)
     args = parser.parse_args()
+    if args.command == "claude-hook":
+        from cloud_memory_hub.agent_hook import run_hook_process
+
+        return run_hook_process(args.config_file, args.workspace)
+    if args.workspace is not None:
+        parser.error("--workspace is only accepted by claude-hook")
     try:
         service = AgentSettings.from_file(args.config_file).open(initialize=args.command == "init")
         if args.command == "init":
