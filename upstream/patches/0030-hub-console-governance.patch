@@ -1,0 +1,1175 @@
+diff --git a/memhub/apps/web/src/HubConsole.test.tsx b/memhub/apps/web/src/HubConsole.test.tsx
+index cf17df8dad1a17a0cf78dcf35db3dc6cc1c6a264..d4f51b309d55b9fb3050b9aaa4090e255547cc9d 100644
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -10,6 +10,7 @@ const local = vi.hoisted(() =>
+   }),
+ );
+ vi.mock("./api", () => ({
++  createTraceId: () => crypto.randomUUID(),
+   getSdkMemory: local,
+   getSdkMemoryLibrary: local,
+   updateSdkMemory: local,
+@@ -370,3 +371,133 @@ it("keeps an empty filtered page pageable and explains unavailable ask", async (
+   expect(screen.queryByRole("textbox", { name: "你的问题" })).toBeNull();
+   expect(local).not.toHaveBeenCalled();
+ });
++
++it("refreshes the same project library only after a confirmed forget result", async () => {
++  sessionStorage.clear();
++  let forgotten = false;
++  fetcher.mockImplementation(async (url: string, init?: RequestInit) => {
++    if (url.endsWith("governance/preview")) {
++      return Response.json({
++        scope_id: "project-a",
++        action: "forget",
++        view_digest: "a".repeat(64),
++        consistency: "observational",
++        coverage: "explicit_stored_relations",
++        content_trust: "untrusted_history",
++        execution_available: false,
++        total: 1,
++        raw_count: 0,
++        memory_count: 1,
++        unresolved_origin_count: 0,
++        next_offset: null,
++        items: [
++          {
++            record_id: "project-a-item",
++            kind: "memory",
++            content: "合成预览",
++            layer: "fact",
++            status: "active",
++            reasons: ["selected"],
++            unresolved_origin: false,
++            content_truncated: false,
++            proposed_effect: "suppress_automatic_use",
++          },
++        ],
++      });
++    }
++    if (url.endsWith("governance/execute")) {
++      const request = JSON.parse(String(init?.body));
++      forgotten = true;
++      return Response.json({
++        operation_id: request.operation_id,
++        scope_id: request.scope_id,
++        action: "forget",
++        state: "completed",
++        suppressed_count: 1,
++      });
++    }
++    if (forgotten && url.endsWith("memory-list"))
++      return Response.json(
++        page("project-a", "memory-list", { items: [], returned_count: 0 }),
++      );
++    return handler(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await userEvent.click(
++    await screen.findByRole("button", { name: "project-a 的合成内容" }),
++  );
++  await userEvent.click(
++    await screen.findByRole("button", { name: "忘记这条记忆" }),
++  );
++  await userEvent.click(await screen.findByRole("checkbox"));
++  await userEvent.click(screen.getByRole("button", { name: "确认忘记" }));
++  expect(await screen.findByText(/忘记已完成/)).toBeTruthy();
++  await waitFor(() =>
++    expect(
++      screen.queryByRole("button", { name: "project-a 的合成内容" }),
++    ).toBeNull(),
++  );
++  expect(
++    fetcher.mock.calls.filter(([url]) => String(url).endsWith("memory-list"))
++      .length,
++  ).toBeGreaterThanOrEqual(2);
++  expect(local).not.toHaveBeenCalled();
++});
++
++it("refreshes history when a previous unknown forget is completed from the recovery panel", async () => {
++  sessionStorage.clear();
++  sessionStorage.setItem(
++    "cmh-forget:instance:project-a",
++    JSON.stringify({
++      version: 1,
++      instance: "instance",
++      total: 1,
++      memoryCount: 1,
++      rawCount: 0,
++      request: {
++        scope_id: "project-a",
++        action: "forget",
++        record_ids: ["project-a-item"],
++        expected_view: "a".repeat(64),
++        operation_id: "00000000-0000-4000-8000-000000000001",
++      },
++    }),
++  );
++  let forgotten = false;
++  fetcher.mockImplementation(async (url: string, init?: RequestInit) => {
++    if (url.endsWith("governance/execute")) {
++      const request = JSON.parse(String(init?.body));
++      forgotten = true;
++      return Response.json({
++        operation_id: request.operation_id,
++        scope_id: request.scope_id,
++        action: "forget",
++        state: "completed",
++        suppressed_count: 1,
++      });
++    }
++    if (forgotten && url.endsWith("history-list"))
++      return Response.json(
++        page("project-a", "history-list", { items: [], returned_count: 0 }),
++      );
++    return handler(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "历史原文" }));
++  await screen.findByText("project-a 的合成内容");
++  await userEvent.click(
++    await screen.findByRole("button", { name: "核对并继续原操作" }),
++  );
++  expect(await screen.findByText(/忘记已完成/)).toBeTruthy();
++  await waitFor(() =>
++    expect(screen.queryByText("project-a 的合成内容")).toBeNull(),
++  );
++  expect(
++    fetcher.mock.calls.filter(([url]) => String(url).endsWith("history-list"))
++      .length,
++  ).toBeGreaterThanOrEqual(2);
++  expect(sessionStorage.getItem("cmh-forget:instance:project-a")).toBeNull();
++});
+diff --git a/memhub/apps/web/src/HubConsole.tsx b/memhub/apps/web/src/HubConsole.tsx
+index 14dd8b39ef96a7f2eea31c940888ec8aa0b2b82b..b73c9c9790b990d10bfbc766b3c38e9d5bdb1f50 100644
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -1,5 +1,6 @@
+ import { useEffect, useMemo, useState } from "react";
+ import { HubProvider, useHub } from "./HubContext";
++import { HubGovernance } from "./HubGovernance";
+ import { HubQuestion } from "./HubQuestion";
+ import {
+   getHubSummary,
+@@ -161,6 +162,14 @@ function ProjectContent({
+   const scope = project.scope_id;
+   const instance = bootstrap.instance_id;
+   const [citationId, setCitationId] = useState<string | null>(null);
++  const [governanceId, setGovernanceId] = useState<string | null>(null);
++  const [refreshVersion, setRefreshVersion] = useState(0);
++  const [notice, setNotice] = useState("");
++  const actions = (item: { memory_id: string }) => (
++    <R6Button onClick={() => setGovernanceId(item.memory_id)}>
++      忘记这条记忆
++    </R6Button>
++  );
+   const readers = useMemo(
+     () => ({
+       memory: {
+@@ -215,14 +224,23 @@ function ProjectContent({
+   return (
+     <>
+       <h1>{project.display_name}</h1>
+-      {view === "home" && <HubHome project={project} />}
++      {notice && <p role="status">{notice}</p>}
++      {view === "home" && <HubHome key={refreshVersion} project={project} />}
+       {view === "library" && (
+-        <SdkMemoryLibrary active reader={readers.memory} />
++        <SdkMemoryLibrary
++          key={refreshVersion}
++          active
++          reader={readers.memory}
++          renderActions={actions}
++        />
++      )}
++      {view === "history" && (
++        <SdkRawHistory key={refreshVersion} reader={readers.history} />
+       )}
+-      {view === "history" && <SdkRawHistory reader={readers.history} />}
+       {view === "ask" && (
+         <>
+           <HubQuestion
++            key={refreshVersion}
+             instance={instance}
+             scope={scope}
+             enabled={bootstrap.features.includes("scoped_console_ask")}
+@@ -238,6 +256,7 @@ function ProjectContent({
+                 key={citationId}
+                 active
+                 detailOnly
++                renderActions={actions}
+                 reader={readers.memory}
+                 focusedMemoryId={citationId}
+               />
+@@ -245,6 +264,21 @@ function ProjectContent({
+           )}
+         </>
+       )}
++      <HubGovernance
++        key={governanceId ?? "pending"}
++        instance={instance}
++        scope={scope}
++        recordId={governanceId}
++        onClose={() => setGovernanceId(null)}
++        onCompleted={() => {
++          setNotice(
++            "忘记已完成。相关内容已停止自动使用，原始历史仍可主动查阅。",
++          );
++          setGovernanceId(null);
++          setCitationId(null);
++          setRefreshVersion((value) => value + 1);
++        }}
++      />
+     </>
+   );
+ }
+diff --git a/memhub/apps/web/src/HubGovernance.test.tsx b/memhub/apps/web/src/HubGovernance.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a4c719b02940181993255bb490272ab9d4d3ac4
+--- /dev/null
++++ b/memhub/apps/web/src/HubGovernance.test.tsx
+@@ -0,0 +1,305 @@
++// @vitest-environment jsdom
++import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { HubGovernance } from "./HubGovernance";
++import { pendingKey } from "./hub-governance";
++
++const digest = "a".repeat(64);
++const selected = "synthetic-memory";
++const props = {
++  instance: "synthetic-instance",
++  scope: "project-a",
++  recordId: selected,
++  onClose: vi.fn(),
++  onCompleted: vi.fn(),
++};
++function item(id = selected, kind = "memory") {
++  return {
++    record_id: id,
++    kind,
++    content: "合成影响内容",
++    layer: "fact",
++    status: "active",
++    content_truncated: false,
++    reasons: ["selected"],
++    unresolved_origin: false,
++    proposed_effect:
++      kind === "raw" ? "retain_for_explicit_read" : "suppress_automatic_use",
++  };
++}
++function preview(extra = {}) {
++  return {
++    scope_id: "project-a",
++    action: "forget",
++    view_digest: digest,
++    consistency: "observational",
++    coverage: "explicit_stored_relations",
++    content_trust: "untrusted_history",
++    execution_available: false,
++    total: 1,
++    raw_count: 0,
++    memory_count: 1,
++    unresolved_origin_count: 0,
++    items: [item()],
++    next_offset: null,
++    ...extra,
++  };
++}
++function completed(body: string, extra = {}) {
++  const request = JSON.parse(body);
++  return Response.json({
++    operation_id: request.operation_id,
++    scope_id: request.scope_id,
++    action: "forget",
++    state: "completed",
++    suppressed_count: 1,
++    ...extra,
++  });
++}
++let fetcher: ReturnType<typeof vi.fn>;
++beforeEach(() => {
++  sessionStorage.clear();
++  props.onClose.mockClear();
++  props.onCompleted.mockClear();
++  fetcher = vi.fn(async (url: string, init: RequestInit) =>
++    url.endsWith("preview")
++      ? Response.json(preview())
++      : completed(String(init.body)),
++  );
++  vi.stubGlobal("fetch", fetcher);
++});
++afterEach(() => {
++  cleanup();
++  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
++});
++async function confirm() {
++  await userEvent.click(await screen.findByRole("checkbox"));
++  await userEvent.click(screen.getByRole("button", { name: "确认忘记" }));
++}
++
++it("requires all pages and explicit confirmation, then binds the exact view and refreshes on completed", async () => {
++  fetcher.mockImplementation(async (url: string, init: RequestInit) => {
++    const body = JSON.parse(String(init.body));
++    if (url.endsWith("execute"))
++      return completed(String(init.body), { suppressed_count: 2 });
++    return Response.json(
++      preview({
++        total: 2,
++        raw_count: 1,
++        memory_count: 1,
++        items: body.offset
++          ? [item("cmhe:synthetic-original", "raw")]
++          : [item()],
++        next_offset: body.offset ? null : 1,
++      }),
++    );
++  });
++  render(<HubGovernance {...props} />);
++  expect(
++    ((await screen.findByRole("checkbox")) as HTMLInputElement).disabled,
++  ).toBe(true);
++  await userEvent.click(
++    screen.getByRole("button", { name: "继续查看影响范围" }),
++  );
++  await waitFor(() =>
++    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(
++      false,
++    ),
++  );
++  const second = JSON.parse(String(fetcher.mock.calls[1][1].body));
++  expect(second).toMatchObject({
++    scope_id: "project-a",
++    expected_view: digest,
++    offset: 1,
++  });
++  expect(
++    (screen.getByRole("button", { name: "确认忘记" }) as HTMLButtonElement)
++      .disabled,
++  ).toBe(true);
++  await confirm();
++  await waitFor(() => expect(props.onCompleted).toHaveBeenCalledOnce());
++  const call = fetcher.mock.calls.find(([url]) =>
++    String(url).endsWith("execute"),
++  );
++  expect(JSON.parse(String(call?.[1].body))).toMatchObject({
++    scope_id: "project-a",
++    action: "forget",
++    record_ids: [selected],
++    expected_view: digest,
++  });
++  expect(
++    sessionStorage.getItem(pendingKey(props.instance, props.scope)),
++  ).toBeNull();
++  expect(
++    fetcher.mock.calls.some(([url]) => String(url).includes("/api/v2/")),
++  ).toBe(false);
++});
++
++it("blocks known unsupported records and missing provenance before execution", async () => {
++  fetcher.mockResolvedValue(
++    Response.json(
++      preview({
++        items: [item("cmhp:unsupported")],
++        unresolved_origin_count: 1,
++      }),
++    ),
++  );
++  render(<HubGovernance {...props} />);
++  expect(await screen.findByText(/暂不支持忘记的工作或编程记录/)).toBeTruthy();
++  expect(screen.getByText(/缺少来源证明/)).toBeTruthy();
++  expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(
++    true,
++  );
++  expect(fetcher).toHaveBeenCalledTimes(1);
++});
++
++it("invalidates the preview on a changed pagination view", async () => {
++  fetcher.mockResolvedValueOnce(
++    Response.json(preview({ total: 2, memory_count: 2, next_offset: 1 })),
++  );
++  fetcher.mockResolvedValueOnce(
++    Response.json({ detail: "governance_preview_changed" }, { status: 409 }),
++  );
++  render(<HubGovernance {...props} />);
++  await userEvent.click(
++    await screen.findByRole("button", { name: "继续查看影响范围" }),
++  );
++  expect(await screen.findByRole("alert")).toHaveProperty(
++    "textContent",
++    "影响范围已变化，本次尚未执行。请重新预览后再确认。",
++  );
++  expect(screen.queryByRole("button", { name: "确认忘记" })).toBeNull();
++});
++
++it("retains only request metadata and replays the same operation after a lost response and remount", async () => {
++  fetcher.mockImplementation(async (url: string) => {
++    if (url.endsWith("preview")) return Response.json(preview());
++    throw new TypeError("synthetic_connection_lost");
++  });
++  const first = render(<HubGovernance {...props} />);
++  await confirm();
++  expect(await screen.findByText(/连接中断，执行结果尚未确认/)).toBeTruthy();
++  const originalBody = fetcher.mock.calls[1][1].body;
++  const saved = sessionStorage.getItem(pendingKey(props.instance, props.scope));
++  expect(saved).toBeTruthy();
++  expect(saved).not.toContain("合成影响内容");
++  first.unmount();
++  fetcher.mockImplementation(async (_url: string, init: RequestInit) =>
++    completed(String(init.body)),
++  );
++  render(<HubGovernance {...props} recordId={null} />);
++  expect(fetcher).toHaveBeenCalledTimes(2);
++  await userEvent.click(
++    await screen.findByRole("button", { name: "核对并继续原操作" }),
++  );
++  await waitFor(() => expect(props.onCompleted).toHaveBeenCalledOnce());
++  expect(fetcher.mock.calls[2][1].body).toBe(originalBody);
++});
++
++it("keeps a completed-looking but mismatched response unresolved", async () => {
++  fetcher.mockImplementation(async (url: string, init: RequestInit) =>
++    url.endsWith("preview")
++      ? Response.json(preview())
++      : completed(String(init.body), { scope_id: "project-b" }),
++  );
++  render(<HubGovernance {...props} />);
++  await confirm();
++  expect(await screen.findByText(/服务未确认操作结果/)).toBeTruthy();
++  expect(props.onCompleted).not.toHaveBeenCalled();
++  expect(
++    sessionStorage.getItem(pendingKey(props.instance, props.scope)),
++  ).toBeTruthy();
++});
++
++it("cancels the old scope request and preserves its identity without applying a late response to a new scope", async () => {
++  let finish: ((response: Response) => void) | undefined;
++  let oldBody = "";
++  let signal: AbortSignal | null | undefined;
++  fetcher.mockImplementation((url: string, init: RequestInit) => {
++    if (url.endsWith("preview"))
++      return Promise.resolve(
++        Response.json(
++          preview({ scope_id: JSON.parse(String(init.body)).scope_id }),
++        ),
++      );
++    oldBody = String(init.body);
++    signal = init.signal;
++    return new Promise<Response>((resolve) => {
++      finish = resolve;
++    });
++  });
++  const view = render(<HubGovernance key="a" {...props} />);
++  await confirm();
++  await waitFor(() => expect(finish).toBeTruthy());
++  view.rerender(<HubGovernance key="b" {...props} scope="project-b" />);
++  await screen.findByRole("checkbox");
++  expect(signal?.aborted).toBe(true);
++  await act(async () => finish?.(completed(oldBody)));
++  expect(props.onCompleted).not.toHaveBeenCalled();
++  expect(
++    sessionStorage.getItem(pendingKey(props.instance, "project-a")),
++  ).toBeTruthy();
++  expect(
++    sessionStorage.getItem(pendingKey(props.instance, "project-b")),
++  ).toBeNull();
++});
++
++it("does not execute if the browser cannot retain the recovery identity", async () => {
++  render(<HubGovernance {...props} />);
++  await screen.findByRole("checkbox");
++  vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
++    throw new Error("synthetic_storage_unavailable");
++  });
++  await confirm();
++  expect(await screen.findByText(/浏览器无法保留或读取操作回执/)).toBeTruthy();
++  expect(fetcher).toHaveBeenCalledTimes(1);
++  expect(props.onCompleted).not.toHaveBeenCalled();
++});
++
++it("lets a recovered stale operation return to its original selection for a new explicit preview", async () => {
++  fetcher.mockImplementation(async (url: string) =>
++    url.endsWith("preview")
++      ? Response.json(preview())
++      : Promise.reject(new TypeError("lost")),
++  );
++  const first = render(<HubGovernance {...props} />);
++  await confirm();
++  await screen.findByText(/连接中断/);
++  first.unmount();
++  fetcher.mockImplementation(async (url: string) =>
++    url.endsWith("execute")
++      ? Response.json({ detail: "governance_preview_changed" }, { status: 409 })
++      : Response.json(preview({ view_digest: "b".repeat(64) })),
++  );
++  render(<HubGovernance {...props} recordId={null} />);
++  await userEvent.click(
++    await screen.findByRole("button", { name: "核对并继续原操作" }),
++  );
++  await userEvent.click(
++    await screen.findByRole("button", { name: "重新预览并确认" }),
++  );
++  await screen.findByRole("checkbox");
++  expect(JSON.parse(String(fetcher.mock.calls.at(-1)?.[1].body))).toMatchObject(
++    { record_ids: [selected], scope_id: props.scope, offset: 0 },
++  );
++  expect(
++    (screen.getByRole("button", { name: "确认忘记" }) as HTMLButtonElement)
++      .disabled,
++  ).toBe(true);
++  expect(
++    sessionStorage.getItem(pendingKey(props.instance, props.scope)),
++  ).toBeNull();
++});
++
++it("uses the existing UUID fallback when a NAS browser lacks randomUUID", async () => {
++  vi.stubGlobal("crypto", {});
++  render(<HubGovernance {...props} />);
++  await confirm();
++  await waitFor(() => expect(props.onCompleted).toHaveBeenCalledOnce());
++  const body = JSON.parse(String(fetcher.mock.calls[1][1].body));
++  expect(body.operation_id).toMatch(
++    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
++  );
++});
+diff --git a/memhub/apps/web/src/HubGovernance.tsx b/memhub/apps/web/src/HubGovernance.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..26b264c016a35b6918c1e74802fa47c053b61b1a
+--- /dev/null
++++ b/memhub/apps/web/src/HubGovernance.tsx
+@@ -0,0 +1,303 @@
++import { useCallback, useEffect, useRef, useState } from "react";
++import { createTraceId } from "./api";
++import {
++  appendPreview,
++  executeForget,
++  type ForgetPreview,
++  type ForgetResult,
++  GovernanceError,
++  type PendingForget,
++  pendingKey,
++  previewForget,
++  readPending,
++} from "./hub-governance";
++import { R6Button } from "./R6Controls";
++
++const reasons: Record<string, string> = {
++  selected: "所选记忆",
++  evolution: "关联版本",
++  source: "来源原文",
++  derived: "由来源产生",
++};
++export function HubGovernance({
++  instance,
++  scope,
++  recordId,
++  onClose,
++  onCompleted,
++}: {
++  instance: string;
++  scope: string;
++  recordId: string | null;
++  onClose(): void;
++  onCompleted(result: ForgetResult): void;
++}) {
++  const [preview, setPreview] = useState<ForgetPreview | null>(null);
++  const [pending, setPending] = useState<PendingForget | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [confirmed, setConfirmed] = useState(false);
++  const [error, setError] = useState("");
++  const [storageError, setStorageError] = useState(false);
++  const [changed, setChanged] = useState(false);
++  const controller = useRef<AbortController | null>(null);
++  const alive = useRef(true);
++  const target = useRef<string | null>(recordId);
++  const load = useCallback(
++    async (previous?: ForgetPreview) => {
++      const selectedId = target.current;
++      if (!selectedId) return;
++      controller.current?.abort();
++      const current = new AbortController();
++      controller.current = current;
++      setBusy(true);
++      setError("");
++      setConfirmed(false);
++      if (!previous) setPreview(null);
++      try {
++        const page = await previewForget(
++          scope,
++          selectedId,
++          previous?.next_offset ?? 0,
++          previous?.view_digest,
++          current.signal,
++        );
++        if (alive.current && !current.signal.aborted)
++          setPreview(previous ? appendPreview(previous, page) : page);
++      } catch (reason) {
++        if (alive.current && !current.signal.aborted) {
++          setError(
++            reason instanceof GovernanceError
++              ? reason.message
++              : "无法读取影响范围，请检查连接后重新预览。",
++          );
++          setPreview(null);
++        }
++      } finally {
++        if (alive.current && !current.signal.aborted) setBusy(false);
++      }
++    },
++    [scope],
++  );
++  useEffect(() => {
++    alive.current = true;
++    try {
++      const stored = readPending(instance, scope);
++      target.current = stored?.request.record_ids[0] ?? recordId;
++      setPending(stored);
++      if (target.current && !stored) void load();
++    } catch {
++      setStorageError(true);
++    }
++    return () => {
++      alive.current = false;
++      controller.current?.abort();
++    };
++  }, [instance, scope, recordId, load]);
++
++  async function execute(existing?: PendingForget) {
++    if (busy || storageError) return;
++    let operation = existing;
++    if (!operation) {
++      if (!preview || !target.current || !confirmed || !eligible) return;
++      operation = {
++        version: 1,
++        instance,
++        request: {
++          scope_id: scope,
++          action: "forget",
++          record_ids: [target.current],
++          expected_view: preview.view_digest,
++          operation_id: createTraceId(),
++        },
++        total: preview.total,
++        memoryCount: preview.memory_count,
++        rawCount: preview.raw_count,
++      };
++      try {
++        sessionStorage.setItem(
++          pendingKey(instance, scope),
++          JSON.stringify(operation),
++        );
++      } catch {
++        setStorageError(true);
++        return;
++      }
++      setPending(operation);
++    }
++    controller.current?.abort();
++    const current = new AbortController();
++    controller.current = current;
++    setBusy(true);
++    setError("");
++    setChanged(false);
++    try {
++      const result = await executeForget(operation, current.signal);
++      if (!alive.current || current.signal.aborted) return;
++      try {
++        sessionStorage.removeItem(pendingKey(instance, scope));
++      } catch {
++        setStorageError(true);
++        return;
++      }
++      setPending(null);
++      setPreview(null);
++      onCompleted(result);
++    } catch (reason) {
++      if (alive.current && !current.signal.aborted) {
++        setError(
++          reason instanceof GovernanceError
++            ? reason.message
++            : "连接中断，执行结果尚未确认。请核对原操作。",
++        );
++        setChanged(
++          reason instanceof GovernanceError &&
++            reason.code === "governance_preview_changed",
++        );
++      }
++    } finally {
++      if (alive.current && !current.signal.aborted) setBusy(false);
++    }
++  }
++  function restart() {
++    if (!changed) return;
++    try {
++      sessionStorage.removeItem(pendingKey(instance, scope));
++    } catch {
++      setStorageError(true);
++      return;
++    }
++    setPending(null);
++    setChanged(false);
++    setConfirmed(false);
++    void load();
++  }
++  const complete =
++    preview &&
++    preview.next_offset === null &&
++    preview.items.length === preview.total &&
++    preview.items.some((item) => item.record_id === target.current);
++  const unsupported = preview?.items.some((item) =>
++    /^(cmhp:|cmht:|cmhc:|cmhv:)/.test(item.record_id),
++  );
++  const eligible =
++    complete && !unsupported && preview?.unresolved_origin_count === 0;
++  if (!recordId && !pending && !storageError && !preview && !busy) return null;
++  return (
++    <section className="hub-card hub-governance" aria-label="忘记记忆">
++      <h2>{pending ? "核对忘记操作" : "忘记的影响范围"}</h2>
++      <p>
++        忘记会停止自动使用和再次自动提炼这些内容；原始历史仍可按 ID
++        主动查阅。已经发送给 Agent 的内容无法撤回。
++      </p>
++      {storageError ? (
++        <p role="alert">
++          浏览器无法保留或读取操作回执。当前未发起新的操作，请先恢复此站点的会话存储，再核对原操作。
++        </p>
++      ) : (
++        <>
++          {pending ? (
++            <>
++              <p>
++                原操作涉及 {pending.memoryCount} 条记忆和 {pending.rawCount}{" "}
++                条原文。结果尚未确认，不会另建请求。
++              </p>
++              <p>
++                操作编号：<code>{pending.request.operation_id}</code>
++              </p>
++              <R6Button pending={busy} onClick={() => void execute(pending)}>
++                核对并继续原操作
++              </R6Button>
++              {changed && (
++                <R6Button disabled={busy} onClick={restart}>
++                  重新预览并确认
++                </R6Button>
++              )}
++            </>
++          ) : (
++            <>
++              {busy && <p role="status">正在读取影响范围…</p>}
++              {preview && (
++                <>
++                  <p>
++                    影响 {preview.memory_count} 条记忆、{preview.raw_count}{" "}
++                    条原文；已展示 {preview.items.length} / {preview.total} 项。
++                  </p>
++                  <ul className="hub-impact-list">
++                    {preview.items.map((item) => (
++                      <li key={item.record_id}>
++                        <strong>
++                          {item.kind === "memory" ? "记忆" : "原文"} ·{" "}
++                          {item.reasons
++                            .map((reason) => reasons[reason])
++                            .join("、")}
++                        </strong>
++                        <p>
++                          {item.content}
++                          {item.content_truncated ? "…（预览已截短）" : ""}
++                        </p>
++                        <small>
++                          {item.proposed_effect === "retain_for_explicit_read"
++                            ? "保留原文供主动查阅"
++                            : "停止自动使用"}
++                        </small>
++                      </li>
++                    ))}
++                  </ul>
++                  {preview.next_offset !== null && (
++                    <R6Button
++                      disabled={busy}
++                      onClick={() => void load(preview)}
++                    >
++                      继续查看影响范围
++                    </R6Button>
++                  )}
++                  {unsupported && (
++                    <p role="alert">
++                      范围内包含暂不支持忘记的工作或编程记录，不能继续执行。
++                    </p>
++                  )}
++                  {preview.unresolved_origin_count > 0 && (
++                    <p role="alert">
++                      有 {preview.unresolved_origin_count}{" "}
++                      条记忆缺少来源证明，暂时不能执行。
++                    </p>
++                  )}
++                  <p>
++                    此预览是当前观察结果。确认后服务会重新校验范围和执行条件；条件不足时会拒绝，不会显示为完成。
++                  </p>
++                  <label>
++                    <input
++                      type="checkbox"
++                      checked={confirmed}
++                      disabled={!eligible || busy}
++                      onChange={(event) => setConfirmed(event.target.checked)}
++                    />
++                    我已查看全部影响范围，同意停止自动使用这些内容。
++                  </label>
++                  <R6Button
++                    variant="primary"
++                    disabled={!eligible || !confirmed || busy}
++                    onClick={() => void execute()}
++                  >
++                    确认忘记
++                  </R6Button>
++                </>
++              )}
++              {!preview && !busy && (
++                <R6Button onClick={() => void load()}>重新预览</R6Button>
++              )}
++              <R6Button variant="quiet" disabled={busy} onClick={onClose}>
++                取消
++              </R6Button>
++            </>
++          )}
++          {error && <p role="alert">{error}</p>}
++        </>
++      )}
++      <p>
++        彻底删除还会清除 Hub
++        内的相关正文。当前预览尚不能证明所有副本可清理，网页暂不提供此操作。
++      </p>
++    </section>
++  );
++}
+diff --git a/memhub/apps/web/src/SdkMemoryLibrary.tsx b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+index 60d89a3b522758b29acef5217c0a4220952c5c28..1ca846c35909e50cb459da237a28cd9c956c223b 100644
+--- a/memhub/apps/web/src/SdkMemoryLibrary.tsx
++++ b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+@@ -1,5 +1,11 @@
+ import type { SdkMemoryRecord, SdkMemoryStatus } from "@one-memory/contracts";
+-import { useCallback, useEffect, useRef, useState } from "react";
++import {
++  type ReactNode,
++  useCallback,
++  useEffect,
++  useRef,
++  useState,
++} from "react";
+ import {
+   deleteSdkMemory,
+   getSdkMemory,
+@@ -32,6 +38,7 @@ export function SdkMemoryLibrary({
+   focusedMemoryId,
+   reader,
+   detailOnly = false,
++  renderActions,
+ }: {
+   active: boolean;
+   onChanged?(): void;
+@@ -39,6 +46,7 @@ export function SdkMemoryLibrary({
+   /** Scope-bound, read-only Hub adapter. The owner remounts on project changes. */
+   reader?: MemoryLibraryReader;
+   detailOnly?: boolean;
++  renderActions?(memory: LibraryMemory): ReactNode;
+ }) {
+   const [status, setStatus] = useState<SdkMemoryStatus>("active");
+   const [offset, setOffset] = useState(0);
+@@ -311,6 +319,7 @@ export function SdkMemoryLibrary({
+               继续读取
+             </R6Button>
+           )}
++          {renderActions?.(selected)}
+         </aside>
+       ) : null}
+     </section>
+diff --git a/memhub/apps/web/src/hub-console.css b/memhub/apps/web/src/hub-console.css
+index 2a0cc04740a0391d78a8743efa65258aab6b9cb4..5990688155d24e4e24cfe4e9fd2dfc560697498f 100644
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -114,3 +114,15 @@
+     margin: 8px 0 0;
+   }
+ }
++
++.hub-governance label {
++  display: block;
++  margin: 1rem 0;
++}
++.hub-governance code {
++  overflow-wrap: anywhere;
++}
++.hub-impact-list li {
++  padding: 1rem 0;
++  border-bottom: 1px solid var(--border, #d9e2e8);
++}
+diff --git a/memhub/apps/web/src/hub-governance.ts b/memhub/apps/web/src/hub-governance.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce7868cafd63389912bbffe2cb922d5e2a1edca7
+--- /dev/null
++++ b/memhub/apps/web/src/hub-governance.ts
+@@ -0,0 +1,259 @@
++/** Existing Hub governance contract; observations are never execution authority. */
++export interface ForgetItem {
++  record_id: string;
++  kind: "memory" | "raw";
++  layer: string;
++  status: string;
++  content: string;
++  content_truncated: boolean;
++  reasons: string[];
++  unresolved_origin: boolean;
++  proposed_effect: "retain_for_explicit_read" | "suppress_automatic_use";
++}
++export interface ForgetPreview {
++  scope_id: string;
++  action: "forget";
++  view_digest: string;
++  execution_available: boolean;
++  total: number;
++  raw_count: number;
++  memory_count: number;
++  unresolved_origin_count: number;
++  items: ForgetItem[];
++  next_offset: number | null;
++}
++export interface ForgetRequest {
++  scope_id: string;
++  action: "forget";
++  record_ids: [string];
++  expected_view: string;
++  operation_id: string;
++}
++export interface PendingForget {
++  version: 1;
++  instance: string;
++  request: ForgetRequest;
++  total: number;
++  memoryCount: number;
++  rawCount: number;
++}
++export interface ForgetResult {
++  operation_id: string;
++  scope_id: string;
++  action: "forget";
++  state: "completed";
++  suppressed_count: number;
++}
++const messages: Record<string, string> = {
++  governance_preview_changed:
++    "影响范围已变化，本次尚未执行。请重新预览后再确认。",
++  governance_selection_not_found: "这条记忆已不可处理，请刷新当前项目。",
++  governance_scope_not_found: "当前项目已不存在，请重新选择项目。",
++  governance_reference_unresolved: "部分来源关系不完整，暂时无法确认影响范围。",
++  governance_forget_kind_unsupported:
++    "影响范围包含暂不支持忘记的工作或编程记录。",
++  governance_derivation_unmodeled:
++    "当前项目有尚未覆盖的派生记录，服务暂不能执行忘记。",
++  governance_preview_busy: "服务正在检查其他记录，请稍后重新预览。",
++  administrator_required: "管理员登录已失效，请重新登录后继续。",
++  authentication_required: "管理员登录已失效，请重新登录后继续。",
++  origin_required: "请从已配置的 Hub 管理地址打开页面后重试。",
++};
++export class GovernanceError extends Error {
++  constructor(readonly code: string) {
++    super(
++      messages[code] ??
++        "服务未确认操作结果。请保留此页面并核对原操作，不要重复创建请求。",
++    );
++  }
++}
++const recordPattern = /^[A-Za-z0-9_:-]{1,200}$/;
++const digestPattern = /^[0-9a-f]{64}$/;
++const uuidPattern =
++  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
++function invalid(): never {
++  throw new GovernanceError("invalid_response");
++}
++function object(value: unknown): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
++  return value as Record<string, unknown>;
++}
++function count(value: unknown): value is number {
++  return (
++    Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 20_000
++  );
++}
++async function request(path: string, body: unknown, signal?: AbortSignal) {
++  const response = await fetch(`/hub/v1/governance/${path}`, {
++    method: "POST",
++    credentials: "same-origin",
++    cache: "no-store",
++    headers: { "Content-Type": "application/json" },
++    body: JSON.stringify(body),
++    signal,
++  });
++  if (!response.ok) {
++    let code: unknown;
++    try {
++      code = object(await response.json()).detail;
++    } catch {
++      /* Do not echo response bodies. */
++    }
++    throw new GovernanceError(
++      typeof code === "string" && code in messages ? code : "request_failed",
++    );
++  }
++  try {
++    return object(await response.json());
++  } catch {
++    return invalid();
++  }
++}
++export async function previewForget(
++  scope: string,
++  id: string,
++  offset = 0,
++  expectedView?: string,
++  signal?: AbortSignal,
++): Promise<ForgetPreview> {
++  const row = await request(
++    "preview",
++    {
++      scope_id: scope,
++      action: "forget",
++      record_ids: [id],
++      offset,
++      limit: 50,
++      ...(expectedView ? { expected_view: expectedView } : {}),
++    },
++    signal,
++  );
++  if (
++    row.scope_id !== scope ||
++    row.action !== "forget" ||
++    typeof row.view_digest !== "string" ||
++    !digestPattern.test(row.view_digest) ||
++    (expectedView && row.view_digest !== expectedView) ||
++    row.consistency !== "observational" ||
++    row.coverage !== "explicit_stored_relations" ||
++    row.content_trust !== "untrusted_history" ||
++    typeof row.execution_available !== "boolean" ||
++    !count(row.total) ||
++    !count(row.raw_count) ||
++    !count(row.memory_count) ||
++    row.raw_count + row.memory_count !== row.total ||
++    !count(row.unresolved_origin_count) ||
++    row.unresolved_origin_count > row.memory_count ||
++    !Array.isArray(row.items) ||
++    row.items.length > 50
++  )
++    invalid();
++  const end = offset + row.items.length;
++  if (
++    end > row.total ||
++    row.next_offset !== (end < row.total ? end : null) ||
++    (end < row.total && end === offset)
++  )
++    invalid();
++  const ids = new Set<string>();
++  for (const value of row.items) {
++    const item = object(value);
++    if (
++      typeof item.record_id !== "string" ||
++      !recordPattern.test(item.record_id) ||
++      ids.has(item.record_id) ||
++      !["memory", "raw"].includes(String(item.kind)) ||
++      typeof item.layer !== "string" ||
++      typeof item.status !== "string" ||
++      typeof item.content !== "string" ||
++      [...item.content].length > 512 ||
++      typeof item.content_truncated !== "boolean" ||
++      typeof item.unresolved_origin !== "boolean" ||
++      !Array.isArray(item.reasons) ||
++      !item.reasons.every((reason) =>
++        ["selected", "evolution", "source", "derived"].includes(reason),
++      ) ||
++      item.proposed_effect !==
++        (item.kind === "raw"
++          ? "retain_for_explicit_read"
++          : "suppress_automatic_use")
++    )
++      invalid();
++    ids.add(item.record_id);
++  }
++  return row as unknown as ForgetPreview;
++}
++export function appendPreview(
++  previous: ForgetPreview,
++  page: ForgetPreview,
++): ForgetPreview {
++  if (
++    [
++      "scope_id",
++      "view_digest",
++      "total",
++      "raw_count",
++      "memory_count",
++      "unresolved_origin_count",
++    ].some(
++      (key) =>
++        previous[key as keyof ForgetPreview] !==
++        page[key as keyof ForgetPreview],
++    )
++  )
++    invalid();
++  const items = [...previous.items, ...page.items];
++  if (
++    new Set(items.map((item) => item.record_id)).size !== items.length ||
++    items.length > page.total
++  )
++    invalid();
++  return { ...page, items };
++}
++export async function executeForget(
++  pending: PendingForget,
++  signal?: AbortSignal,
++): Promise<ForgetResult> {
++  const row = await request("execute", pending.request, signal);
++  if (
++    row.scope_id !== pending.request.scope_id ||
++    row.action !== "forget" ||
++    row.operation_id !== pending.request.operation_id ||
++    row.state !== "completed" ||
++    row.suppressed_count !== pending.total
++  )
++    invalid();
++  return row as unknown as ForgetResult;
++}
++export function pendingKey(instance: string, scope: string) {
++  return `cmh-forget:${encodeURIComponent(instance)}:${encodeURIComponent(scope)}`;
++}
++export function readPending(
++  instance: string,
++  scope: string,
++): PendingForget | null {
++  const serialized = sessionStorage.getItem(pendingKey(instance, scope));
++  if (!serialized) return null;
++  const value = object(JSON.parse(serialized));
++  const request = object(value.request);
++  if (
++    value.version !== 1 ||
++    value.instance !== instance ||
++    request.scope_id !== scope ||
++    request.action !== "forget" ||
++    !Array.isArray(request.record_ids) ||
++    request.record_ids.length !== 1 ||
++    typeof request.record_ids[0] !== "string" ||
++    !recordPattern.test(request.record_ids[0]) ||
++    typeof request.expected_view !== "string" ||
++    !digestPattern.test(request.expected_view) ||
++    typeof request.operation_id !== "string" ||
++    !uuidPattern.test(request.operation_id) ||
++    !count(value.total) ||
++    !count(value.memoryCount) ||
++    !count(value.rawCount) ||
++    value.rawCount + value.memoryCount !== value.total
++  )
++    invalid();
++  return value as unknown as PendingForget;
++}
