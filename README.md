@@ -4,11 +4,11 @@
 
 **当前阶段：G2 MVP 实现与接入验收。通用 MCP、CLI 和可安装 Skill 已实现，完整产品尚未发布。**
 
-当前主线按用户确认收敛为多设备共享记忆、通用接入和任务交接。Agent 保存的记忆更新可直接读取；交接正文可按 ID 在另一端接续，无需等待 NAS 模型提炼。接入配置见 [Agent 使用说明](docs/agent-access.md)，实际范围见[本轮验证记录](docs/reviews/2026-11-10-agent-access-mvp.md)。
+当前主线按用户确认收敛为多设备共享记忆、通用接入和任务交接。Agent 保存的记忆更新可直接读取；交接正文可按 ID 在另一端接续，无需等待 NAS 模型提炼。接入配置见 [Agent 使用说明](docs/agent-access.md)，最新结果见[两台 Mac 验收记录](docs/reviews/2026-11-10-two-host-mvp.md)。
 
-同一镜像在本地与 NAS 的安装探针各通过 6 项，覆盖共享原文、完整交接、项目隔离和离线重试；使用的是合成设备身份，尚不代表两台 Mac 或实际 Agent 自动调用通过。NAS 新独立 MVP 实例健康，旧验证实例保持不变。Tailscale Serve 尚未开启，第二台 Mac mini 待联机；Codex 桌面隔离启动失败，桌面 MCP 与下一轮读取证据仍缺失。这些 G1 遗留项单列为接入风险，G2 继续推进，见[路线图](docs/roadmap.md)与[六入口能力清单](docs/research/g1-client-capabilities.md)。
+MacBook 与 Mac mini 已分别安装客户端，使用独立设备、来源和队列访问同一 NAS 项目。Tailscale HTTPS 入口、两端证书校验和授权读取通过；真实两机 MCP 探针 **7/7 通过**，覆盖双向写读、同连接更新、幂等与约 8 KiB 完整交接。NAS 新 MVP 服务健康，旧验证服务未变；该结果不等于实际 Agent 模型自主调用通过。
 
-Mac 客户端已完成干净源码安装验证；真实 Claude CLI 已实际调用 MCP 保存、读取与交接，并在同一会话下一轮读到另一身份的新更新。该验证使用本地模型替身固定选择工具，未代替日常模型或两台实体 Mac 验收，见上述记录。
+此前[安装与 Claude 接入验证](docs/reviews/2026-11-10-agent-access-mvp.md)已覆盖干净源码安装，以及真实 Claude CLI 在本地模型替身驱动下的同会话下一轮读取。用户授权后，两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装，原有配置保留并已备份；真实 Agent 自主调用及 Codex 桌面调用仍未验证。宿主风险继续单列，见[路线图](docs/roadmap.md)与[六入口能力清单](docs/research/g1-client-capabilities.md)。
 
 管理入口继续复用固定版本的 MemHub Core 和管理网页。完整自动采集、离线读取缓存、历史导入及删除传播仍在开发，外部模型未启用；当前不应导入真实历史或用作唯一记忆存储。旧日志治理等系统性完善后置，以下前序记录保留各自当时的验证范围。
 
