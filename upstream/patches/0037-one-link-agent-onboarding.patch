@@ -216,6 +216,43 @@ diff --git a/memhub/apps/web/src/HubConsole.test.tsx b/memhub/apps/web/src/HubCo
    expect(
      (screen.getByRole("combobox", { name: "当前项目" }) as HTMLSelectElement)
        .value,
+@@ -573,7 +573,11 @@
+
+ it("offers an ordered first-use guide and model navigation without creating another project", async () => {
+   render(<HubConsole />);
+-  await screen.findByRole("region", { name: "开始使用" });
++  const guide = await screen.findByRole("region", { name: "开始使用" });
++  expect(guide.textContent).toContain("一次性链接");
++  expect(guide.textContent).toContain("MCP 与 Skill");
++  expect(guide.textContent).toContain("无需安装独立 App");
++  expect(guide.textContent).not.toMatch(/配对文件|连接组件|每台 Mac/);
+   expect(screen.getByText(/你已经有项目了/)).toBeTruthy();
+   expect(screen.queryByRole("button", { name: "创建第一个项目" })).toBeNull();
+   expect(screen.getByRole("button", { name: "创建另一个项目" })).toBeTruthy();
+@@ -590,6 +594,14 @@
+
+ it("guides an empty project to its real scoped history without calling it shared", async () => {
+   fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (url.endsWith("summary"))
++      return handler(url, init).then(async (response) =>
++        Response.json({
++          ...(await response.json()),
++          sources: [],
++          sources_total: 0,
++        }),
++      );
+     if (url.endsWith("memory-list")) {
+       const body = JSON.parse(String(init?.body));
+       return Promise.resolve(
+@@ -603,6 +615,8 @@
+   render(<HubConsole />);
+   await select();
+   await screen.findByText("当前项目尚无可显示的记忆。");
++  expect(await screen.findByText(/先为第一台设备生成一次性链接/)).toBeTruthy();
++  expect(screen.queryByText(/配对文件|连接组件/)).toBeNull();
+   expect(
+     screen.getByText("请用 Cloud Memory Hub 记住：这是我的第一次共享测试。"),
+   ).toBeTruthy();
 diff --git a/memhub/apps/web/src/HubAgentConnect.tsx b/memhub/apps/web/src/HubAgentConnect.tsx
 new file mode 100644
 --- /dev/null
@@ -1498,3 +1535,30 @@ new file mode 100644
 +    expect(fetcher).not.toHaveBeenCalled();
 +  },
 +);
+diff --git a/memhub/apps/web/src/HubConsole.tsx b/memhub/apps/web/src/HubConsole.tsx
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -502,7 +502,10 @@
+             </ul>
+             {!summary.sources.length && (
+               <>
+-                <p>还没有为这个项目连接设备。先为第一台 Mac 准备配对文件。</p>
++                <p>
++                  还没有为这个项目连接设备。先为第一台设备生成一次性链接，再按页面指引连接
++                  Agent。
++                </p>
+                 <R6Button onClick={() => onNavigate("connections")}>
+                   连接第一台设备
+                 </R6Button>
+@@ -572,8 +575,9 @@
+         <li>
+           <strong>连接第一台设备</strong>
+           <p>
+-            为每台 Mac 下载各自的配对文件，再按指引安装连接组件并连接你的 AI
+-            应用。
++            在「项目与设备接入」中为每台设备生成一次性链接，把页面提供的一句话交给
++            Agent，或在对应电脑运行一条命令，配置 MCP 与 Skill。无需安装独立
++            App。
+           </p>
+         </li>
+         <li>
