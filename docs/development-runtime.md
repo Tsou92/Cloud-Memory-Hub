@@ -45,6 +45,28 @@ docker compose exec hub cat /config/admin-token
 - 配置密钥丢失会导致加密凭证无法读取。候选 Compose 增加独立 `hub_backups` 卷与容器内调度，默认关闭；配置方法见[备份与恢复](backup-and-recovery.md)。新镜像默认 `supervise`，显式 `serve` 仍可用但不执行定时备份。已有自定义 Compose 需要增加 `/backups` 可写私有挂载。全量归档导入、保留当前安全授权与治理的同实例历史回滚、损坏归档拒绝和一次真实进程中断恢复已有 NAS 合成数据证据；断电、硬盘故障、全部中断位置及最终发行包仍未验，不能据此承诺任意灾难恢复。
 - 初始化中断后不要直接删除既有凭证重试；先检查配置卷并保留副本，避免覆盖已经使用的密钥。
 
+## 已有实例升级（保持配置和身份）
+
+以下顺序复用已实现的冷备份与容器入口；最终候选在日常 NAS 上的升级、原 MCP 读回和失败回退联合验收仍待完成。仅适用于当前存储格式相容的版本；需要治理或原文迁移的旧实例，先按下文对应迁移说明处理，不能用换镜像绕过版本检查。
+
+先校验候选镜像的下载摘要、Linux amd64 平台和 `org.opencontainers.image.revision`，保留旧镜像。在私有目录保存原 Compose、`.env` 和实际三个卷名，记录旧版本；不要公开这些配置。沿用原 Compose 项目名、原 data/config/governance 卷、HTTPS Origin、端口和资源限制，不运行 `setup` 或 `init`。
+
+将 `.env` 的 `CMH_IMAGE` 改为已核验的固定候选镜像。已有 Compose 还需按本仓库配置为 `hub` 增加独立 `/backups` 挂载；目标目录须为运行用户 `1000:1000` 拥有、权限 `0700`。使用默认 `supervise`，移除已有的 `command: ["serve"]` 覆盖或明确改成 `command: ["supervise"]`。不要把备份放入运行三卷内，也不要更名或新建三业务卷来代替升级。
+
+停止原 Hub 和所有挂载同一三卷的写者后，用候选镜像创建并完整检查升级前版本。此命令也适用于尚无备份调度器的旧镜像；备份实现来自候选镜像，数据与身份来自原卷：
+
+```sh
+set -eu
+docker compose stop hub
+docker compose run --rm --no-deps --entrypoint /opt/cmh/venv/bin/python hub -c 'import json, os; from pathlib import Path; from cloud_memory_hub.config import HubConfig; from cloud_memory_hub.backup_store import create_backup, inspect_backup; root = Path("/backups"); result = create_backup(HubConfig.from_environment(), root, revision=os.environ["CMH_REVISION"]); checked = inspect_backup(root / result["backup_id"]); print(json.dumps({key: checked[key] for key in ("backup_id", "created_at", "file_count", "total_bytes")}))'
+docker compose up -d --no-build hub
+docker compose ps hub
+```
+
+备份或校验失败时停在该步骤，保留原卷和已有版本，不继续切换。保存成功返回的备份 ID；启动后核对健康、网页实际 revision、原实例身份和项目权限，再通过原有 MCP 配置读取已知记录或交接，不能只凭首页或容器处于 running 判成功。管理员和模型密钥无需重新填写，客户端不重新配对。备份计划默认关闭，升级验收后按[备份与恢复](backup-and-recovery.md)启用所需周期。
+
+升级失败不自动恢复旧镜像或覆盖数据。先停止候选并保留失败现场；只有确认没有恢复未完成标记、没有不兼容迁移且旧版能读取当前格式时，才恢复原 Compose／`.env` 并显式启动旧镜像，继续使用当前三卷。需要回退业务内容时使用[同实例历史回滚](backup-and-recovery.md#同实例历史回滚)，保留较新的设备安全状态和治理记录。发现 `.cmh-restore-incomplete.json` 时保持停服，按该指南处理，不能切换到不认识标记的旧程序强行启动。
+
 ## 已有实验实例的治理迁移
 
 当前开发版本要求设备权威库版本 3、主治理日志版本 2 及独立准入日志，旧实例不会在普通启动时自动迁移。先停止 Hub，确认旧容器已经退出，并完整备份现有 config/data/governance 三卷；保存原镜像标签、Compose 配置及校验值。然后使用本轮镜像与包含治理卷的新 Compose 文件执行：
