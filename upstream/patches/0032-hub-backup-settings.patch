@@ -1,0 +1,1455 @@
+diff --git a/memhub/apps/web/src/HubBackups.test.tsx b/memhub/apps/web/src/HubBackups.test.tsx
+new file mode 100644
+index 0000000..237e608
+--- /dev/null
++++ b/memhub/apps/web/src/HubBackups.test.tsx
+@@ -0,0 +1,320 @@
++// @vitest-environment jsdom
++import {
++  act,
++  cleanup,
++  fireEvent,
++  render,
++  screen,
++  waitFor,
++} from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { HubBackups } from "./HubBackups";
++import type { BackupStatus } from "./hub-backups";
++
++const id = "11111111-1111-4111-8111-111111111111";
++const versionId =
++  "cmh-backup-20261110T120000000000Z-11111111111111111111111111111111";
++const timestamp = "2026-11-10T12:00:00+00:00";
++let state: BackupStatus;
++let versions: unknown[];
++let fetcher: ReturnType<typeof vi.fn>;
++let requestFailure: "none" | "lost" | "forbidden";
++let statusFailure: boolean;
++let versionFailure: boolean;
++const requests = (path: string, method?: string) =>
++  fetcher.mock.calls.filter(
++    ([url, init]) =>
++      String(url).endsWith(path) && (!method || init.method === method),
++  );
++
++beforeEach(() => {
++  state = {
++    schedule: {
++      schema_version: 1,
++      enabled: true,
++      interval_minutes: 1440,
++      keep: 7,
++      configured_at: timestamp,
++    },
++    execution: { schema_version: 1, state: "not_run" },
++    next_due_at: timestamp,
++    pending_request: null,
++    supervisor_running: "not_checked",
++  };
++  versions = [];
++  requestFailure = "none";
++  statusFailure = false;
++  versionFailure = false;
++  fetcher = vi
++    .fn()
++    .mockImplementation(async (url: string, init: RequestInit) => {
++      if (url.endsWith("status"))
++        return Response.json(
++          statusFailure ? { detail: "backup_control_unavailable" } : state,
++          { status: statusFailure ? 503 : 200 },
++        );
++      if (url.endsWith("versions"))
++        return Response.json(
++          versionFailure ? { detail: "backup_storage_in_use" } : { versions },
++          { status: versionFailure ? 503 : 200 },
++        );
++      if (url.endsWith("schedule")) {
++        state = {
++          ...state,
++          schedule: {
++            schema_version: 1,
++            ...JSON.parse(String(init.body)),
++            configured_at: timestamp,
++          },
++        };
++        if (requestFailure === "lost")
++          throw new TypeError("synthetic lost write");
++        return Response.json(state.schedule);
++      }
++      if (url.endsWith("request")) {
++        if (requestFailure === "forbidden")
++          return Response.json(
++            { detail: "administrator_required" },
++            { status: 403 },
++          );
++        if (requestFailure === "lost")
++          throw new TypeError("synthetic lost request");
++        state = { ...state, pending_request: id };
++        return Response.json(
++          {
++            status: "queued",
++            schema_version: 1,
++            request_id: id,
++            requested_at: timestamp,
++          },
++          { status: 202 },
++        );
++      }
++      throw new Error("unexpected synthetic route");
++    });
++  vi.stubGlobal("fetch", fetcher);
++});
++afterEach(() => {
++  cleanup();
++  vi.useRealTimers();
++  vi.unstubAllGlobals();
++});
++
++async function ready() {
++  await waitFor(() =>
++    expect(
++      (
++        screen.getByRole("button", {
++          name: "请求一次备份",
++        }) as HTMLButtonElement
++      ).disabled,
++    ).toBe(false),
++  );
++}
++
++it("saves actual plan edits and sends exactly one queued-only request", async () => {
++  const user = userEvent.setup();
++  render(<HubBackups />);
++  await ready();
++  expect(screen.getByText(/备份时记忆服务会短暂停止/)).toBeTruthy();
++  expect(screen.getByText(/网页恢复和完整导出入口尚未完成/)).toBeTruthy();
++  expect(screen.queryByRole("button", { name: "恢复" })).toBeNull();
++  await user.clear(screen.getByLabelText("备份周期（分钟）"));
++  await user.type(screen.getByLabelText("备份周期（分钟）"), "60");
++  await user.click(screen.getByRole("switch", { name: "启用定期备份" }));
++  await user.click(screen.getByRole("button", { name: "保存备份计划" }));
++  expect(await screen.findByText(/备份计划已保存/)).toBeTruthy();
++  expect(JSON.parse(requests("schedule", "PUT")[0][1].body)).toEqual({
++    enabled: false,
++    interval_minutes: 60,
++    keep: 7,
++  });
++  await user.click(screen.getByRole("button", { name: "请求一次备份" }));
++  expect(
++    await screen.findByText(/备份请求已排队，尚未确认开始或完成/),
++  ).toBeTruthy();
++  expect(requests("request", "POST")).toHaveLength(1);
++  expect(
++    (screen.getByRole("button", { name: "请求一次备份" }) as HTMLButtonElement)
++      .disabled,
++  ).toBe(true);
++  expect(screen.queryByText("最近一次备份生成完成")).toBeNull();
++  expect(localStorage.length).toBe(0);
++});
++
++it("does not overwrite unsaved fields on status refresh", async () => {
++  const user = userEvent.setup();
++  render(<HubBackups />);
++  await ready();
++  await user.clear(screen.getByLabelText("保留版本数量"));
++  await user.type(screen.getByLabelText("保留版本数量"), "12");
++  state = { ...state, schedule: { ...state.schedule, keep: 2 } };
++  await user.click(screen.getByRole("button", { name: "刷新备份状态" }));
++  await waitFor(() => expect(requests("status")).toHaveLength(2));
++  expect(
++    (screen.getByLabelText("保留版本数量") as HTMLInputElement).value,
++  ).toBe("12");
++  expect(screen.getByText(/有尚未保存的修改/)).toBeTruthy();
++});
++
++it("keeps confirmed status and versions marked stale after a 503", async () => {
++  versions = [
++    {
++      backup_id: versionId,
++      state: "unverified",
++      created_at: timestamp,
++      revision: "synthetic-1",
++      file_count: 10,
++      total_bytes: 100,
++    },
++  ];
++  const user = userEvent.setup();
++  render(<HubBackups />);
++  await ready();
++  await user.click(screen.getByRole("button", { name: "刷新版本列表" }));
++  expect(await screen.findByText("已生成，恢复前完整校验")).toBeTruthy();
++  expect(
++    screen.getByText(/未经重新校验，不代表当前文件完整或可恢复/),
++  ).toBeTruthy();
++  expect(screen.queryByText("已校验")).toBeNull();
++  statusFailure = true;
++  versionFailure = true;
++  await user.click(screen.getByRole("button", { name: "刷新备份状态" }));
++  await user.click(screen.getByRole("button", { name: "刷新版本列表" }));
++  expect(await screen.findByText(/上次确认，可能已过时/)).toBeTruthy();
++  expect(
++    await screen.findByText(/列表为上次确认结果，可能已过时/),
++  ).toBeTruthy();
++  expect(screen.getByText("已生成，恢复前完整校验")).toBeTruthy();
++  expect(screen.queryByText("尚未发现备份清单。")).toBeNull();
++  expect(
++    (screen.getByRole("button", { name: "请求一次备份" }) as HTMLButtonElement)
++      .disabled,
++  ).toBe(true);
++});
++
++it("does not turn an initial unavailable version list into no backups", async () => {
++  versionFailure = true;
++  render(<HubBackups />);
++  await ready();
++  await userEvent.click(screen.getByRole("button", { name: "刷新版本列表" }));
++  expect(await screen.findByText(/尚未取得版本列表/)).toBeTruthy();
++  expect(screen.queryByText("尚未发现备份清单。")).toBeNull();
++});
++
++it("requires explicit status refresh and a new click after an unknown request", async () => {
++  const user = userEvent.setup();
++  render(<HubBackups />);
++  await ready();
++  requestFailure = "lost";
++  await user.click(screen.getByRole("button", { name: "请求一次备份" }));
++  expect(await screen.findByText(/备份请求结果未知/)).toBeTruthy();
++  expect(requests("request", "POST")).toHaveLength(1);
++  expect(
++    (screen.getByRole("button", { name: "请求一次备份" }) as HTMLButtonElement)
++      .disabled,
++  ).toBe(true);
++  requestFailure = "none";
++  await user.click(screen.getByRole("button", { name: "刷新备份状态" }));
++  await ready();
++  expect(requests("request", "POST")).toHaveLength(1);
++  await user.click(screen.getByRole("button", { name: "请求一次备份" }));
++  expect(await screen.findByText(/备份请求已排队/)).toBeTruthy();
++  expect(requests("request", "POST")).toHaveLength(2);
++});
++
++it("keeps unsaved schedule fields after an unknown save and never repeats PUT", async () => {
++  render(<HubBackups />);
++  await ready();
++  fireEvent.change(screen.getByLabelText("保留版本数量"), {
++    target: { value: "12" },
++  });
++  requestFailure = "lost";
++  await userEvent.click(screen.getByRole("button", { name: "保存备份计划" }));
++  expect(await screen.findByText(/计划保存结果未知/)).toBeTruthy();
++  expect(
++    (screen.getByLabelText("保留版本数量") as HTMLInputElement).value,
++  ).toBe("12");
++  await userEvent.click(screen.getByRole("button", { name: "刷新备份状态" }));
++  await ready();
++  expect(requests("schedule", "PUT")).toHaveLength(1);
++  expect(screen.getByText(/有尚未保存的修改/)).toBeTruthy();
++});
++
++it("offers relogin on forbidden mutation and never claims it queued", async () => {
++  render(<HubBackups />);
++  await ready();
++  requestFailure = "forbidden";
++  await userEvent.click(screen.getByRole("button", { name: "请求一次备份" }));
++  expect(
++    await screen.findByText("管理员登录已失效，请重新登录。"),
++  ).toBeTruthy();
++  expect(screen.queryByText(/备份请求已排队/)).toBeNull();
++});
++
++it("polls only status and checks versions once per newly completed backup", async () => {
++  vi.useFakeTimers();
++  const view = render(<HubBackups />);
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(0);
++  });
++  expect(requests("status")).toHaveLength(1);
++  expect(requests("versions")).toHaveLength(0);
++  fireEvent.change(screen.getByLabelText("保留版本数量"), {
++    target: { value: "12" },
++  });
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(10000);
++  });
++  expect(requests("status")).toHaveLength(2);
++  expect(requests("versions")).toHaveLength(0);
++  state = {
++    ...state,
++    execution: {
++      schema_version: 1,
++      state: "completed",
++      last_backup_id: versionId,
++      last_success_at: timestamp,
++    },
++  };
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(10000);
++  });
++  expect(requests("versions")).toHaveLength(1);
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(30000);
++  });
++  expect(requests("versions")).toHaveLength(1);
++  expect(
++    (screen.getByLabelText("保留版本数量") as HTMLInputElement).value,
++  ).toBe("12");
++  view.rerender(<HubBackups active={false} />);
++  const count = requests("status").length;
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(30000);
++  });
++  expect(requests("status")).toHaveLength(count);
++});
++
++it("does not unlock an unknown POST through automatic polling", async () => {
++  vi.useFakeTimers();
++  render(<HubBackups />);
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(0);
++  });
++  requestFailure = "lost";
++  await act(async () => {
++    fireEvent.click(screen.getByRole("button", { name: "请求一次备份" }));
++    await vi.advanceTimersByTimeAsync(0);
++  });
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(30000);
++  });
++  expect(requests("request", "POST")).toHaveLength(1);
++  expect(screen.getByText(/备份请求结果未知/)).toBeTruthy();
++  expect(
++    (screen.getByRole("button", { name: "请求一次备份" }) as HTMLButtonElement)
++      .disabled,
++  ).toBe(true);
++});
+diff --git a/memhub/apps/web/src/HubBackups.tsx b/memhub/apps/web/src/HubBackups.tsx
+new file mode 100644
+index 0000000..0b0e9aa
+--- /dev/null
++++ b/memhub/apps/web/src/HubBackups.tsx
+@@ -0,0 +1,401 @@
++import { useCallback, useEffect, useRef, useState } from "react";
++import {
++  BackupControlError,
++  type BackupSchedule,
++  type BackupStatus,
++  type BackupVersion,
++  backupErrorMessage,
++  getBackupStatus,
++  getBackupVersions,
++  requestBackup,
++  saveBackupSchedule,
++} from "./hub-backups";
++import { R6Button, R6Field, R6Switch } from "./R6Controls";
++
++const stateLabels = {
++  not_run: "尚未运行",
++  running: "正在备份",
++  completed: "最近一次备份生成完成",
++  failed: "最近一次备份失败",
++  interrupted: "最近一次备份中断",
++};
++function date(value?: string | null) {
++  return value ? new Date(value).toLocaleString() : "暂无记录";
++}
++function formFor(plan: BackupSchedule) {
++  return {
++    enabled: plan.enabled,
++    interval: String(plan.interval_minutes ?? 1440),
++    keep: String(plan.keep ?? 7),
++  };
++}
++
++export function HubBackups({ active = true }: { active?: boolean }) {
++  const [status, setStatus] = useState<BackupStatus | null>(null);
++  const [versions, setVersions] = useState<BackupVersion[] | null>(null);
++  const [statusError, setStatusError] = useState("");
++  const [versionsError, setVersionsError] = useState("");
++  const [statusLoading, setStatusLoading] = useState(false);
++  const [versionsLoading, setVersionsLoading] = useState(false);
++  const [form, setForm] = useState(() =>
++    formFor({ schema_version: 1, enabled: false }),
++  );
++  const [dirty, setDirty] = useState(false);
++  const [writing, setWriting] = useState<"schedule" | "request" | null>(null);
++  const [unknown, setUnknown] = useState<"schedule" | "request" | null>(null);
++  const [message, setMessage] = useState("");
++  const [actionError, setActionError] = useState("");
++  const dirtyRef = useRef(false);
++  const writeBusy = useRef(false);
++  const statusBusy = useRef(false);
++  const versionsBusy = useRef(false);
++  const statusEpoch = useRef(0);
++  const statusAbort = useRef<AbortController | null>(null);
++  const versionsAbort = useRef<AbortController | null>(null);
++  const completedSeen = useRef<string | null>(null);
++  const pendingVersionRefresh = useRef(false);
++  const activeRef = useRef(active);
++
++  const refreshVersions = useCallback(async () => {
++    if (versionsBusy.current) {
++      pendingVersionRefresh.current = true;
++      return;
++    }
++    versionsBusy.current = true;
++    setVersionsLoading(true);
++    try {
++      do {
++        pendingVersionRefresh.current = false;
++        const controller = new AbortController();
++        versionsAbort.current = controller;
++        try {
++          const next = await getBackupVersions(controller.signal);
++          if (!controller.signal.aborted) {
++            setVersions(next);
++            setVersionsError("");
++          }
++        } catch (error) {
++          if (!controller.signal.aborted)
++            setVersionsError(backupErrorMessage(error));
++        }
++      } while (pendingVersionRefresh.current && activeRef.current);
++    } finally {
++      versionsBusy.current = false;
++      setVersionsLoading(false);
++    }
++  }, []);
++
++  const refreshStatus = useCallback(
++    async (manual = false) => {
++      if (statusBusy.current || writeBusy.current) return;
++      statusBusy.current = true;
++      setStatusLoading(true);
++      const epoch = ++statusEpoch.current;
++      const controller = new AbortController();
++      statusAbort.current = controller;
++      try {
++        const next = await getBackupStatus(controller.signal);
++        if (controller.signal.aborted || epoch !== statusEpoch.current) return;
++        setStatus(next);
++        setStatusError("");
++        if (!dirtyRef.current) setForm(formFor(next.schedule));
++        if (manual) {
++          setUnknown(null);
++          setActionError("");
++        }
++        if (
++          next.execution.state === "completed" &&
++          next.execution.last_backup_id &&
++          completedSeen.current !== next.execution.last_backup_id
++        ) {
++          completedSeen.current = next.execution.last_backup_id;
++          void refreshVersions();
++        }
++      } catch (error) {
++        if (!controller.signal.aborted && epoch === statusEpoch.current)
++          setStatusError(backupErrorMessage(error));
++      } finally {
++        statusBusy.current = false;
++        setStatusLoading(false);
++      }
++    },
++    [refreshVersions],
++  );
++
++  useEffect(() => {
++    activeRef.current = active;
++    if (!active) return;
++    void refreshStatus();
++    const timer = window.setInterval(() => {
++      void refreshStatus();
++    }, 10000);
++    return () => {
++      activeRef.current = false;
++      window.clearInterval(timer);
++      statusAbort.current?.abort();
++      versionsAbort.current?.abort();
++    };
++  }, [active, refreshStatus]);
++
++  function edit(changes: Partial<typeof form>) {
++    dirtyRef.current = true;
++    setDirty(true);
++    setForm((current) => ({ ...current, ...changes }));
++  }
++  function begin(kind: "schedule" | "request") {
++    if (writeBusy.current || unknown || !status || statusError) return false;
++    writeBusy.current = true;
++    statusEpoch.current++;
++    setWriting(kind);
++    setMessage("");
++    setActionError("");
++    return true;
++  }
++  function failed(error: unknown, kind: "schedule" | "request") {
++    setActionError(backupErrorMessage(error));
++    if (!(error instanceof BackupControlError) || error.outcomeUnknown)
++      setUnknown(kind);
++  }
++  async function save() {
++    const interval = Number(form.interval),
++      keep = Number(form.keep);
++    if (
++      !Number.isInteger(interval) ||
++      interval < 1 ||
++      interval > 525600 ||
++      !Number.isInteger(keep) ||
++      keep < 1 ||
++      keep > 365
++    ) {
++      setActionError("周期须为 1–525600 分钟，保留数量须为 1–365 个整数。");
++      return;
++    }
++    if (!begin("schedule")) return;
++    try {
++      const plan = await saveBackupSchedule({
++        enabled: form.enabled,
++        interval_minutes: interval,
++        keep,
++      });
++      dirtyRef.current = false;
++      setDirty(false);
++      setForm(formFor(plan));
++      setStatus((current) =>
++        current ? { ...current, schedule: plan, next_due_at: null } : current,
++      );
++      setMessage("备份计划已保存。调度器是否正在运行仍需由服务实际执行确认。");
++    } catch (error) {
++      failed(error, "schedule");
++    } finally {
++      writeBusy.current = false;
++      setWriting(null);
++    }
++  }
++  async function request() {
++    if (!begin("request")) return;
++    try {
++      const queued = await requestBackup();
++      setStatus((current) =>
++        current ? { ...current, pending_request: queued.request_id } : current,
++      );
++      setMessage("备份请求已排队，尚未确认开始或完成。请等待状态更新。");
++    } catch (error) {
++      failed(error, "request");
++    } finally {
++      writeBusy.current = false;
++      setWriting(null);
++    }
++  }
++  const disabled =
++    !status || Boolean(statusError) || writing !== null || unknown !== null;
++
++  return (
++    <div>
++      <p>
++        备份时记忆服务会短暂停止，客户端待传内容会保留并稍后补传。备份包含原文、模型密钥和设备配置，请私有保存；独立备份卷不等于异机备份。
++      </p>
++      <div className="r6-setting-row">
++        <div>
++          <h3>备份状态</h3>
++          <p>
++            {status ? stateLabels[status.execution.state] : "尚未读到备份状态"}
++            {statusError && status ? "（上次确认，可能已过时）" : ""}
++          </p>
++          {status && (
++            <>
++              <p>最近成功：{date(status.execution.last_success_at)}</p>
++              <p>
++                下次计划：
++                {status.schedule.enabled
++                  ? status.next_due_at
++                    ? date(status.next_due_at)
++                    : "等待刷新确认"
++                  : "定期备份未启用"}
++              </p>
++              {status.pending_request && (
++                <p>有备份请求等待处理；排队不代表已开始或完成。</p>
++              )}
++              {status.execution.error && (
++                <p>最近执行未能完成，请核对 NAS 服务和备份存储后重新请求。</p>
++              )}
++              {status.execution.retention_error && (
++                <p>备份已保留，但旧版本清理未完成，请检查存储状态。</p>
++              )}
++              <p>调度器在线状态尚未核实。</p>
++            </>
++          )}
++          {statusError && (
++            <p role="alert" className="r6-settings-error">
++              {statusError}
++            </p>
++          )}
++        </div>
++        <R6Button
++          pending={statusLoading}
++          disabled={writing !== null}
++          onClick={() => void refreshStatus(true)}
++        >
++          刷新备份状态
++        </R6Button>
++      </div>
++      <form
++        onSubmit={(event) => {
++          event.preventDefault();
++          void save();
++        }}
++      >
++        <div className="r6-setting-row">
++          <div>
++            <h3>定期备份</h3>
++            <p>按设定周期生成完整版本，仅清理经过校验的旧版本。</p>
++          </div>
++          <R6Switch
++            label="启用定期备份"
++            checked={form.enabled}
++            disabled={disabled}
++            onCheckedChange={(enabled) => edit({ enabled })}
++          />
++        </div>
++        <div className="r6-model-actions">
++          <R6Field
++            label="备份周期（分钟）"
++            type="number"
++            min={1}
++            max={525600}
++            step={1}
++            required
++            value={form.interval}
++            disabled={disabled}
++            onChange={(event) => edit({ interval: event.target.value })}
++          />
++          <R6Field
++            label="保留版本数量"
++            type="number"
++            min={1}
++            max={365}
++            step={1}
++            required
++            value={form.keep}
++            disabled={disabled}
++            onChange={(event) => edit({ keep: event.target.value })}
++          />
++        </div>
++        <p>
++          {dirty
++            ? "有尚未保存的修改，刷新不会覆盖当前表单。"
++            : "表单显示最近确认的计划。"}
++        </p>
++        <R6Button
++          type="submit"
++          variant="primary"
++          disabled={disabled || !dirty}
++          pending={writing === "schedule"}
++        >
++          保存备份计划
++        </R6Button>
++      </form>
++      <div className="r6-setting-row">
++        <div>
++          <h3>手动备份</h3>
++          <p>提交一次备份请求，由后台调度器处理；执行期间服务会短暂停止。</p>
++        </div>
++        <R6Button
++          disabled={
++            disabled ||
++            Boolean(status?.pending_request) ||
++            status?.execution.state === "running"
++          }
++          pending={writing === "request"}
++          onClick={() => void request()}
++        >
++          请求一次备份
++        </R6Button>
++      </div>
++      {message && <p role="status">{message}</p>}
++      {actionError && (
++        <p role="alert" className="r6-settings-error">
++          {actionError}
++        </p>
++      )}
++      {unknown && (
++        <p role="alert">
++          {unknown === "request" ? "备份请求" : "计划保存"}
++          结果未知，可能已写入。请先点击“刷新备份状态”核对；刷新成功后才能显式重新提交，不会自动重发。
++        </p>
++      )}
++      <div className="r6-setting-row">
++        <div>
++          <h3>历史版本</h3>
++          <p>
++            列表只读取有界清单摘要，未经重新校验，不代表当前文件完整或可恢复。恢复前仍须完整校验；不会自动下载敏感备份。
++          </p>
++        </div>
++        <R6Button
++          pending={versionsLoading}
++          onClick={() => void refreshVersions()}
++        >
++          刷新版本列表
++        </R6Button>
++      </div>
++      {versionsError && (
++        <p role="alert" className="r6-settings-error">
++          {versionsError}
++          {versions !== null
++            ? " 列表为上次确认结果，可能已过时。"
++            : " 尚未取得版本列表。"}
++        </p>
++      )}
++      {versions === null ? (
++        <p>尚未加载版本列表。</p>
++      ) : versions.length === 0 ? (
++        <p>
++          {versionsError ? "上次读取时未发现备份清单。" : "尚未发现备份清单。"}
++        </p>
++      ) : (
++        <ul aria-label="备份历史版本">
++          {versions.map((version) => (
++            <li key={version.backup_id}>
++              <p>
++                <strong>已生成，恢复前完整校验</strong> ·{" "}
++                {date(version.created_at)}
++              </p>
++              <p>
++                版本 {version.backup_id} · 清单声明 {version.file_count} 个文件
++                · {(version.total_bytes / 1024 / 1024).toFixed(1)} MiB · 构建{" "}
++                {version.revision}
++              </p>
++            </li>
++          ))}
++        </ul>
++      )}
++      <div className="r6-setting-row">
++        <div>
++          <h3>恢复与完整导出</h3>
++          <p>
++            网页恢复和完整导出入口尚未完成。此页面只管理备份计划、排队请求和查看版本，不提供恢复操作。
++          </p>
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/memhub/apps/web/src/R6Settings.test.tsx b/memhub/apps/web/src/R6Settings.test.tsx
+index be2422a..173131e 100644
+--- a/memhub/apps/web/src/R6Settings.test.tsx
++++ b/memhub/apps/web/src/R6Settings.test.tsx
+@@ -45,6 +45,10 @@ vi.mock("./ModelSettings", async () => {
+ vi.mock("./ConnectionFallback", () => ({
+   ConnectionFallback: () => null,
+ }));
++vi.mock("./HubBackups", () => ({
++  HubBackups: ({ active }: { active: boolean }) =>
++    active ? <p>合成备份管理面板</p> : null,
++}));
+ vi.mock("./runtime-state", () => ({
+   refreshLoginPreference: vi.fn(),
+   setLoginPreference: vi.fn(),
+@@ -90,6 +94,8 @@ it("shows NAS build metadata without desktop-only controls in Hub mode", async (
+     />,
+   );
+   expect(screen.queryByRole("button", { name: "连接其他应用" })).toBeNull();
++  await userEvent.click(screen.getByRole("button", { name: "备份与恢复" }));
++  expect(screen.getByText("合成备份管理面板")).toBeTruthy();
+   await userEvent.click(screen.getByRole("button", { name: "帮助与诊断" }));
+   expect(screen.getByText("0.1.0")).toBeTruthy();
+   expect(screen.getByText("服务未提供构建编号")).toBeTruthy();
+@@ -100,6 +106,12 @@ it("shows NAS build metadata without desktop-only controls in Hub mode", async (
+   expect(screen.queryByText("development")).toBeNull();
+ });
+
++it("keeps backup management out of the upstream desktop settings", () => {
++  render(<R6Settings onDiagnostics={vi.fn()} />);
++  expect(screen.queryByRole("button", { name: "备份与恢复" })).toBeNull();
++  expect(screen.queryByText("合成备份管理面板")).toBeNull();
++});
++
+ it("stops model sedimentation on one switch flip without touching the model config", async () => {
+   const user = userEvent.setup();
+   vi.mocked(setSedimentation).mockResolvedValue({
+diff --git a/memhub/apps/web/src/R6Settings.tsx b/memhub/apps/web/src/R6Settings.tsx
+index 9f77290..ec762c8 100644
+--- a/memhub/apps/web/src/R6Settings.tsx
++++ b/memhub/apps/web/src/R6Settings.tsx
+@@ -11,6 +11,7 @@ import {
+ import { getModelProfiles, setSedimentation } from "./api";
+ import { ConnectionFallback } from "./ConnectionFallback";
+ import { exportDiagnosticsFile } from "./diagnostics-export";
++import { HubBackups } from "./HubBackups";
+ import { ModelSettings, type ModelSettingsActions } from "./ModelSettings";
+ import { R6Button, R6Switch } from "./R6Controls";
+ import {
+@@ -25,11 +26,12 @@ import {
+ } from "./sedimentation-state";
+ import "./r6-settings.css";
+
+-type Group = "model" | "connections" | "help";
++type Group = "model" | "connections" | "backups" | "help";
+
+ const labels: Record<Group, string> = {
+   model: "模型",
+   connections: "连接其他应用",
++  backups: "备份与恢复",
+   help: "帮助与诊断",
+ };
+ const primaryGroups: Group[] = ["model", "connections"];
+@@ -58,7 +60,7 @@ export function R6Settings({
+ }) {
+   const id = useId();
+   const groups: Group[] = hub
+-    ? ["model", "help"]
++    ? ["model", "backups", "help"]
+     : showDiagnostics
+       ? [...primaryGroups, "help" as const]
+       : primaryGroups;
+@@ -399,6 +401,16 @@ export function R6Settings({
+               <ConnectionFallback />
+             </section>
+           )}
++          {hub && (
++            <section
++              id={`${id}-panel-backups`}
++              aria-labelledby={`${id}-nav-backups`}
++              hidden={group !== "backups"}
++            >
++              <h2>备份与恢复</h2>
++              <HubBackups active={active && group === "backups"} />
++            </section>
++          )}
+           {(showDiagnostics || hub) && (
+             <section
+               id={`${id}-panel-help`}
+diff --git a/memhub/apps/web/src/hub-backups.test.ts b/memhub/apps/web/src/hub-backups.test.ts
+new file mode 100644
+index 0000000..cad7823
+--- /dev/null
++++ b/memhub/apps/web/src/hub-backups.test.ts
+@@ -0,0 +1,281 @@
++import { afterEach, expect, it, vi } from "vitest";
++import {
++  BackupControlError,
++  backupErrorMessage,
++  getBackupStatus,
++  getBackupVersions,
++  requestBackup,
++  saveBackupSchedule,
++} from "./hub-backups";
++
++const id = "11111111-1111-4111-8111-111111111111";
++const version =
++  "cmh-backup-20261110T120000000000Z-11111111111111111111111111111111";
++const timestamp = "2026-11-10T12:00:00+00:00";
++const plan = { enabled: true, interval_minutes: 1440, keep: 7 };
++const status = {
++  schedule: { schema_version: 1, ...plan, configured_at: timestamp },
++  execution: {
++    schema_version: 1,
++    state: "completed",
++    last_success_at: timestamp,
++    last_backup_id: version,
++  },
++  next_due_at: timestamp,
++  pending_request: null,
++  supervisor_running: "not_checked",
++};
++const complete = {
++  backup_id: version,
++  state: "unverified",
++  created_at: timestamp,
++  revision: "synthetic-1",
++  file_count: 10,
++  total_bytes: 100,
++};
++afterEach(() => vi.unstubAllGlobals());
++
++it("uses only same-origin administrator metadata routes and never adds a token", async () => {
++  const fetcher = vi
++    .fn()
++    .mockImplementation(async (url: string, init: RequestInit) => {
++      expect(init.credentials).toBe("same-origin");
++      expect(init.cache).toBe("no-store");
++      expect(
++        (init.headers as Record<string, string> | undefined)?.Authorization,
++      ).toBeUndefined();
++      if (url.endsWith("status"))
++        return Response.json({ ...status, private_extra: "synthetic secret" });
++      if (url.endsWith("versions"))
++        return Response.json({
++          versions: [{ ...complete, files: ["synthetic/private"] }],
++        });
++      if (url.endsWith("schedule")) {
++        expect(init.method).toBe("PUT");
++        expect(JSON.parse(String(init.body))).toEqual(plan);
++        return Response.json(status.schedule);
++      }
++      expect(url).toBe("/hub/v1/backups/request");
++      expect(init.method).toBe("POST");
++      expect(init.body).toBe("{}");
++      return Response.json(
++        {
++          status: "queued",
++          schema_version: 1,
++          request_id: id,
++          requested_at: timestamp,
++        },
++        { status: 202 },
++      );
++    });
++  vi.stubGlobal("fetch", fetcher);
++  expect(await getBackupStatus()).toEqual(status);
++  expect(await getBackupVersions()).toEqual([complete]);
++  expect(await saveBackupSchedule(plan)).toEqual(status.schedule);
++  expect(await requestBackup()).toEqual({
++    request_id: id,
++    requested_at: timestamp,
++  });
++  expect(fetcher).toHaveBeenCalledTimes(4);
++});
++
++it.each([
++  { execution: { schema_version: 1, state: "synthetic secret" } },
++  { schedule: { schema_version: 1, enabled: true } },
++  { pending_request: "/synthetic/private" },
++  { next_due_at: "not-a-time" },
++  { supervisor_running: true },
++])("rejects invalid status without returning its body %j", async (change) => {
++  vi.stubGlobal(
++    "fetch",
++    vi.fn().mockResolvedValue(Response.json({ ...status, ...change })),
++  );
++  await expect(getBackupStatus()).rejects.toMatchObject({
++    code: "invalid_response",
++  });
++});
++
++it.each([
++  null,
++  {},
++  { versions: [complete, complete] },
++  { versions: [{ ...complete, total_bytes: -1 }] },
++  { versions: [{ ...complete, backup_id: "/private" }] },
++])("rejects invalid version metadata %j", async (body) => {
++  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(body)));
++  await expect(getBackupVersions()).rejects.toMatchObject({
++    code: "invalid_response",
++  });
++});
++
++it("strips execution extras and refuses complete or invalid claims in catalog rows", async () => {
++  const fetcher = vi
++    .fn()
++    .mockResolvedValueOnce(
++      Response.json({ versions: [{ ...complete, state: "complete" }] }),
++    )
++    .mockResolvedValueOnce(
++      Response.json({
++        versions: [
++          {
++            backup_id: version,
++            state: "invalid",
++            error_code: "backup_invalid",
++          },
++        ],
++      }),
++    )
++    .mockResolvedValueOnce(
++      Response.json({
++        ...status,
++        execution: {
++          ...status.execution,
++          error: "backup_create_failed",
++          private: "hidden",
++        },
++      }),
++    );
++  vi.stubGlobal("fetch", fetcher);
++  await expect(getBackupVersions()).rejects.toMatchObject({
++    code: "invalid_response",
++  });
++  await expect(getBackupVersions()).rejects.toMatchObject({
++    code: "invalid_response",
++  });
++  expect(JSON.stringify(await getBackupStatus())).not.toContain("hidden");
++});
++
++it.each([401, 403])(
++  "turns %s into a relogin message without reflecting a raw body",
++  async (code) => {
++    vi.stubGlobal(
++      "fetch",
++      vi
++        .fn()
++        .mockResolvedValue(
++          Response.json({ detail: "synthetic secret" }, { status: code }),
++        ),
++    );
++    const error = await requestBackup().catch((value) => value);
++    expect(error).toMatchObject({
++      code: "unauthorized",
++      outcomeUnknown: false,
++    });
++    expect(backupErrorMessage(error)).toContain("重新登录");
++    expect(backupErrorMessage(error)).not.toContain("synthetic");
++  },
++);
++
++it.each([
++  null,
++  [],
++  {
++    status: "completed",
++    schema_version: 1,
++    request_id: id,
++    requested_at: timestamp,
++  },
++])(
++  "treats an invalid POST success body as an unknown write %j",
++  async (body) => {
++    const fetcher = vi
++      .fn()
++      .mockResolvedValue(Response.json(body, { status: 202 }));
++    vi.stubGlobal("fetch", fetcher);
++    await expect(requestBackup()).rejects.toMatchObject({
++      code: "invalid_response",
++      outcomeUnknown: true,
++    });
++    expect(fetcher).toHaveBeenCalledTimes(1);
++  },
++);
++
++it.each(["lost", "unavailable", "wrong_status"])(
++  "never retries an uncertain mutation: %s",
++  async (mode) => {
++    const fetcher = vi.fn().mockImplementation(() => {
++      if (mode === "lost") throw new TypeError("private synthetic connection");
++      return Promise.resolve(
++        Response.json(
++          { detail: "private synthetic error" },
++          { status: mode === "wrong_status" ? 200 : 503 },
++        ),
++      );
++    });
++    vi.stubGlobal("fetch", fetcher);
++    const error = await requestBackup().catch((value) => value);
++    expect(error).toBeInstanceOf(BackupControlError);
++    expect(error.outcomeUnknown).toBe(true);
++    expect(backupErrorMessage(error)).not.toContain("private");
++    expect(fetcher).toHaveBeenCalledTimes(1);
++  },
++);
++
++it("distinguishes pending request and storage busy without a misleading empty list", async () => {
++  vi.stubGlobal(
++    "fetch",
++    vi
++      .fn()
++      .mockResolvedValueOnce(
++        Response.json({ detail: "backup_request_pending" }, { status: 409 }),
++      )
++      .mockResolvedValueOnce(
++        Response.json({ detail: "backup_storage_in_use" }, { status: 503 }),
++      ),
++  );
++  await expect(requestBackup()).rejects.toMatchObject({
++    code: "backup_request_pending",
++    outcomeUnknown: false,
++  });
++  await expect(getBackupVersions()).rejects.toMatchObject({
++    code: "backup_storage_in_use",
++  });
++});
++
++it("does not acknowledge a save receipt for a different schedule", async () => {
++  vi.stubGlobal(
++    "fetch",
++    vi.fn().mockResolvedValue(Response.json({ ...status.schedule, keep: 99 })),
++  );
++  await expect(saveBackupSchedule(plan)).rejects.toMatchObject({
++    code: "invalid_response",
++    outcomeUnknown: true,
++  });
++});
++
++it("combines caller cancellation with a bounded timeout", async () => {
++  const abort = new AbortController();
++  const fetcher = vi.fn().mockResolvedValue(Response.json(status));
++  vi.stubGlobal("fetch", fetcher);
++  await getBackupStatus(abort.signal);
++  const signal = fetcher.mock.calls[0][1].signal as AbortSignal;
++  expect(signal).not.toBe(abort.signal);
++  expect(signal.aborted).toBe(false);
++  abort.abort();
++  expect(signal.aborted).toBe(true);
++});
++
++it.each([
++  "backup_catalog_limit",
++  "backup_catalog_timeout",
++  "backup_catalog_invalid",
++])(
++  "keeps catalog refusal %s as an error instead of an empty or invalid list",
++  async (code) => {
++    vi.stubGlobal(
++      "fetch",
++      vi
++        .fn()
++        .mockResolvedValue(
++          Response.json(
++            { detail: code, private_extra: "synthetic secret" },
++            { status: 503 },
++          ),
++        ),
++    );
++    const error = await getBackupVersions().catch((value) => value);
++    expect(error).toBeInstanceOf(BackupControlError);
++    expect(error.code).toBe(code);
++    expect(backupErrorMessage(error)).not.toContain("synthetic secret");
++  },
++);
+diff --git a/memhub/apps/web/src/hub-backups.ts b/memhub/apps/web/src/hub-backups.ts
+new file mode 100644
+index 0000000..8e425c1
+--- /dev/null
++++ b/memhub/apps/web/src/hub-backups.ts
+@@ -0,0 +1,340 @@
++/** Administrator-only metadata controls; no credentials, paths or archive contents. */
++export interface BackupSchedule {
++  schema_version: 1;
++  enabled: boolean;
++  interval_minutes?: number;
++  keep?: number;
++  configured_at?: string;
++}
++export interface BackupPlan {
++  enabled: boolean;
++  interval_minutes: number;
++  keep: number;
++}
++export type BackupState =
++  | "not_run"
++  | "running"
++  | "completed"
++  | "failed"
++  | "interrupted";
++export interface BackupStatus {
++  schedule: BackupSchedule;
++  execution: {
++    schema_version: 1;
++    state: BackupState;
++    last_attempt_at?: string;
++    finished_at?: string;
++    last_success_at?: string;
++    last_backup_id?: string;
++    last_request_id?: string;
++    last_file_count?: number;
++    last_total_bytes?: number;
++    error?: string | null;
++    retention_error?: string | null;
++  };
++  next_due_at: string | null;
++  pending_request: string | null;
++  supervisor_running: "not_checked";
++}
++export interface BackupVersion {
++  backup_id: string;
++  state: "unverified";
++  created_at: string;
++  revision: string;
++  file_count: number;
++  total_bytes: number;
++}
++export class BackupControlError extends Error {
++  constructor(
++    readonly code: string,
++    readonly outcomeUnknown = false,
++  ) {
++    super(code);
++  }
++}
++export function backupErrorMessage(error: unknown): string {
++  if (error instanceof BackupControlError) {
++    if (error.code === "unauthorized") return "管理员登录已失效，请重新登录。";
++    if (error.code === "backup_request_pending")
++      return "已有备份请求在等待处理，请刷新状态核对。";
++    if (error.code === "invalid_request")
++      return "请核对周期和保留版本数量后重试。";
++    if (error.code === "unsupported")
++      return "当前 Hub 尚不支持备份管理，请升级服务后重试。";
++    if (error.code === "backup_storage_in_use")
++      return "备份目录正在使用，请稍后刷新版本列表。";
++    if (error.code === "backup_catalog_limit")
++      return "备份清单超出网页读取上限，请通过 NAS 维护工具检查。";
++    if (error.code === "backup_catalog_timeout")
++      return "读取备份清单超时，请稍后刷新；本次未更新版本列表。";
++    if (error.code === "backup_catalog_invalid")
++      return "备份清单格式无法确认，列表未更新；请在 NAS 检查。";
++  }
++  return "暂时无法确认服务状态。备份期间服务可能短暂停止，请稍后刷新；仍保留上次确认的信息。";
++}
++const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
++const versionId = /^cmh-backup-\d{8}T\d{12}Z-[0-9a-f]{32}$/;
++function invalid(): never {
++  throw new BackupControlError("invalid_response");
++}
++function object(value: unknown): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
++  return value as Record<string, unknown>;
++}
++function integer(
++  value: unknown,
++  min = 0,
++  max = Number.MAX_SAFE_INTEGER,
++): value is number {
++  return (
++    Number.isSafeInteger(value) && Number(value) >= min && Number(value) <= max
++  );
++}
++function time(value: unknown): value is string {
++  return (
++    typeof value === "string" &&
++    /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
++    Number.isFinite(Date.parse(value))
++  );
++}
++function identifier(value: unknown): value is string {
++  return typeof value === "string" && uuid.test(value);
++}
++function schedule(value: unknown): BackupSchedule {
++  const row = object(value);
++  if (row.schema_version !== 1 || typeof row.enabled !== "boolean") invalid();
++  if (
++    !row.enabled &&
++    row.interval_minutes === undefined &&
++    row.keep === undefined &&
++    row.configured_at === undefined
++  )
++    return { schema_version: 1, enabled: false };
++  if (
++    !integer(row.interval_minutes, 1, 525600) ||
++    !integer(row.keep, 1, 365) ||
++    !time(row.configured_at)
++  )
++    invalid();
++  return {
++    schema_version: 1,
++    enabled: row.enabled,
++    interval_minutes: row.interval_minutes,
++    keep: row.keep,
++    configured_at: row.configured_at,
++  };
++}
++async function request(
++  path: string,
++  method: "GET" | "PUT" | "POST",
++  body?: unknown,
++  signal?: AbortSignal,
++): Promise<unknown> {
++  let response: Response;
++  try {
++    response = await fetch(`/hub/v1/backups/${path}`, {
++      method,
++      credentials: "same-origin",
++      cache: "no-store",
++      signal: signal
++        ? AbortSignal.any([signal, AbortSignal.timeout(30000)])
++        : AbortSignal.timeout(30000),
++      headers:
++        body === undefined ? undefined : { "Content-Type": "application/json" },
++      body: body === undefined ? undefined : JSON.stringify(body),
++    });
++  } catch {
++    throw new BackupControlError("unavailable", method !== "GET");
++  }
++  if (!response.ok) {
++    let detail: unknown;
++    try {
++      detail = object(await response.json()).detail;
++    } catch {
++      /* Never display a raw server body. */
++    }
++    if (response.status === 401 || response.status === 403)
++      throw new BackupControlError("unauthorized");
++    if (response.status === 404) throw new BackupControlError("unsupported");
++    if (response.status === 409 && detail === "backup_request_pending")
++      throw new BackupControlError("backup_request_pending");
++    if (
++      (response.status === 422 || response.status === 413) &&
++      ["invalid_request", "request_too_large", "json_required"].includes(
++        String(detail),
++      )
++    )
++      throw new BackupControlError("invalid_request");
++    if (response.status === 503 && detail === "backup_storage_in_use")
++      throw new BackupControlError("backup_storage_in_use", method !== "GET");
++    if (
++      response.status === 503 &&
++      typeof detail === "string" &&
++      [
++        "backup_catalog_limit",
++        "backup_catalog_timeout",
++        "backup_catalog_invalid",
++      ].includes(detail)
++    )
++      throw new BackupControlError(detail, method !== "GET");
++    throw new BackupControlError("unavailable", method !== "GET");
++  }
++  try {
++    if (response.status !== (method === "POST" ? 202 : 200)) invalid();
++    return await response.json();
++  } catch {
++    throw new BackupControlError("invalid_response", method !== "GET");
++  }
++}
++export async function getBackupStatus(
++  signal?: AbortSignal,
++): Promise<BackupStatus> {
++  const row = object(await request("status", "GET", undefined, signal));
++  const execution = object(row.execution);
++  const states: BackupState[] = [
++    "not_run",
++    "running",
++    "completed",
++    "failed",
++    "interrupted",
++  ];
++  if (
++    execution.schema_version !== 1 ||
++    !states.includes(execution.state as BackupState) ||
++    row.supervisor_running !== "not_checked" ||
++    !(row.next_due_at === null || time(row.next_due_at)) ||
++    !(row.pending_request === null || identifier(row.pending_request))
++  )
++    invalid();
++  const safe: BackupStatus["execution"] = {
++    schema_version: 1,
++    state: execution.state as BackupState,
++  };
++  for (const key of [
++    "last_attempt_at",
++    "finished_at",
++    "last_success_at",
++  ] as const) {
++    if (execution[key] !== undefined) {
++      if (!time(execution[key])) invalid();
++      safe[key] = execution[key];
++    }
++  }
++  for (const key of ["last_file_count", "last_total_bytes"] as const) {
++    if (execution[key] !== undefined) {
++      if (!integer(execution[key])) invalid();
++      safe[key] = execution[key];
++    }
++  }
++  if (execution.last_backup_id !== undefined) {
++    if (
++      typeof execution.last_backup_id !== "string" ||
++      !versionId.test(execution.last_backup_id)
++    )
++      invalid();
++    safe.last_backup_id = execution.last_backup_id;
++  }
++  if (execution.last_request_id !== undefined) {
++    if (!identifier(execution.last_request_id)) invalid();
++    safe.last_request_id = execution.last_request_id;
++  }
++  const codes = [
++    null,
++    "backup_create_failed",
++    "backup_service_stop_failed",
++    "backup_interrupted",
++    "backup_retention_failed",
++  ];
++  for (const key of ["error", "retention_error"] as const) {
++    if (execution[key] !== undefined) {
++      if (!codes.includes(execution[key] as string | null)) invalid();
++      safe[key] = execution[key] as string | null;
++    }
++  }
++  return {
++    schedule: schedule(row.schedule),
++    execution: safe,
++    next_due_at: row.next_due_at,
++    pending_request: row.pending_request,
++    supervisor_running: "not_checked",
++  };
++}
++export async function getBackupVersions(
++  signal?: AbortSignal,
++): Promise<BackupVersion[]> {
++  const row = object(await request("versions", "GET", undefined, signal));
++  if (!Array.isArray(row.versions) || row.versions.length > 365) invalid();
++  const ids = new Set<string>();
++  return row.versions.map((raw) => {
++    const item = object(raw);
++    if (
++      typeof item.backup_id !== "string" ||
++      !versionId.test(item.backup_id) ||
++      ids.has(item.backup_id)
++    )
++      invalid();
++    ids.add(item.backup_id);
++    if (
++      item.state !== "unverified" ||
++      !time(item.created_at) ||
++      typeof item.revision !== "string" ||
++      !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/.test(item.revision) ||
++      !integer(item.file_count) ||
++      !integer(item.total_bytes)
++    )
++      invalid();
++    return {
++      backup_id: item.backup_id,
++      state: "unverified",
++      created_at: item.created_at,
++      revision: item.revision,
++      file_count: item.file_count,
++      total_bytes: item.total_bytes,
++    };
++  });
++}
++export async function saveBackupSchedule(
++  plan: BackupPlan,
++): Promise<BackupSchedule> {
++  try {
++    const saved = schedule(await request("schedule", "PUT", plan));
++    if (
++      saved.enabled !== plan.enabled ||
++      saved.interval_minutes !== plan.interval_minutes ||
++      saved.keep !== plan.keep
++    )
++      invalid();
++    return saved;
++  } catch (error) {
++    if (
++      error instanceof BackupControlError &&
++      error.code === "invalid_response"
++    )
++      throw new BackupControlError("invalid_response", true);
++    throw error;
++  }
++}
++export async function requestBackup(): Promise<{
++  request_id: string;
++  requested_at: string;
++}> {
++  let row: Record<string, unknown>;
++  try {
++    row = object(await request("request", "POST", {}));
++  } catch (error) {
++    if (
++      error instanceof BackupControlError &&
++      error.code === "invalid_response"
++    )
++      throw new BackupControlError("invalid_response", true);
++    throw error;
++  }
++  if (
++    row.status !== "queued" ||
++    row.schema_version !== 1 ||
++    !identifier(row.request_id) ||
++    !time(row.requested_at)
++  )
++    throw new BackupControlError("invalid_response", true);
++  return { request_id: row.request_id, requested_at: row.requested_at };
++}

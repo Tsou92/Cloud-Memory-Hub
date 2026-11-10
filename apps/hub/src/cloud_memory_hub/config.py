@@ -29,6 +29,7 @@ class HubConfig:
     governance_dir: Path = Path("/governance")
     host: str = "0.0.0.0"
     port: int = 8800
+    backup_dir: Path = Path("/backups")
 
     def __post_init__(self) -> None:
         parts = urlsplit(self.public_origin)
@@ -75,4 +76,5 @@ class HubConfig:
             encryption_key=read_private_file(config_dir / "encryption-key").strip(),
             governance_dir=Path(os.environ.get("CMH_GOVERNANCE_DIR", "/governance")),
             port=int(os.environ.get("CMH_PORT", "8800")),
+            backup_dir=Path(os.environ.get("CMH_BACKUP_DIR", "/backups")),
         )

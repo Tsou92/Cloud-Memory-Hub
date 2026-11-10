@@ -159,6 +159,11 @@
       "path": "patches/0031-hub-self-service-pairing.patch",
       "scope": "self_service_project_device_pairing_with_explicit_unknown_result_recovery",
       "digest": "sha256:e478108b9d1bb9837d5dfb1b270338b71a350de5765bae2ea06b5cdc6c480f93"
+    },
+    {
+      "path": "patches/0032-hub-backup-settings.patch",
+      "scope": "administrator_backup_plan_status_and_bounded_version_catalog",
+      "digest": "sha256:7c733eb0d738f96df8aab9a69ba7bc230f86d287b744b23155f5ff6569ee7b40"
     }
   ]
 }

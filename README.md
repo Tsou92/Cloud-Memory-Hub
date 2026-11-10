@@ -6,7 +6,7 @@
 
 已验证的日常入口为指定项目中的 Claude Code CLI 自动钩子，以及 Codex 桌面的 Skill／CLI 工作流。本轮 MacBook 的 Codex 桌面对话还实际完成原生 MCP 读取与写入；其他桌面会话及每轮自动触发仍未验证。已有 Agent 会话需要新会话或重新连接，才能加载更新后的 MCP 配置。
 
-当前正收口面向 GitHub 自行部署的产品发布：NAS 已备份升级到 `preview-92f0a02`，网页提供真实项目记忆、原文、来源、带引用的 Anthropic 问答、普通忘记及项目／设备配对。Mac arm64 候选包已在全新环境独立安装并配对，支持 MCP 配置导出和后台补传管理。浏览器视觉、新包第二台 Mac／实际宿主接入、自动备份恢复与正式发行仍未完成。参见[发布计划](docs/release-plan.md)、[控制台验收](docs/reviews/2026-11-10-project-console.md)和[自助客户端记录](docs/reviews/2026-11-10-self-service-clients.md)。参赛准备在独立分支开展，不改变产品主体。
+当前正收口面向 GitHub 自行部署的产品发布：NAS 已备份升级到 `preview-92f0a02`，网页提供真实项目记忆、原文、来源、带引用的 Anthropic 问答、普通忘记及项目／设备配对。Mac arm64 候选包已在全新环境独立安装并配对，支持 MCP 配置导出和后台补传管理。已完成 NAS 两版本自动备份实测；完整归档、空环境导入与历史回滚正在收口验证。管理网页真实点击、新包第二台 Mac／实际宿主接入、NAS 恢复演练与正式发行仍未完成。参见[发布计划](docs/release-plan.md)、[控制台验收](docs/reviews/2026-11-10-project-console.md)和[自助客户端记录](docs/reviews/2026-11-10-self-service-clients.md)。参赛准备在独立分支开展，不改变产品主体。
 
 当前主线按用户确认收敛为多设备共享记忆、通用接入和任务交接。Agent 保存的记忆更新可直接读取；交接正文可按 ID 在另一端接续，无需等待 NAS 模型提炼。接入配置见 [Agent 使用说明](docs/agent-access.md)，最新结果见[两台 Mac 验收记录](docs/reviews/2026-11-10-two-host-mvp.md)。
 
@@ -141,5 +141,5 @@ make check-container
 目前为本地 Git 仓库，尚未创建远程仓库、配置远程分支保护或发布产品。
 仓库提供 GitHub Actions 工作流、Issue / PR 模板和依赖更新配置；上传后才能验证远程执行。
 
-项目自身的许可证尚未选定。公开发布前应确定仓库可见性、许可证及第三方声明。
+项目自有源码采用 Apache-2.0，见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 和[许可决策](docs/adr/0061-project-license.md)。发行时保留第三方原始许可与来源清单。
 上游代码引入时保留原始许可证、NOTICE、来源提交和修改记录；当前尚未复制上游业务源码。
