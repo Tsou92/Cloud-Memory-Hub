@@ -12,7 +12,7 @@
   "product": "Cloud Memory Hub",
   "mode": "hub",
   "instance_id": "<instance UUID>",
-  "version": "0.1.0.dev0",
+  "version": "0.1.0",
   "build_revision": null,
   "features": ["scoped_console_reads"],
   "projects": [{"scope_id": "<project UUID>", "display_name": "示例项目", "created_at": "<timestamp>"}],

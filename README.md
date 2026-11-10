@@ -10,15 +10,15 @@
 
 ## 当前状态与支持范围
 
-**当前是面向自行部署用户的发行候选开发阶段，产品版本为 `0.1.0.dev0`，尚未发布正式版本标签或可下载的正式 Release。** 默认接入正在改为“NAS 生成一次性链接 → 电脑一条命令或交给 Agent 安装 → 验证 MCP”，无须另装图形 App。`346938a` 已通过完整 CI、三系统安装检查及真实 NAS／两台 Mac 的 Claude 读写；首页引导修正的最终制品、Codex 桌面新 HTTP 路径和生产升级仍待验，见[新接入验证](docs/reviews/2026-11-10-one-link-onboarding.md)。局部检查通过不等于已可正式发布。
+**当前源码版本为 `0.1.0`，面向 GitHub 自行部署用户。** 可下载的已发行版本及校验文件以 [GitHub Releases](https://github.com/Tsou92/Cloud-Memory-Hub/releases) 为准；源码版本号不等于已完成发行。默认接入为“NAS 生成一次性链接 → 电脑一条命令或交给 Agent 安装 → 验证 MCP”，无须另装图形 App。已有完整 CI、三系统安装检查、真实 NAS／两台 Mac 的 Claude 读写，以及真实 Codex 桌面与 Claude 双向交接证据；各证据对应的提交、模型与制品范围见[新接入验证](docs/reviews/2026-11-10-one-link-onboarding.md)。
 
 | 入口 | 当前能力 | 验收边界 |
 | --- | --- | --- |
 | NAS 服务 | Linux amd64，Docker / Compose；项目隔离、共享记忆、原文与交接 | 已有真实 NAS 运行与两台 Mac 读写证据；其他架构未验 |
-| 一次性链接＋远程 MCP | NAS 直接提供七个工具；电脑只添加连接和 Skill | 三系统安装 CI、真实 NAS 与两台 Mac 的 Claude 原生双向原文／交接通过；其他宿主的新路径仍待验 |
+| 一次性链接＋远程 MCP | NAS 直接提供七个工具；电脑只添加连接和 Skill | 三系统安装 CI、真实 NAS 与两台 Mac 的 Claude 原生双向原文／交接，以及真实 Codex 桌面七工具调用通过；其他宿主的新路径仍待验 |
 | Mac 候选客户端 | arm64、Python 3.12；独立安装、配对、MCP 配置导出、后台补传与状态 | preview.4 两台 Mac 安装、双向原文／交接及单端撤销通过；独立空卷实例真实网页登录、下载配对和客户端导入已通过 |
 | Claude Code CLI | MCP / Skill 与指定项目的逐轮 hooks | preview.4 与真实 CLI 2.1.321 完成 2 轮采集、4 轮同会话召回；使用本地合成 Hub 和模型替身，不代表 NAS／外部模型联调 |
-| Codex 桌面 | MCP / Skill / CLI 工作流 | 已在真实桌面对话中验证原生 MCP 读写；每轮自动触发未验 |
+| Codex 桌面 | 远程 MCP / Skill；高级本地 CLI 工作流 | 已在当前真实桌面对话中验证新 HTTP MCP 读写及与 Claude 双向交接；每轮自动触发未验 |
 | 其他 Agent | 通用 MCP 或 Skill + CLI 接口 | OpenCode、Hermes、Cherry Studio、Open Design 等仍需逐一宿主验收 |
 | 管理网页 | 项目、记忆、原文、来源、带引用的问答、普通忘记、设备配对、备份设置 | 独立实例真实配对、模型候选及连接测试、备份、项目问答和忘记已验证；新手引导、来源查看及窄屏复验通过；最终 NAS 制品仍待验 |
 
@@ -56,7 +56,7 @@ docker compose exec hub cat /config/admin-token
 
 默认流程见[设备与 Agent 自助接入](docs/client-installation.md#默认一次性链接接入)：复制管理页面生成的命令或安装话术，电脑无需下载完整记忆核心。以下包安装方式保留用于本地采集与离线补传，不是默认远程 MCP 的前置条件。
 
-公开客户端包尚未发布。已有对应 arm64 候选包时，先校验摘要，解压后执行 `sh install.sh`，再按[Mac 自助接入](docs/client-installation.md)导入网页下载的配对文件。安装器使用新的私有目录，不覆盖原客户端；每台 Mac 使用自己的设备身份和队列。
+高级客户端包以 [GitHub Releases](https://github.com/Tsou92/Cloud-Memory-Hub/releases) 中实际附件为准。取得对应 arm64 包后，先校验摘要，解压后执行 `sh install.sh`，再按[Mac 自助接入](docs/client-installation.md)导入网页下载的配对文件。安装器使用新的私有目录，不覆盖原客户端；每台 Mac 使用自己的设备身份和队列。
 
 现在需要从源码试用，可按 [Agent 接入说明](docs/agent-access.md#mac-客户端安装)安装 Python 3.12 客户端；源码安装依赖固定上游与本机目录位置。维护者构建与发布候选包的方式见[发行制品说明](docs/release-artifacts.md)。Mac 只运行客户端，无需本地 Docker 或模型。
 
