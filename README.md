@@ -10,23 +10,48 @@
 
 ## 当前状态与支持范围
 
-**当前源码版本为 `0.1.2`，面向 GitHub 自行部署用户。** 可下载的已发行版本及校验文件以 [GitHub Releases](https://github.com/Tsou92/Cloud-Memory-Hub/releases) 为准；源码版本号不等于已完成发行。默认接入为“NAS 生成一次性链接 → 电脑一条命令或交给 Agent 安装 → 验证 MCP”，无须另装图形 App。已有完整 CI、三系统安装检查、真实 NAS／两台 Mac 的 Claude 读写，以及真实 Codex 桌面与 Claude 双向交接证据；各证据对应的提交、模型与制品范围见[新接入验证](docs/reviews/2026-11-10-one-link-onboarding.md)。
+**[v0.1.2 已正式发布](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.2)，面向 GitHub 自行部署用户。** 原七附件已通过完整发行 CI、真实 NAS 同包安装／升级及 MacBook 安装验收，并在上传后重新下载核对；日常 NAS 升级后的原 MCP 读写也已通过。默认接入为“NAS 生成一次性链接 → 电脑一条命令或交给 Agent 安装 → 验证 MCP”，无须另装图形 App。最终版本的真实 Codex 桌面与 Claude 同 Mac 交接通过；本版 Mac mini 未重复实测，历史双机证据与本轮结果分别记录，见[最终制品验收](docs/reviews/2026-11-10-final-artifact-acceptance.md)。
 
 | 入口 | 当前能力 | 验收边界 |
 | --- | --- | --- |
-| NAS 服务 | Linux amd64，Docker / Compose；项目隔离、共享记忆、原文与交接 | 已有真实 NAS 运行与两台 Mac 读写证据；其他架构未验 |
-| 一次性链接＋远程 MCP | NAS 直接提供七个工具；电脑只添加连接和 Skill | 三系统安装 CI、真实 NAS 与两台 Mac 的 Claude 原生双向原文／交接，以及真实 Codex 桌面七工具调用通过；其他宿主的新路径仍待验 |
-| Mac 候选客户端 | arm64、Python 3.12；独立安装、配对、MCP 配置导出、后台补传与状态 | preview.4 两台 Mac 安装、双向原文／交接及单端撤销通过；独立空卷实例真实网页登录、下载配对和客户端导入已通过 |
+| NAS 服务 | Linux amd64，Docker / Compose；项目隔离、共享记忆、原文与交接 | 0.1.2 原镜像在真实 NAS 安装、隔离与日常升级及原连接读写通过；历史双机证据单列，其他架构未验 |
+| 一次性链接＋远程 MCP | NAS 直接提供七个工具；电脑只添加连接和 Skill | 0.1.2 三系统安装 CI、真实 Codex 七工具及与 Claude 同 Mac 交接通过；346938a 双机证据保留，本轮 Mini 未复验 |
+| Mac 候选客户端 | arm64、Python 3.12；独立安装、配对、MCP 配置导出、后台补传与状态 | 0.1.2 原包在 MacBook 新目录安装／四 CLI 启动通过，未配对；preview.4 两机安装、交接和撤销证据单列 |
 | Claude Code CLI | MCP / Skill 与指定项目的逐轮 hooks | preview.4 与真实 CLI 2.1.321 完成 2 轮采集、4 轮同会话召回；使用本地合成 Hub 和模型替身，不代表 NAS／外部模型联调 |
 | Codex 桌面 | 远程 MCP / Skill；高级本地 CLI 工作流 | 已在当前真实桌面对话中验证新 HTTP MCP 读写及与 Claude 双向交接；每轮自动触发未验 |
 | 其他 Agent | 通用 MCP 或 Skill + CLI 接口 | OpenCode、Hermes、Cherry Studio、Open Design 等仍需逐一宿主验收 |
-| 管理网页 | 项目、记忆、原文、来源、带引用的问答、普通忘记、设备配对、备份设置 | 独立实例真实配对、模型候选及连接测试、备份、项目问答和忘记已验证；新手引导、来源查看及窄屏复验通过；最终 NAS 制品仍待验 |
+| 管理网页 | 项目、记忆、原文、来源、带引用的问答、普通忘记、设备配对、备份设置 | 0.1.2 最终 NAS 真实 Chrome 的项目／原文／交接及窄屏复验通过；模型候选、问答、忘记等完整流程保留原版本证据 |
 
 NAS 已验证两版本自动备份及重启后计划保留，并完成受控恢复的 **11 项正常恢复检查与 7 项真实进程中断检查**：空三卷导入、历史回滚保留较新忘记／设备撤销、损坏归档拒绝及保护版本恢复。此证据使用独立合成数据，不包含 NAS 断电、硬盘故障或全部中断位置，见[演练记录](docs/backup-and-recovery.md#nas-恢复演练记录)。
 
-完整历史自动导入、所有 Agent 的自动采集、离线记忆读取缓存、离线删除规则传播和旧日志全域治理仍在后续范围。当前候选应先用独立项目和合成数据试用，保留原数据及备份；正式发行仍需完成最终 NAS 制品验收，并让包含授权修复的最终提交通过完整远程 CI，详见[客户端实测与边界](docs/reviews/2026-11-10-self-service-clients.md)。
+完整历史自动导入、所有 Agent 的自动采集、离线记忆读取缓存、离线删除规则传播和旧日志全域治理仍在后续范围。首次使用应先用独立项目和合成数据验证并保留原数据及备份。最终 NAS 制品和完整远程 CI 已通过；未执行项、各版本证据及公开发布状态见[最终制品验收](docs/reviews/2026-11-10-final-artifact-acceptance.md)，高级客户端边界见[客户端实测](docs/reviews/2026-11-10-self-service-clients.md)。
 
-## 从源码在 NAS 试部署
+## 在 NAS 安装发行版
+
+适用于 Linux amd64 NAS，需先启用 Docker / Compose，并准备电脑可访问的 HTTPS 入口。
+从 [v0.1.2 发行页](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.2) 下载
+`cloud-memory-hub-v0.1.2-linux-amd64.tar.gz`、`cloud-memory-hub-v0.1.2-source.tar.gz`
+和 `SHA256SUMS` 到 NAS 的同一个新目录。默认远程 MCP 接入不需要下载 Mac 高级客户端包。
+
+在该目录执行：
+
+```sh
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+确认镜像包和源码包均显示 `OK` 后继续；任一摘要失败应重新下载并核对，不运行失败文件。
+
+```sh
+docker load -i cloud-memory-hub-v0.1.2-linux-amd64.tar.gz &&
+tar -xzf cloud-memory-hub-v0.1.2-source.tar.gz &&
+cd cloud-memory-hub-v0.1.2
+```
+
+在解压目录新建 `.env`，写入 `CMH_IMAGE=cloud-memory-hub:v0.1.2`，并将
+`CMH_PUBLIC_ORIGIN` 设为自己的实际 HTTPS 入口（例如 `https://memory.example.com`，不要照抄示例）。
+然后按[首次运行与网页配置](docs/development-runtime.md#发行版首次运行)启动。
+
+## 从源码构建
 
 准备 Git、Docker 和 Compose，以及可下载固定上游、Python / Node 依赖与内置检索模型的构建网络。下面使用新的 Compose 项目试运行，不连接已有实例的数据卷：
 
