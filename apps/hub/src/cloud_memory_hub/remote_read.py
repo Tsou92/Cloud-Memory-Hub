@@ -1,6 +1,7 @@
 """Device-authorized reads of the upstream SDK authority; no second store."""
 
 import asyncio
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -78,8 +79,10 @@ class RemoteRead:
             raise AccessError("invalid_request", 422)
         if isinstance(request, SearchRequest):
             try:
-                if privacy.protect({"query": request.query}).value["query"] != request.query:
+                query = unicodedata.normalize("NFKC", request.query)
+                if privacy.protect({"query": query}).value["query"] != query:
                     raise AccessError("query_requires_refiltering", 422)
+                request = request.model_copy(update={"query": query})
             except PrivacyError:
                 raise AccessError("query_requires_refiltering", 422) from None
         # Keep the slot until upstream's joined worker has actually exited on cancellation.
