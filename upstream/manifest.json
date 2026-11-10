@@ -188,7 +188,7 @@
     {
       "path": "patches/0037-one-link-agent-onboarding.patch",
       "scope": "default_one_time_link_agent_onboarding_with_secret_free_recovery_and_advanced_json_compatibility",
-      "digest": "sha256:b1939e70421fc14bbd1e22c991574219fe70a68d2cdf6e4a63d9ad2d87286a11"
+      "digest": "sha256:af3672f3e1dcfae6890ebab8a3571223eaee3f04030ef7d12a815761f6d023bd"
     }
   ]
 }

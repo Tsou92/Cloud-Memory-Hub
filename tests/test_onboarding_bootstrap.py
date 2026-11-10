@@ -51,7 +51,7 @@ class BootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="cmh-bootstrap-test-") as temporary:
             with synthetic_download(CONNECTOR) as origin:
                 suffix = "ps1" if windows else "sh"
-                script = (RESOURCES / f"install.{suffix}").read_text()
+                script = (RESOURCES / f"install.{suffix}").read_text(encoding="utf-8")
                 if missing_python:
                     # Simulate only interpreter discovery. Download verification,
                     # extraction, uv and its Python preparation execute unchanged.

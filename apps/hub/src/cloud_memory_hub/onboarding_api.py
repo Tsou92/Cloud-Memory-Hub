@@ -80,8 +80,9 @@ function render() {
     + 'curl -fsSL --proto-redir \'=https\' "$1/hub/install.sh" -o "$cmh_file" '
     + '&& sh "$cmh_file" --link "$2" --agent "$3"';
   const command = byId('platform').value === 'windows'
-    ? '$cmhScript = irm -ErrorAction Stop ' + psQuote(origin + '/hub/install.ps1')
-      + '; & ([scriptblock]::Create($cmhScript)) -Link ' + psQuote(link) + ' -Agent ' + agent
+    ? "& { $ErrorActionPreference = 'Stop'; $cmhScript = irm -ErrorAction Stop "
+      + psQuote(origin + '/hub/install.ps1')
+      + '; & ([scriptblock]::Create($cmhScript)) -Link ' + psQuote(link) + ' -Agent ' + agent + ' }'
     : 'sh -c ' + shellQuote(unixProgram) + ' cmh-connect ' + shellQuote(origin)
       + ' ' + shellQuote(link) + ' ' + agent;
   byId('command').value = valid ? command : '';
