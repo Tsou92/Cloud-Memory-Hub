@@ -84,6 +84,8 @@
 
 ## MCP 与 Skill
 
+Claude 可另行启用[当前轮自动共享](agent-turn-hooks.md)，自动保存当前用户文字和最终回复，并在下一轮读取最近原文。该入口须显式绑定工作目录，和 MCP／Skill 安装分别配置；无须先开启 NAS 模型提炼。
+
 支持 MCP 的客户端可连接本地 stdio 服务：`cloud-memory-mcp --config-file /path/to/private/agent.json`。工具读取固定配置，不从调用参数接收设备凭证或任意项目范围。客户端可能给工具名添加服务器前缀：
 
 接受 `mcpServers` JSON 的客户端可按以下示例添加一项。替换为已安装命令和私有配置的绝对路径，再合并到客户端现有配置；其他客户端按其配置格式填写同样的 command／args：

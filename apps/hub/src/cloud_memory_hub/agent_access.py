@@ -19,6 +19,7 @@ from cloud_memory_hub.transport import (
 
 MAX_REMEMBER_BYTES = 16 * 1024
 MAX_HANDOFF_BYTES = 32 * 1024
+MAX_CAPTURE_BYTES = 64 * 1024
 HANDOFF_METADATA = {"agent_access_kind": "handoff", "agent_access_version": 1}
 REMEMBER_METADATA = {"agent_access_kind": "remember", "agent_access_version": 1}
 ShortText = Annotated[str, Field(strict=True, min_length=1, max_length=1024)]
@@ -158,7 +159,36 @@ class AgentAccess:
         )
         return result
 
-    async def _save(self, content: dict, *, request_id, session_id) -> dict:
+    async def capture_message(self, role: str, text: str, *, request_id, session_id) -> dict:
+        """Persist one visible host message; the hook separately bounds network work."""
+        try:
+            if (
+                role not in {"user", "assistant"}
+                or not isinstance(text, str)
+                or not text.strip()
+                or len(text.encode()) > MAX_CAPTURE_BYTES
+            ):
+                raise ValueError
+        except (ValueError, TypeError, UnicodeError):
+            raise AgentAccessError("capture_message_invalid") from None
+        return await self._save(
+            {
+                "messages": [{"role": role, "text": text}],
+                "metadata": {
+                    "adapter_id": "claude-code",
+                    "capture_kind": "visible_hook",
+                    "capture_version": 1,
+                },
+            },
+            request_id=request_id,
+            session_id=session_id,
+            kind="conversation_turn",
+            deliver=False,
+        )
+
+    async def _save(
+        self, content: dict, *, request_id, session_id, kind="operation", deliver=True
+    ) -> dict:
         event_id = _identity(request_id)
         conversation_id = event_id if session_id is None else _identity(session_id)
         try:
@@ -173,7 +203,7 @@ class AgentAccess:
                     "conversation_id": conversation_id,
                     "record_id": event_id,
                     "revision": 1,
-                    "kind": "operation",
+                    "kind": kind,
                     "content": content,
                 },
                 self.privacy,
@@ -184,7 +214,7 @@ class AgentAccess:
                     raise AgentAccessError("handoff_invalid")
             payload = event.model_dump(mode="json")
             self.outbox.enqueue(payload)
-            failure = await self._deliver()
+            failure = await self._deliver() if deliver else None
             # Re-enqueue is the existing idempotent receipt lookup, without new storage.
             result = self.outbox.enqueue(payload)
         except PrivacyError:
