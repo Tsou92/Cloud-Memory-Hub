@@ -143,12 +143,12 @@
     {
       "path": "patches/0028-hub-console-scope.patch",
       "scope": "administrator_project_console_reads_question_answering_and_web_regressions",
-      "digest": "sha256:94990c83a17ff48ea6a730be9361b789087f57464e2c71adec66c1d6cbd0e3e9"
+      "digest": "sha256:ad46f7d7153220a968febf6a8a846fb5eff80d58a64c1946fecd426dfb9975b1"
     },
     {
       "path": "patches/0029-sdk-anthropic-qa.patch",
       "scope": "reuse_anthropic_messages_for_sdk_memory_question_answering",
-      "digest": "sha256:24151bed87233139228ab65247ab3b5411b312c782d992d12e2683494a103ad8"
+      "digest": "sha256:56b76300dbd977b96c5bb196d47bac263f49f437b00e87e609579792e4c2efad"
     }
   ]
 }
