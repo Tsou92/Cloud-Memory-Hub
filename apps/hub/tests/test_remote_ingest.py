@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -16,7 +17,11 @@ from cloud_memory_hub.remote_access import AccessError, GrantRequest, RevisionRe
 from cloud_memory_hub.remote_ingest import RemoteIngest, write_request
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
+from hy_memory.coding.preproc import has_any_tool_message, strip_tool_messages
+from hy_memory.pipelines.base import ChatMessage
 from one_memory.api import _source_writes_on
+from one_memory.imports.models import WrittenBy
+from one_memory.memory_processing import MemoryTaskRunner
 
 
 def config_for(tmp_path):
@@ -469,6 +474,133 @@ def test_projection_is_deterministic_and_preserves_operation_metadata():
     assert first.input_records[0].role == "tool"
     global_event = event.model_copy(update={"scope_id": "global"})
     assert write_request(global_event).input_records[0].user_id != first.input_records[0].user_id
+
+
+def _remember_event(metadata):
+    raw = {
+        key: str(uuid4())
+        for key in (
+            "event_id",
+            "instance_id",
+            "device_id",
+            "source_id",
+            "scope_id",
+            "conversation_id",
+            "record_id",
+        )
+    }
+    return prepare_event(
+        {
+            **raw,
+            "revision": 1,
+            "kind": "operation",
+            "content": {"text": "合成项目的发布代号固定为银杉。", "metadata": metadata},
+        },
+        CredentialFilter(),
+    )
+
+
+def test_explicit_remember_preserves_agent_content_through_real_sdk_preprocessing():
+    metadata = {
+        "agent_access_kind": "remember",
+        "agent_access_version": 1,
+        "synthetic_context": "a confirmed project decision",
+    }
+    event = _remember_event(metadata)
+    original_payload = event.canonical_payload()
+    projected = write_request(event)
+    request = MemoryTaskRunner.request_for(projected.request_key, projected.input_records)
+    messages = [ChatMessage.from_dict(turn.model_dump()) for turn in request.turns]
+    # Use the SDK's actual routing predicate and filter: no judge or model mock
+    # can hide a tool-only input becoming an empty writer request.
+    assert not has_any_tool_message(messages)
+    retained = strip_tool_messages(messages)
+    assert len(retained) == 1 and event.content["text"] in retained[0].content
+    record = projected.input_records[0]
+    assert record.role == "assistant" and record.written_by is WrittenBy.AGENT
+    assert record.workspace == event.scope_id and record.project == event.scope_id
+    assert record.source_id == "cmh:" + event.source_id
+    text, _, footer = record.verbatim.partition("\n\n<cmh_source_reference>\n")
+    provenance = json.loads(footer.removesuffix("\n</cmh_source_reference>"))
+    assert text == event.content["text"]
+    assert provenance["content_metadata"] == metadata
+    assert provenance["event"]["event_id"] == event.event_id
+    assert event.canonical_payload() == original_payload
+    assert write_request(event) == projected
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"agent_access_kind": "remember"},
+        {"agent_access_kind": "remember", "agent_access_version": True},
+        {"agent_access_kind": "remember", "agent_access_version": 1.0},
+        {"agent_access_kind": "remember", "agent_access_version": "1"},
+        {"agent_access_kind": "remember", "agent_access_version": 2},
+        {"agent_access_kind": "remember", "agent_access_version": None},
+        {"agent_access_kind": "handoff", "agent_access_version": 1},
+        {"agent_access_kind": "Remember", "agent_access_version": 1},
+    ],
+)
+def test_other_operation_markers_remain_tool_output(metadata):
+    record = write_request(_remember_event(metadata)).input_records[0]
+    assert record.role == "tool" and record.written_by is WrittenBy.TOOL
+
+
+def test_remember_projection_does_not_rewrite_accepted_frozen_jobs(tmp_path, monkeypatch):
+    import cloud_memory_hub.remote_ingest as ingest_module
+    import cloud_memory_hub.sdk_generation as generation_module
+
+    config = config_for(tmp_path)
+    current_projection = write_request
+
+    def previous_projection(event, *, request_id=None):
+        request = current_projection(event, request_id=request_id)
+        return request.model_copy(
+            update={
+                "input_records": tuple(
+                    record.model_copy(update={"role": "tool", "written_by": WrittenBy.TOOL})
+                    for record in request.input_records
+                )
+            }
+        )
+
+    async def scenario():
+        app = create_hub(config)
+        async with (
+            app.core.router.lifespan_context(app.core),
+            AsyncClient(transport=ASGITransport(app), base_url=config.public_origin) as client,
+        ):
+            _, headers, _, raw = await provision(client, config)
+            raw.update(
+                kind="operation",
+                content={
+                    "text": "合成旧记忆：发布代号为银杉。",
+                    "metadata": {"agent_access_kind": "remember", "agent_access_version": 1},
+                },
+            )
+            event = prepare_event(raw, CredentialFilter())
+            with monkeypatch.context() as legacy:
+                legacy.setattr(ingest_module, "write_request", previous_projection)
+                legacy.setattr(generation_module, "write_request", previous_projection)
+                accepted = await client.post(
+                    "/hub/v1/events", headers=headers, json=event.model_dump(mode="json")
+                )
+            assert accepted.status_code == 202, accepted.text
+            receipt = accepted.json()
+            queue = app.core.state.memory_write_queue
+            before = queue.payload_for(receipt["receipt_id"])
+            assert before.input_records[0].role == "tool"
+            assert write_request(event).input_records[0].role == "assistant"
+            replayed = await client.post(
+                "/hub/v1/events", headers=headers, json=event.model_dump(mode="json")
+            )
+            assert replayed.status_code == 202 and replayed.json() == receipt
+            assert count_jobs(config) == 1
+            assert queue.payload_for(receipt["receipt_id"]) == before
+
+    asyncio.run(scenario())
 
 
 def test_upstream_callback_preserves_local_policy_and_callback_errors_deny(tmp_path, monkeypatch):
