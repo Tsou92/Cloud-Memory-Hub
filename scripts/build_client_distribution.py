@@ -71,7 +71,17 @@ def stage_project(source: Path, target: Path, code_directory: str) -> dict[str, 
     checksums = {}
     for relative in selected:
         original = source / relative
-        if path_problem(source, relative):
+        problem = path_problem(source, relative)
+        # The reviewed SDK has a Python package literally named hy_memory/data.
+        # Permit its source modules only; keep the shared gate for links and data files.
+        if (
+            problem == "runtime data or credential directory cannot be committed"
+            and code_directory == "hy_memory"
+            and relative.parent == Path("hy_memory/data")
+            and relative.suffix == ".py"
+        ):
+            problem = None
+        if problem:
             raise ValueError("source_file_invalid")
         destination = target / relative
         destination.parent.mkdir(parents=True, exist_ok=True)

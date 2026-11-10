@@ -207,6 +207,23 @@ class DistributionTests(unittest.TestCase):
             builder.build_wheel(source, output, constraints, "python3.12", "example"), wheel
         )
 
+    @patch.object(builder, "source_files")
+    def test_reviewed_sdk_data_package_allows_python_but_not_a_database(self, files):
+        source = self.root / "sdk"
+        (source / "hy_memory/data").mkdir(parents=True)
+        (source / "pyproject.toml").write_text("[project]\nname='hy-memory'\n")
+        module = Path("hy_memory/data/cache.py")
+        (source / module).write_text("VALUE = 1\n")
+        files.return_value = [Path("pyproject.toml"), module]
+        target = self.root / "sdk-staged"
+        builder.stage_project(source, target, "hy_memory")
+        self.assertEqual((target / module).read_text(), "VALUE = 1\n")
+        database = Path("hy_memory/data/runtime.sqlite3")
+        (source / database).write_text("private data")
+        files.return_value.append(database)
+        with self.assertRaisesRegex(ValueError, "source_file_invalid"):
+            builder.stage_project(source, self.root / "sdk-rejected", "hy_memory")
+
 
 if __name__ == "__main__":
     unittest.main()
