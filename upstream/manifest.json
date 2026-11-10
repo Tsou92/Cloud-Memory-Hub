@@ -129,6 +129,11 @@
       "path": "patches/0025-core-diagnostic-maintenance.patch",
       "scope": "core_diagnostic_writer_pause_join_and_owned_rotating_handler_maintenance",
       "digest": "sha256:6a5cf07b03a654f4847508c353da3e93569c30d6349777167dddc8c78bebf8fe"
+    },
+    {
+      "path": "patches/0026-anthropic-messages-provider.patch",
+      "scope": "anthropic_messages_generation_probe_activation_and_existing_model_settings",
+      "digest": "sha256:f64fa26a87d7fc89c3bac1df0b7f03a91b2932647f673701c01af01c4a27e577"
     }
   ]
 }

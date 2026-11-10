@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.check_repository import check_repository, path_problem, source_files
-from scripts.check_secrets import parse_findings, scan_paths
+from scripts.check_secrets import REVIEWED_TEST_PATCH, parse_findings, scan_paths
 
 
 class RepositoryGateTests(unittest.TestCase):
@@ -93,6 +93,19 @@ class RepositoryGateTests(unittest.TestCase):
     def test_clean_file_passes_actual_scanner(self):
         self.write("README.md", "# Cloud Memory Hub\n")
         self.assertEqual(scan_paths(self.root, [Path("README.md")]), [])
+
+    def test_public_patch_fixture_exception_does_not_hide_added_or_changed_keys(self):
+        fixture = 'API_KEY = "probe-secret-value"'  # pragma: allowlist secret
+        self.write(REVIEWED_TEST_PATCH, " " + fixture + "\n")
+        self.assertEqual(scan_paths(self.root, [REVIEWED_TEST_PATCH]), [])
+        for content in (
+            "+" + fixture,
+            ' API_KEY = "different-private-value"',  # pragma: allowlist secret
+        ):
+            self.write(REVIEWED_TEST_PATCH, content + "\n")
+            self.assertTrue(scan_paths(self.root, [REVIEWED_TEST_PATCH]))
+        self.write("real.py", "    " + fixture + "\n")
+        self.assertTrue(scan_paths(self.root, [Path("real.py")]))
 
     def test_scanner_failure_never_prints_raw_output(self):
         self.write("README.md", "# Example\n")

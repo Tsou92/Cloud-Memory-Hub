@@ -1,5 +1,7 @@
 # Hy-Memory / MemHub 复用评估
 
+2026-11-10 Anthropic 接入：补丁 0026 复用固定上游 LLMProvider 的限流、重试、JSON 和工具调用返回合同，以及 Core 已有 Messages 请求、模型配置/激活、用量审计和网页表单。原 SDK 仅有 OpenAI 生成后端，Core/UI 明确拒绝 Anthropic，因此增加协议转换和开放既有路径；不新增代理、提炼引擎、数据库或配置页面。默认继续使用内置本地向量；探测与生成共用严格响应解析。设计、兼容修复和未验证边界见 [ADR-0052](../adr/0052-anthropic-memory-provider.md)。
+
 2026-11-10 MVP 每轮共享：继续直接复用固定上游 `one_memory.live_capture._messages` 对 UserPromptSubmit 和 Stop 的可见文字提取，不调用会依赖本机 EvidenceStore 或回退扫描 transcript 的完整 capture_hook。远程上传沿用 AgentSettings、prepare_event、LocalOutbox 和 send_pending；下一轮使用已有 history-list／ReadReply 与有限上下文呈现，无需 NAS 模型提炼。新增的工作目录绑定与稳定远程事件身份属于 Hub 的连接合同，不新建采集数据库、搜索引擎或上游补丁。设计见 [ADR-0050](../adr/0050-mvp-visible-turn-hooks.md)，实际测试结果另行记录，源码复用不作为宿主通过的证据。
 
 2026-11-10 四域覆盖继续复用既有 23 个补丁，无新增上游补丁。Core 字节判别复用 `StrictDiagnosticFormatter` 与 `project_core_diagnostic`，真实样例由原生 `start_logging_to_file`、`DiagnosticLog.write/close` 产生；文件维护复用补丁 0025 的实际写者暂停和处理器租约。上游未提供 Hub 的父操作授权、版本化覆盖证明或无来源副本许可，因此这些边界保留在 Hub；无来源 Core 正文暂不执行物理删除，见 [ADR-0047](../adr/0047-core-file-coverage-and-physical-authority.md)。

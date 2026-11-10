@@ -17,6 +17,15 @@ PUBLIC_UPSTREAM_FINGERPRINTS = (
     "cc8c8282371eb13bd4e2a27be388d967e63ad7c58a0226bae3ec8a96b0c2a427",  # pragma: allowlist secret
 )
 
+# Exact public test fixtures from the pinned upstream, only in patch context or
+# removed lines. Added lines and real source still undergo the normal scan.
+PUBLIC_UPSTREAM_TEST_LINES = (
+    r"^(?:-\s*build_hy_memory_config\(profile, "
+    r'api_key="secret", data_dir=tmp_path\)'  # pragma: allowlist secret
+    r'| ?API_KEY = "(?:probe-secret-value|key-that-must-never-enter-sqlite)")$'
+)
+REVIEWED_TEST_PATCH = Path("upstream/patches/0026-anthropic-messages-provider.patch")
+
 
 def parse_findings(output: str) -> list[str]:
     try:
@@ -43,8 +52,11 @@ def parse_findings(output: str) -> list[str]:
 
 def scan_paths(root: Path, paths: list[Path]) -> list[str]:
     findings = []
-    for offset in range(0, len(paths), 64):
-        batch = paths[offset : offset + 64]
+    ordinary = [path for path in paths if path != REVIEWED_TEST_PATCH]
+    batches = [ordinary[offset : offset + 64] for offset in range(0, len(ordinary), 64)]
+    if REVIEWED_TEST_PATCH in paths:
+        batches.append([REVIEWED_TEST_PATCH])
+    for batch in batches:
         for relative in batch:
             if path_problem(root, relative):
                 raise RuntimeError("Source path policy failed; refusing to scan unsafe paths.")
@@ -57,6 +69,11 @@ def scan_paths(root: Path, paths: list[Path]) -> list[str]:
                     "--all-files",
                     "--exclude-secrets",
                     "^(?:" + "|".join(PUBLIC_UPSTREAM_FINGERPRINTS) + ")$",
+                    *(
+                        ["--exclude-lines", PUBLIC_UPSTREAM_TEST_LINES]
+                        if batch == [REVIEWED_TEST_PATCH]
+                        else []
+                    ),
                     "--",
                     *[str(root / path) for path in batch],
                 ],
