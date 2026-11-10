@@ -4,7 +4,7 @@ index ec30f4b..774bc6f 100644
 +++ b/memhub/apps/core/src/one_memory/sdk_memory_qa.py
 @@ -9,6 +9,12 @@ from contextlib import aclosing
  from typing import Literal
- 
+
  import httpx
 +from hy_memory.agent.anthropic_messages import (
 +    AnthropicRequestError,
@@ -13,7 +13,7 @@ index ec30f4b..774bc6f 100644
 +    parse_response,
 +)
  from pydantic import BaseModel, ConfigDict
- 
+
  from one_memory.http_client import create_async_client
 @@ -279,13 +285,19 @@ class SdkMemoryAnswerer:
                      json=payload,
@@ -36,7 +36,7 @@ index ec30f4b..774bc6f 100644
 +            return _parse_model_answer(body)
 +        except (AnthropicRequestError, KeyError, IndexError, TypeError, ValueError) as error:
              raise MemoryAnswerError("memory_answer_invalid_model_output") from error
- 
+
      async def _model_chunks(
 @@ -295,6 +307,12 @@ class SdkMemoryAnswerer:
          memories: tuple[SdkAskMemory, ...],
@@ -58,8 +58,8 @@ index ec30f4b..774bc6f 100644
 -        except (httpx.TimeoutException, httpx.NetworkError) as error:
 +        except httpx.RequestError as error:
              raise MemoryAnswerError("memory_answer_model_unavailable") from error
- 
- 
+
+
 @@ -428,7 +446,22 @@ def _sdk_answer_request(
              },
          )

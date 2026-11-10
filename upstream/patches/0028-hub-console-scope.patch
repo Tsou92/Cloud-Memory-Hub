@@ -5,7 +5,7 @@ index 77eec8e..be2422a 100644
 @@ -82,6 +82,24 @@
    expect(screen.queryByRole("button", { name: "帮助与诊断" })).toBeNull();
  });
- 
+
 +it("shows NAS build metadata without desktop-only controls in Hub mode", async () => {
 +  render(
 +    <R6Settings
@@ -57,14 +57,14 @@ index 3c33e51..9f77290 100644
    const [modelError, setModelError] = useState(false);
 @@ -180,9 +184,9 @@
    }, []);
- 
+
    useEffect(() => {
 -    if (!active) return;
 +    if (!active || hub) return;
      void readData();
 -  }, [active, readData]);
 +  }, [active, readData, hub]);
- 
+
    async function changeLogin(enabled: boolean) {
      if (!window.oneMemory?.setLoginPreference) {
 @@ -339,7 +343,9 @@
@@ -258,7 +258,7 @@ index 1cc5648..60d89a3 100644
 @@ -8,70 +8,129 @@
  } from "./api";
  import { R6Button } from "./R6Controls";
- 
+
 +export type LibraryMemory = Pick<
 +  SdkMemoryRecord,
 +  "memory_id" | "content" | "layer" | "status"
@@ -316,7 +316,7 @@ index 1cc5648..60d89a3 100644
 +      detailRequest.current?.abort();
 +    };
 +  }, []);
- 
+
    const refresh = useCallback(async () => {
 -    if (!active) return;
 +    if (!active || detailOnly) return;
@@ -355,11 +355,11 @@ index 1cc5648..60d89a3 100644
      }
 -  }, [active, offset, status]);
 +  }, [active, offset, status, reader, limit, detailOnly]);
- 
+
    useEffect(() => {
      void refresh();
    }, [refresh]);
- 
+
 -  const open = useCallback(async (memoryId: string) => {
 -    setBusy(true);
 -    setError("");
@@ -397,11 +397,11 @@ index 1cc5648..60d89a3 100644
 +    },
 +    [reader],
 +  );
- 
+
    useEffect(() => {
      if (active && focusedMemoryId) void open(focusedMemoryId);
    }, [active, focusedMemoryId, open]);
- 
+
    async function save() {
 -    if (!selected || !draft.trim()) return;
 +    if (reader || !selected || !draft.trim()) return;
@@ -410,7 +410,7 @@ index 1cc5648..60d89a3 100644
      try {
 @@ -87,7 +146,7 @@
    }
- 
+
    async function remove() {
 -    if (!selected) return;
 +    if (reader || !selected) return;
@@ -420,7 +420,7 @@ index 1cc5648..60d89a3 100644
 @@ -102,62 +161,129 @@
      }
    }
- 
+
 +  async function more() {
 +    if (!reader || !selected || selected.next_content_offset == null) return;
 +    detailRequest.current?.abort();
@@ -615,7 +615,7 @@ index 5942c2d..21e7cce 100644
 -import { type FormEvent, useEffect, useState } from "react";
 +import { type FormEvent, useEffect, useRef, useState } from "react";
  import { getSdkRaw, searchSdkRaw } from "./api";
- 
+
 -export function SdkRawHistory() {
 -  const [recent, setRecent] = useState<SdkRawRecord[]>([]);
 +export type HistoryRecord = Pick<
@@ -647,7 +647,7 @@ index 5942c2d..21e7cce 100644
 +      alive.current = false;
 +    };
 +  }, []);
- 
+
    useEffect(() => {
      let current = true;
 -    void getSdkRaw({ limit: 100 }).then(
@@ -685,7 +685,7 @@ index 5942c2d..21e7cce 100644
      };
 -  }, []);
 +  }, [reader, offset, revision]);
- 
+
    async function submit(event: FormEvent) {
      event.preventDefault();
 -    if (!query.trim()) return;
@@ -696,7 +696,7 @@ index 5942c2d..21e7cce 100644
 @@ -38,25 +75,61 @@
      }
    }
- 
+
 +  async function more(item: HistoryRecord) {
 +    if (!reader || item.next_content_offset == null) return;
 +    setBusy(true);
@@ -814,7 +814,7 @@ index 5942c2d..21e7cce 100644
      </section>
    );
  }
- 
+
 -function asContextItem(item: SdkRawRecord): SdkRawContextItem {
 +function asContextItem(item: HistoryRecord): SdkRawContextItem {
    return {
@@ -826,14 +826,14 @@ index 9ddb540..aa93536 100644
 +++ b/memhub/apps/web/src/main.tsx
 @@ -2,6 +2,7 @@
  import { createRoot } from "react-dom/client";
- 
+
  import { App } from "./App";
 +import { HubConsole } from "./HubConsole";
  import { installNativeDisplayStyles } from "./native-display-styles";
  import { installRendererDebugLogCapture } from "./renderer-debug-log";
  import "./native-display-styles.css";
 @@ -20,6 +21,6 @@
- 
+
  createRoot(root).render(
    <StrictMode>
 -    <App />
