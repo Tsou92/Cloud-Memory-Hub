@@ -1,5 +1,7 @@
 # 验证计划与需求追踪
 
+2026-11-10 受控备份恢复补充 NAS 真机证据：固定镜像源码 `ae9cb2e` 的正常恢复 11 项与单次真实 `SIGKILL` 中断恢复 7 项阶段检查通过，关联 FR-11、FR-13、ENG-01 及 R3-02／R3-03。覆盖空三卷导入后的非空业务／身份／配置读回、历史回滚保留较新普通忘记和设备撤销、损坏归档拒绝，以及复制途中实际杀进程后的启动／备份拒绝和保护版本空卷恢复。独立项目事件始终保留为 `pending`，不计作模型提炼成功；两组隔离资源均已清理。镜像、步骤、保护性拒绝和未覆盖断电／硬盘故障的边界见[NAS 恢复演练记录](backup-and-recovery.md#nas-恢复演练记录)，不代替最终发行制品或两机宿主验收。
+
 2026-11-10 MVP 主线新增通用 Agent 入口验证：`test_agent_access.py` 使用真实 Hub HTTP 验证跨设备接纳原文、项目隔离、过滤和交接；`test_agent_mcp.py` 使用官方 MCP 客户端与真实子进程验证初始化、工具调用、两设备立即读取、完整交接及安全错误。关联 FR-01、FR-02、FR-03、FR-05、FR-07、FR-12；设计见 [ADR-0049](adr/0049-mvp-agent-access-and-handoff.md)，使用方式见[Agent 接入](agent-access.md)。单机双设备身份不代表两台 Mac 或两个真实宿主已完成验收。
 
 2026-11-10 四域覆盖增加 `test_core_records.py`、`test_core_file_inventory.py`、`test_core_file_execution.py` 及 `test_core_coverage_capability.py`、`test_core_coverage_store.py`、`test_core_coverage_binding.py`、`test_core_coverage_activation.py`；原文件安装探针增加真实停服激活、Core 原生严格输出、跨进程四域恢复及无授权正文拒绝。实际旧镜像还需对激活前对照可读、对新能力精确拒绝并保持文件/数据库不变。关联 FR-10、FR-11、ENG-01，当前实测与未完成范围见[记录](reviews/2026-11-10-core-file-coverage.md)及[ADR-0047](adr/0047-core-file-coverage-and-physical-authority.md)。
