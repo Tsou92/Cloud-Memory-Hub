@@ -532,6 +532,26 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn(str(path), " ".join(args[0]))
         self.assertEqual(kwargs["env"]["CMH_ACL_TARGET"], str(path))
 
+    def test_windows_acl_rebuilds_child_module_path_without_mutating_parent(self):
+        completed = client.subprocess.CompletedProcess([], 0)
+        for name in ("PSModulePath", "pSmOdUlEpAtH"):
+            with (
+                self.subTest(name=name),
+                patch.dict(
+                    os.environ,
+                    {name: "synthetic-incompatible-ps7-modules", "OTHER_SETTING": "preserved"},
+                    clear=True,
+                ),
+            ):
+                original = dict(os.environ)
+                with patch.object(client.subprocess, "run", return_value=completed) as run:
+                    client.windows_acl(self.home, apply=True)
+                child_environment = run.call_args.kwargs["env"]
+                self.assertFalse(any(key.upper() == "PSMODULEPATH" for key in child_environment))
+                self.assertEqual(child_environment["OTHER_SETTING"], "preserved")
+                self.assertEqual(child_environment["CMH_ACL_APPLY"], "yes")
+                self.assertEqual(dict(os.environ), original)
+
     def test_failed_acl_refuses_file(self):
         completed = client.subprocess.CompletedProcess([], 1)
         with patch.object(client.subprocess, "run", return_value=completed):

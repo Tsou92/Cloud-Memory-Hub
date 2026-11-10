@@ -216,6 +216,11 @@ foreach($r in $a.Access) {
 };
 if(@($a.Access).Count -eq 0){exit 3}
 """
+    # A pwsh -> Python -> powershell.exe chain otherwise inherits incompatible PS7
+    # modules. Let Windows PowerShell construct its native module path at startup;
+    # only this child environment changes, not the caller's settings or ACL policy.
+    environment = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+    environment.update(CMH_ACL_TARGET=str(path), CMH_ACL_APPLY="yes" if apply else "no")
     try:
         result = subprocess.run(
             [
@@ -225,7 +230,7 @@ if(@($a.Access).Count -eq 0){exit 3}
                 "-EncodedCommand",
                 base64.b64encode(script.encode("utf-16-le")).decode(),
             ],
-            env=dict(os.environ, CMH_ACL_TARGET=str(path), CMH_ACL_APPLY="yes" if apply else "no"),
+            env=environment,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=20,
