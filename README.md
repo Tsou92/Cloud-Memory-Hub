@@ -10,7 +10,7 @@ MacBook 与 Mac mini 已分别安装客户端，使用独立设备、来源和�
 
 两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装，原有配置保留并已备份。真实 Claude 模型已按 Skill 约定使用 MCP，保持同一会话读到 Mac mini 的新决定并保存交接；原生 Skill 只读调用也通过。新增当前轮自动 hook 已完成真实 Claude、NAS、Mini 的 4/4 隔离验收并安装到指定项目目录。当前 Codex 桌面对话也已通过 Skill 的本机 CLI 绑定读取 Claude 交接并保存接续，桌面原生 MCP 仍未验证。证据、安装验收及首次探针比对失败的复核见[自动共享记录](docs/reviews/2026-11-10-visible-turn-mvp.md)，宿主边界见[路线图](docs/roadmap.md)与[六入口能力清单](docs/research/g1-client-capabilities.md)。
 
-当前问题召回已升级到两台 Mac：每轮并行读取相关旧记忆和最近原文，真实 Claude 的项目 hook 与对端读回通过。Anthropic Messages 提炼接入已实现，NAS 已升级并完成备份/重启验证；模型地址和名称已预填，尚待用户在私有页面填写密钥并完成真实提炼验收，见[本轮记录](docs/reviews/2026-11-10-anthropic-mvp.md)。
+当前问题召回已升级到两台 Mac：每轮并行读取相关旧记忆和最近原文，真实 Claude 的项目 hook 与对端读回通过。NAS 模型配置已启用，支持自动获取候选列表；真实 Anthropic 提炼、两机双向语义搜索及 Mini 真实 Claude 原生 Skill 读取长期记忆并回答均已通过。当前服务为 `6801367`，客户端 `272038f`；结果与边界见[模型配置记录](docs/reviews/2026-11-10-model-catalog.md)和[显式记忆验收](docs/reviews/2026-11-10-explicit-memory.md)。
 
 管理入口继续复用固定版本的 MemHub Core 和管理网页。完整自动采集、离线读取缓存、历史导入及删除传播仍在开发；当前不应导入真实历史或用作唯一记忆存储。旧日志治理等系统性完善后置，以下前序记录保留各自当时的验证范围。
 
