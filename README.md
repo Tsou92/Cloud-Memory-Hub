@@ -1,65 +1,106 @@
 # Cloud Memory Hub
 
-部署在 NAS 上、连接不同设备与 Agent 的共享记忆服务。
+把记忆放在自己的 NAS，让不同 Mac、不同 Agent 接着同一份项目进展工作。Cloud Memory Hub 复用 Hy-Memory / MemHub 的记忆核心与管理网页，通过 Docker 部署，并提供通用 MCP、CLI 和可安装 Skill。
 
-**当前交付：MVP 已部署并配置可用。两台 Mac 共享记忆、通用 MCP／Skill 接入与任务交接均有实测证据；完整产品及 G2 剩余能力仍在后续范围。**
+- **多设备共享记忆**：各设备使用独立凭证访问同一个项目，保存的更新可直接读取；配置模型后可提炼和检索长期记忆。
+- **通用 Agent 接入**：MCP 提供读写工具，Skill 约定调用时机；支持 MCP 或本机 CLI 的 Agent 可按接口接入，自动触发能力按宿主分别验证。
+- **任务交接**：用 `handoff_save` 保存背景、进展与下一步，在另一端用返回的完整 ID 调用 `handoff_load` 接续任务；不要求不同 Agent 使用相同的原生会话格式。
 
-已验证的日常入口为指定项目中的 Claude Code CLI 自动钩子，以及 Codex 桌面的 Skill／CLI 工作流。本轮 MacBook 的 Codex 桌面对话还实际完成原生 MCP 读取与写入；其他桌面会话及每轮自动触发仍未验证。已有 Agent 会话需要新会话或重新连接，才能加载更新后的 MCP 配置。
+源码：[Tsou92/Cloud-Memory-Hub](https://github.com/Tsou92/Cloud-Memory-Hub) · [Mac 接入](docs/client-installation.md) · [备份与恢复](docs/backup-and-recovery.md) · [发布计划](docs/release-plan.md)
 
-当前正收口面向 GitHub 自行部署的产品发布：NAS 已备份升级到 `preview-92f0a02`，网页提供真实项目记忆、原文、来源、带引用的 Anthropic 问答、普通忘记及项目／设备配对。Mac arm64 候选包已在全新环境独立安装并配对，支持 MCP 配置导出和后台补传管理。已完成 NAS 两版本自动备份实测；完整归档、空环境导入与历史回滚正在收口验证。管理网页真实点击、新包第二台 Mac／实际宿主接入、NAS 恢复演练与正式发行仍未完成。参见[发布计划](docs/release-plan.md)、[控制台验收](docs/reviews/2026-11-10-project-console.md)和[自助客户端记录](docs/reviews/2026-11-10-self-service-clients.md)。参赛准备在独立分支开展，不改变产品主体。
+## 当前状态与支持范围
 
-当前主线按用户确认收敛为多设备共享记忆、通用接入和任务交接。Agent 保存的记忆更新可直接读取；交接正文可按 ID 在另一端接续，无需等待 NAS 模型提炼。接入配置见 [Agent 使用说明](docs/agent-access.md)，最新结果见[两台 Mac 验收记录](docs/reviews/2026-11-10-two-host-mvp.md)。
+**当前是面向自行部署用户的发行候选开发阶段，产品版本为 `0.1.0.dev0`，尚未发布正式版本标签或可下载的正式 Release。** 截至 2026-11-10，公开源码基线为 `6337a61`；首次[远程 CI](https://github.com/Tsou92/Cloud-Memory-Hub/actions/workflows/quality.yml)已启动，两项 quality 检查通过，runtime 尚未完成，完整门禁仍待验收。早期 MVP 的两机结果也不能替代新发行包验收。
 
-MacBook 与 Mac mini 已分别安装客户端，使用独立设备、来源和队列访问同一 NAS 项目。Tailscale HTTPS 入口、两端证书校验和授权读取通过；真实两机 MCP 探针 **7/7 通过**，覆盖双向写读、同连接更新、幂等与约 8 KiB 完整交接。NAS 新 MVP 服务健康，旧验证服务未变；该结果不等于实际 Agent 模型自主调用通过。
+| 入口 | 当前能力 | 验收边界 |
+| --- | --- | --- |
+| NAS 服务 | Linux amd64，Docker / Compose；项目隔离、共享记忆、原文与交接 | 已有真实 NAS 运行与两台 Mac 读写证据；其他架构未验 |
+| Mac 候选客户端 | arm64、Python 3.12；独立安装、配对、MCP 配置导出、后台补传与状态 | 本机全新安装及 NAS 联调通过；新包的 Mac mini 安装与真实宿主接入仍待验 |
+| Claude Code CLI | MCP / Skill 与指定项目的逐轮 hooks | 早期 MVP 已验证真实模型读写和同会话下一轮召回 |
+| Codex 桌面 | MCP / Skill / CLI 工作流 | 已在真实桌面对话中验证原生 MCP 读写；每轮自动触发未验 |
+| 其他 Agent | 通用 MCP 或 Skill + CLI 接口 | OpenCode、Hermes、Cherry Studio、Open Design 等仍需逐一宿主验收 |
+| 管理网页 | 项目、记忆、原文、来源、带引用的问答、普通忘记、设备配对、备份设置 | 组件与构建验证已有记录；真实浏览器点击及完整视觉验收仍待完成 |
 
-两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装，原有配置保留并已备份。真实 Claude 模型已按 Skill 约定使用 MCP，保持同一会话读到 Mac mini 的新决定并保存交接；原生 Skill 只读调用也通过。新增当前轮自动 hook 已完成真实 Claude、NAS、Mini 的 4/4 隔离验收并安装到指定项目目录。前序 Codex 桌面验证使用 Skill 的本机 CLI 绑定读取 Claude 交接并保存接续；本轮新增的原生 MCP 证据见上文控制台记录。证据、安装验收及首次探针比对失败的复核见[自动共享记录](docs/reviews/2026-11-10-visible-turn-mvp.md)，宿主边界见[路线图](docs/roadmap.md)与[六入口能力清单](docs/research/g1-client-capabilities.md)。
+NAS 已验证两版本自动备份及重启后计划保留，并完成受控恢复的 **11 项正常恢复检查与 7 项真实进程中断检查**：空三卷导入、历史回滚保留较新忘记／设备撤销、损坏归档拒绝及保护版本恢复。此证据使用独立合成数据，不包含 NAS 断电、硬盘故障或全部中断位置，见[演练记录](docs/backup-and-recovery.md#nas-恢复演练记录)。
 
-当前问题召回已升级到两台 Mac：每轮并行读取相关旧记忆和最近原文，真实 Claude 的项目 hook 与对端读回通过。NAS 模型配置已启用，支持自动获取候选列表；真实 Anthropic 提炼、两机双向语义搜索及 Mini 真实 Claude 原生 Skill 读取长期记忆并回答均已通过。当前服务为 `92f0a02`，客户端仍为 `60fb82b`；前序模型结果与边界见[模型配置记录](docs/reviews/2026-11-10-model-catalog.md)和[显式记忆验收](docs/reviews/2026-11-10-explicit-memory.md)。
+完整历史自动导入、所有 Agent 的自动采集、离线记忆读取缓存、离线删除规则传播和旧日志全域治理仍在后续范围。当前候选应先用独立项目和合成数据试用，保留原数据及备份；正式发行还需完成新包第二台 Mac、实际宿主、浏览器及远端 CI 验收。
 
-真实 Claude 已在同一会话的下一轮自动使用另一台 Mac 经断线补传后新提炼的长期记忆；重复发送只产生一份服务端任务。NAS 隔离验证同时确认遗忘内容不会因重投复活。被拒内容阻塞后续队列的问题已修复并备份升级至两台 Mac，原事件与回执保持；新版两机 MCP 7/7、实际项目钩子及双向读回通过。已有宿主会话需重连加载新 MCP，不能将配置切换视为热升级，见[修复记录](docs/reviews/2026-11-10-terminal-upload-rejections.md)。首次探针的文本比较误判及只读复核如实记录在[联合验收](docs/reviews/2026-11-10-next-turn-and-reconnect.md)。
+## 从源码在 NAS 试部署
 
-管理入口继续复用固定版本的 MemHub Core 和管理网页。完整自动采集、离线读取缓存、历史导入及删除传播仍在开发；当前不应导入真实历史或用作唯一记忆存储。旧日志治理等系统性完善后置，以下前序记录保留各自当时的验证范围。
+准备 Git、Docker 和 Compose，以及可下载固定上游、Python / Node 依赖与内置检索模型的构建网络。下面使用新的 Compose 项目试运行，不连接已有实例的数据卷：
 
-## 前序实现与验证记录
+```sh
+git clone https://github.com/Tsou92/Cloud-Memory-Hub.git
+cd Cloud-Memory-Hub
+export COMPOSE_PROJECT_NAME=cloud-memory-hub-trial
+docker build --platform linux/amd64 --build-arg CMH_REVISION="$(git rev-parse HEAD)" --tag cloud-memory-hub:development .
+docker compose run --rm setup
+docker compose up -d --no-build hub
+docker compose ps
+```
 
-当前开发版本使用独立治理卷、主治理日志版本 2、身份库版本 3 及独立 SDK 准入日志；已有实验实例须停服备份后显式迁移，不能直接用旧镜像回退。普通记忆忘记、彻底删除及旧业务数据恢复后的重放已有实现。新接纳任务在能够证明尚未获准调用 SDK 时，可在确认范围内取消：忘记保留可显式读取的完整原文，彻底删除清理目标正文；仅恢复旧队列后，启动会重放同一操作。
+首次 `setup` 创建实例身份和管理员凭证，只执行一次；后续启动复用原卷。若已有同名试验项目，请使用新的项目名。完整前置条件、旧实例迁移和排障见[容器运行指南](docs/development-runtime.md)，不要把首次安装命令用于覆盖旧实例。
 
-旧任务或已获准调用 SDK 的任务仍需完整副作用证明；生产力记录的忘记与物理删除、诊断文件/后台日志副本清理、完整备份恢复和离线规则传播也仍待完成。范围或证明不完整时明确拒绝执行，恢复未完成前不开放写入。当前证据与限制见[在途任务取消及恢复记录](docs/reviews/2026-11-10-inflight-execution.md)，迁移方式见[运行指南](docs/development-runtime.md)。
+Compose 默认只监听 NAS 的 `127.0.0.1:8800`。跨设备使用需先为该服务配置 HTTPS 入口，并将 `.env` 中的 `CMH_PUBLIC_ORIGIN` 设置为实际 Origin 后重新创建 Hub 容器；两机 MVP 实测使用 Tailscale HTTPS。`localhost` 是当前设备本机，不能作为另一台 Mac 访问 NAS 的地址。
 
-NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、启动与重启验证通过。本地和 NAS 的六套安装探针、完整 Compose 验证及实际双镜像迁移／拒绝均通过；未启用外部模型、导入真实历史或修改日常 Agent 配置。这仍是 G1 实验验证，详细证据见上述记录。
+在自己的 NAS 终端查看管理员凭证，再到实际入口登录：
 
-后续 `c7a8d27` 增加原生写入观察并修复请求诊断缓存遗漏：本地与 NAS 各七项隔离安装验证通过，常驻实例仍保持 `c0467f5`。观察字段不等于完整副作用证明，见[本轮记录](docs/reviews/2026-11-10-write-effects.md)。
+```sh
+docker compose exec hub cat /config/admin-token
+```
 
-诊断后台写入现已接入维护等待：删除会等真实日志任务和线程结束，搜索保持并发，关闭失败可重试。Hub 全量 1107 通过、5 跳过；原生/Core 相关 119 项通过；`e527566` 的同一镜像在本地和 NAS 各 8 项隔离安装验收全部通过，常驻 `c0467f5` 未升级。既有日志文件正文仍需后续清理，见[诊断生命周期记录](docs/reviews/2026-11-10-diagnostic-quiescence.md)。
+凭证只在本地查看，不放入聊天、Issue 或 Git。登录后按页面配置模型、创建项目，再为每台 Mac 创建独立设备并下载配对文件。模型 Key 填在管理网页中；原文更新和任务交接可先使用，长期记忆提炼与语义搜索依赖模型配置及处理结果。停止服务可用 `docker compose down`，保留卷；备份计划默认关闭，启用方法见[备份与恢复](docs/backup-and-recovery.md)。
 
-新增 Hub 严格诊断策略，debug 下也仅输出封闭元数据，SDK 默认兼容保留。最终本地 Hub 1111 通过／5 跳过，原生/Core 187 项通过，独立并发/异常审查与工程门禁通过；`c2242fa` 同一镜像在本地/NAS 各 9 项隔离安装验证及本地完整 Compose 检查通过，常驻 `c0467f5` 未升级。业务原文和记忆保留，旧物理日志仍待清理，见[验证记录](docs/reviews/2026-11-10-diagnostic-content.md)。
+## Mac 候选安装与 Agent 接入
 
-已有诊断文件的只读前置检查已实现：完整请求证明不补写 witness，原生记录按精确字节摘要分类，目录检查兼容实际共根。Hub 全量 1227 通过／5 跳过，工程与独立审查通过；`8588581` 同一镜像在本地/NAS 各 10 项隔离安装验证通过，常驻 `c0467f5` 未变。尚未接通文件物理清理或恢复重放，见[本步记录](docs/reviews/2026-11-10-diagnostic-inventory.md)。
+公开客户端包尚未发布。已有对应 arm64 候选包时，先校验摘要，解压后执行 `sh install.sh`，再按[Mac 自助接入](docs/client-installation.md)导入网页下载的配对文件。安装器使用新的私有目录，不覆盖原客户端；每台 Mac 使用自己的设备身份和队列。
 
-后续已实现独立的 SDK 两域文件执行与恢复组件，以及停服只读预览命令；新增签名执行格式、精确记录授权、逐文件替换和原日志处理器重绑定。最终 Hub 1397 通过／5 跳过，原生 192 项、Core 39 项通过；`cb2c9ca` 同一镜像在本地/NAS 各 11 套隔离安装探针通过，98 个安装生产文件与源码一致，常驻 `c0467f5` 未变。产品物理确认与完整恢复路由仍未启用。范围和证据见 [ADR-0043](docs/adr/0043-diagnostic-physical-execution.md) 和[本步记录](docs/reviews/2026-11-10-diagnostic-file-execution.md)。
+现在需要从源码试用，可按 [Agent 接入说明](docs/agent-access.md#mac-客户端安装)安装 Python 3.12 客户端；源码安装依赖固定上游与本机目录位置。维护者构建与发布候选包的方式见[发行制品说明](docs/release-artifacts.md)。Mac 只运行客户端，无需本地 Docker 或模型。
 
-后续修复现有普通服务的恢复故障隔离：已完成删除的重试失败后，禁止新 SDK 调用及原生 Core 正文输出，完整恢复成功后才重新开放；保留正常 worker、读取和管理员维护。`913f343` 完整 Hub 1424 项通过、5 项可选后端跳过，同一镜像本地/NAS 各 11 项安装探针通过，常驻服务未升级；见 [ADR-0044](docs/adr/0044-governance-runtime-recovery-fence.md) 与[验证记录](docs/reviews/2026-11-10-runtime-recovery-fence.md)。
+完成配对后，导出通用 MCP JSON 或 Codex TOML 配置，并安装公共 [Skill](packages/agent-skill/cloud-memory-hub/SKILL.md)。更新配置后重新连接 MCP 或开始新会话。用一条合成记忆验证 A 端保存、B 端读取，再验证 `handoff_save` / `handoff_load`；仅显示 MCP 已连接不能代替读写验收。后台补传负责已入队内容，不会自动扫描所有历史对话。
 
-当前继续接入联合文件恢复：真实父删除与多份 repair 的授权合并检查，文件 pass 冻结贡献者，旧临时文件共同证明后才处理；旧 memory-only 删除可进入只读维护预览。`bcef154` 完整 Hub 1507 项通过、5 项跳过，同一镜像本地/NAS 各 11 项安装探针通过，常驻服务未升级；普通服务尚未启用新执行格式，见 [ADR-0045](docs/adr/0045-diagnostic-recovery-graph.md) 和[验证记录](docs/reviews/2026-11-10-diagnostic-recovery.md)。
+## 验证证据与文档
 
-后续已统一业务与恢复状态读取，并接入真实终端审阅/签名组件及 Core 写者维护。`e537cba` 完整 Hub 1585 项通过、5 项跳过，同一镜像本地/NAS 各 12 项安装验收通过，102 个生产代码文件逐项核对一致，常驻服务未升级。Core 历史正文、Docker 日志覆盖和完整运行协调仍待接通，普通服务继续拒绝新执行格式；见 [ADR-0046](docs/adr/0046-governance-runtime-and-output-coverage.md) 和[验证记录](docs/reviews/2026-11-10-runtime-binding-and-core-maintenance.md)。
+| 内容 | 入口 |
+| --- | --- |
+| 两机共享记忆与交接 | [两台 Mac MVP](docs/reviews/2026-11-10-two-host-mvp.md) · [自动共享](docs/reviews/2026-11-10-visible-turn-mvp.md) |
+| 长期记忆与下一轮召回 | [显式记忆验收](docs/reviews/2026-11-10-explicit-memory.md) · [同会话与重连](docs/reviews/2026-11-10-next-turn-and-reconnect.md) · [队列拒绝修复](docs/reviews/2026-11-10-terminal-upload-rejections.md) |
+| 网页与候选客户端 | [控制台记录](docs/reviews/2026-11-10-project-console.md) · [Mac 安装及待验项](docs/reviews/2026-11-10-self-service-clients.md) · [模型配置](docs/reviews/2026-11-10-model-catalog.md) |
+| 备份与恢复 | [操作及 NAS 演练](docs/backup-and-recovery.md) · [自动备份记录](docs/reviews/2026-11-10-managed-backup.md) |
+| 需求与支持边界 | [需求说明](docs/requirements.md) · [发布计划](docs/release-plan.md) · [六入口能力清单](docs/research/g1-client-capabilities.md) |
+| 工程与来源 | [工程规范](docs/engineering.md) · [上游复用清单](docs/research/upstream-assessment.md) · [架构](docs/architecture/overview.md) |
+| 质量与发行 | [验证计划及历史记录](docs/verification.md) · [发行制品](docs/release-artifacts.md) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
-最新增量已接入 Core 四域文件分类、签名覆盖要求及停服激活：提高要求后，旧 SDK 回执重新待验证；全严格元数据文件可恢复验证，无授权 Core 正文保留现场并拒绝执行。`913f746` 完整 Hub 1759 项通过、5 项跳过，同镜像本地/NAS 各 12 套安装探针及两端真实旧镜像拒绝验证通过，104 个生产文件核对一致，常驻服务保持健康且未变。Core 正文许可、Docker 宿主覆盖与普通运行协调仍待完成；见 [ADR-0047](docs/adr/0047-core-file-coverage-and-physical-authority.md) 和[本步记录](docs/reviews/2026-11-10-core-file-coverage.md)。
+## 开发原则与检查
 
-已增加版本化的设备身份与上传接口：独立凭证、项目授权、轮换、撤销、来源注册和持久接纳。上传直接复用上游处理队列，并与回执一起保存完整已过滤原文；旧接纳格式需要显式迁移，见 [ADR-0017](docs/adr/0017-accepted-original-archive.md)。接纳回执不等于完成提炼、检索或客户端同步。身份兼容性见 [ADR-0004](docs/adr/0004-remote-device-access.md)，上传合同见 [远程接纳接口](docs/remote-ingest.md)。
+优先复用 Hy-Memory / MemHub 已有实现和测试，增量补丁、需求、设计、验证与审查进入 Git。自动读写和已有会话刷新必须在真实宿主验收；源码不保存真实对话、记忆库、备份、密钥或个人配置。
 
-本地连接组件已提供凭证过滤、持久投递队列、单次发送、持续补传、授权读取 CLI，以及显式授权的 Claude 原生文字／工具记录采集。Claude 每轮在线召回已在隔离的实际 CLI 中验证；日常客户端安装、离线读取缓存与其他适配器仍待接通。配置与限制见 [连接组件说明](docs/local-connector.md)、[来源采集](docs/source-capture.md)、[授权读取接口](docs/remote-read.md) 和 [Claude 召回](docs/agent-recall.md)。
+工程检查需要 Git、Python 3.12–3.14，以及 uv。运行时使用 Python 3.12、uv 0.12.5 和上游约束版本；各自使用锁文件。
 
-项目默认提供跨 Agent 的任务接续，同时保留原始记录追溯能力。首批目标入口为 Claude Code CLI、Codex 桌面版、OpenCode 终端、Hermes 终端、Cherry Studio 客户端和 Open Design 客户端；通过通用接口持续扩展其他 Agent。
+```sh
+uv sync --locked
+make check
+make check-runtime
+make check-upstream
+# 可选：本机已安装 Claude CLI 时，使用隔离配置和本地模型替身
+make check-claude
+make check-claude-recall
+# 以下两项需要 Docker
+make check-web
+# 构建 Linux amd64 并在独立临时卷中验证
+make check-container
+```
 
-## 开发原则
+检查包括格式、静态检查、工程门禁测试、文档链接、禁止入库的数据路径和源码凭证扫描。当前通过这些检查**不代表产品功能已通过验收**。
 
-- 需求、复用调查、架构决策、实现、测试、审查和发布均进入 Git。
-- **优先复用 Hy-Memory / MemHub 已有代码及测试，不重复开发已有能力。**
-- 全自动读写、已有对话刷新等能力必须在实际客户端验收，不能用 MCP 已连接代替。
-- 源码仓库不保存真实对话、记忆库、备份、密钥或个人机器配置。
+## 许可证
 
-## 项目导航
+项目自有源码采用 Apache-2.0，见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 和[许可决策](docs/adr/0061-project-license.md)。构建时按固定提交获取上游并应用已登记补丁，发行保留上游及第三方许可证、NOTICE 与来源清单。
+
+<details>
+<summary>历史工程验证与兼容设计索引</summary>
+
+以下文档保留各自日期、版本与验证范围，不代表当前发行包已全部验收。完整追踪见[验证计划](docs/verification.md)；旧实例操作仍以当前[运行指南](docs/development-runtime.md)和[受控恢复指南](docs/backup-and-recovery.md)为准。
 
 | 内容 | 入口 |
 | --- | --- |
@@ -116,30 +157,14 @@ NAS 常驻空实验实例已升级至 `c0467f5`，停服备份、显式迁移、
 | 派生写入生命周期 | [请求级收尾与取消](docs/adr/0030-derived-task-lifecycle.md) · [验证记录](docs/reviews/2026-11-04-derived-lifecycle.md) · [派生写入覆盖边界](docs/adr/0031-derived-writer-coverage.md) |
 | 贡献与安全 | [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) |
 
-## 本地质量检查
+其他历史接口与能力记录：
 
-工程检查需要 Git、Python 3.12–3.14，以及 uv。运行时使用 Python 3.12、uv 0.12.5 和上游约束版本；各自使用锁文件。
+- [0004-remote-device-access](docs/adr/0004-remote-device-access.md)
+- [agent-access](docs/agent-access.md)
+- [agent-recall](docs/agent-recall.md)
+- [local-connector](docs/local-connector.md)
+- [remote-ingest](docs/remote-ingest.md)
+- [remote-read](docs/remote-read.md)
+- [source-capture](docs/source-capture.md)
 
-```sh
-uv sync --locked
-make check
-make check-runtime
-make check-upstream
-# 可选：本机已安装 Claude CLI 时，使用隔离配置和本地模型替身
-make check-claude
-make check-claude-recall
-# 以下两项需要 Docker
-make check-web
-# 构建 Linux amd64 并在独立临时卷中验证
-make check-container
-```
-
-检查包括格式、静态检查、工程门禁测试、文档链接、禁止入库的数据路径和源码凭证扫描。当前通过这些检查**不代表产品功能已通过验收**。
-
-## GitHub 与发行状态
-
-公开源码仓库为 [Tsou92/Cloud-Memory-Hub](https://github.com/Tsou92/Cloud-Memory-Hub)。当前仍为发行候选，正式版本标签、可下载的 GitHub Release 及远程必需检查正在验收。
-仓库提供质量检查、手动触发的版本制品流水线、Issue / PR 模板和依赖更新配置；实际远程运行结果另行记录，工作流文件不等于 CI 已通过。制品流程见[发行说明](docs/release-artifacts.md)。
-
-项目自有源码采用 Apache-2.0，见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 和[许可决策](docs/adr/0061-project-license.md)。发行时保留第三方原始许可与来源清单。
-上游代码引入时保留原始许可证、NOTICE、来源提交和修改记录；当前尚未复制上游业务源码。
+</details>
