@@ -125,6 +125,9 @@ def test_real_sdk_scopes_lifecycle_provenance_and_restart(tmp_path):
                 ids = {i["record_id"] for i in found.json()["items"]}
                 assert ids and ids <= {identifiers["current"], identifiers["other_agent"]}
                 assert found.json()["content_trust"] == "untrusted_history"
+                punctuated = await read("memories/search", query="项目决定：使用蓝色设计方案。")
+                assert punctuated.status_code == 200
+                assert {i["record_id"] for i in punctuated.json()["items"]} == ids
                 for name in ("other_project", "global", "local", "archived", "old"):
                     denied = await read("memories/get", record_id=identifiers[name])
                     assert denied.status_code == 404
@@ -203,6 +206,12 @@ def test_read_revocation_during_sdk_work_and_query_privacy(tmp_path):
                     json={"scope_id": raw["scope_id"], "query": "password=" + secret},
                 )
                 assert bad.status_code == 422 and secret not in bad.text and not calls
+                obfuscated = await web.post(
+                    "/hub/v1/memories/search",
+                    headers=headers,
+                    json={"scope_id": raw["scope_id"], "query": "ｐａｓｓｗｏｒｄ：" + secret},
+                )
+                assert obfuscated.status_code == 422 and secret not in obfuscated.text and not calls
                 pending = asyncio.create_task(
                     web.post(
                         "/hub/v1/memories/search",
