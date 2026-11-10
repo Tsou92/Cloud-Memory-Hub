@@ -54,6 +54,8 @@ Codex 桌面所用 TOML 配置使用同一命令加 `--format codex`。将输出
 
 排障先运行带 `--check-remote` 的状态命令。`device_authentication_required` 检查网页设备是否被撤销或重新签发；`source_permission_required` 检查项目授权与来源；暂时网络错误检查 NAS 和 HTTPS 网络连接。不要通过删除队列或重建身份消除错误。
 
+若服务显示 `needs_attention`、退出码为 `126`，同时远程授权检查正常，应检查本机运行目录。实际验收中，macOS 系统保护拒绝后台进程读取 Desktop 内的自定义安装目录。使用默认的 `Library/Application Support/CloudMemoryHub/client-releases` 重新安装，并按下述方式切换服务注册；原配对配置和待传队列保留。
+
 停止服务使用 `service stop`，移除后台服务使用 `service uninstall`，参数同上；两者都不删除配对信息或待传队列。升级到新客户端版本前，用旧版本停止并卸载旧后台服务，再用新版本的命令重新安装、检查并启动；保留旧版本可供回退。不同版本的 MCP 进程也需重连后才会切换。
 
 ## 两台设备验证
