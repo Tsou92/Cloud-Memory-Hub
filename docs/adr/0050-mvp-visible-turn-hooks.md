@@ -1,6 +1,6 @@
 # ADR-0050：MVP 本轮可见消息采集与最近原文召回
 
-日期：2026-11-10。状态：实现与隔离验收中。关联 FR-01、FR-02、FR-03、FR-05、ENG-01；接续 [ADR-0049](0049-mvp-agent-access-and-handoff.md)。
+日期：2026-11-10。状态：已实现并通过两机隔离验收，指定项目日常安装已验证，范围见[执行记录](../reviews/2026-11-10-visible-turn-mvp.md)。关联 FR-01、FR-02、FR-03、FR-05、ENG-01；接续 [ADR-0049](0049-mvp-agent-access-and-handoff.md)。
 
 ## 目的与复用
 

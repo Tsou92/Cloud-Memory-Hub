@@ -2,7 +2,7 @@
 
 这套入口面向跨设备共享记忆和任务交接：Agent 通过同一组 MCP 工具或 CLI 读写 NAS 上的 Hub，Skill 约定何时调用。它复用现有私有连接文件、项目授权、凭证过滤、LocalOutbox、上传和授权读取接口，不新增记忆存储。
 
-本页对应 FR-01、FR-02、FR-03、FR-05、FR-07、FR-12。可安装的 Skill 位于 [cloud-memory-hub/SKILL.md](../packages/agent-skill/cloud-memory-hub/SKILL.md)。当前处于 G2：MCP／CLI／Skill 已实现，MacBook 与 Mac mini 已通过 NAS 的 Tailscale HTTPS 入口完成真实两机 MCP 验收 **7/7**；此前同镜像本地和 NAS 安装探针各 6/6。用户授权后，两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装并通过配置保留核验；真实 Agent 自主调用尚未验证，范围见[两机记录](reviews/2026-11-10-two-host-mvp.md)与[前序安装记录](reviews/2026-11-10-agent-access-mvp.md)。
+本页对应 FR-01、FR-02、FR-03、FR-05、FR-07、FR-12。可安装的 Skill 位于 [cloud-memory-hub/SKILL.md](../packages/agent-skill/cloud-memory-hub/SKILL.md)。当前处于 G2：MCP／CLI／Skill 已实现，MacBook 与 Mac mini 已通过 NAS 的 Tailscale HTTPS 入口完成真实两机 MCP 验收 **7/7**；此前同镜像本地和 NAS 安装探针各 6/6。两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装并通过配置保留核验；真实 Claude 模型读写、同会话更新及原生 Skill 读取已有新证据，详见[自动共享记录](reviews/2026-11-10-visible-turn-mvp.md)。Codex 桌面原生调用仍未验证，前序范围见[两机记录](reviews/2026-11-10-two-host-mvp.md)与[安装记录](reviews/2026-11-10-agent-access-mvp.md)。
 
 ## Mac 客户端安装
 
@@ -116,6 +116,8 @@ Claude 可另行启用[当前轮自动共享](agent-turn-hooks.md)，自动保�
 先在隔离客户端配置中接入并验证，再自行选择日常客户端的接入位置。各客户端 MCP 配置格式不同，本项目不覆盖其已有设置。工具可单独使用；Skill 补充“会话开始读、关键进度写、切换前交接、下一轮重新读”的工作约定。
 
 要安装 Skill，将整个 `packages/agent-skill/cloud-memory-hub` 目录复制到目标 Agent **已配置的 Skill 目录**。目录内只含通用说明，不含凭证或个人路径。目标已经存在同名 Skill 时先比较内容，不直接覆盖。安装后确认该客户端实际发现 `cloud-memory-hub`，并能看到已配置的七个工具；不支持 Skill 的客户端仍可显式调用 MCP。本文操作说明不会自动修改任何日常配置。
+
+需要 CLI 备用入口时，在已安装的 Skill 内生成私有 `references/local-connection.md`，只记录该机器已安装 CLI 的绝对路径、已配对 Agent 配置文件的绝对路径及 JSON stdin 用法。该文件不含连接凭证，属于本机配置，不进入 Git 或通用 Skill 发布包。这样尚未加载 MCP 的对话也能按明确绑定使用 CLI，不必搜索其他 Agent 配置。
 
 ## CLI 备用入口
 

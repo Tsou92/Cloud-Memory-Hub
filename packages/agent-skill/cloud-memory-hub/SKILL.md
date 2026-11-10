@@ -21,7 +21,9 @@ description: 在已配置的 Cloud Memory Hub 中读取和保存项目记忆，�
 | `handoff_load` | 按精确 `handoff_id` 读取已接纳的交接正文 |
 | `memory_sync` | 显式补传一批本机待传事件 |
 
-没有 MCP 而已安装 CLI 时，使用 `cloud-memory-agent --config-file <用户配置的私有路径> <command>`。对应命令为 `status`、`recent`、`search`、`remember`、`handoff-save`、`handoff-load`、`sync`。读写请求 JSON 从标准输入传递，`status` 和 `sync` 无需正文；不把正文或凭证放入命令参数，不打开连接文件来获取凭证。用 `--help` 确认已安装版本。`init` 仅供首次显式配置，不能用来修复或覆盖已有队列。
+当前对话没有这些 MCP 工具时，读取本 Skill 目录中安装器生成的 `references/local-connection.md`（若存在），使用其中的 CLI 绝对路径和私有 Agent 配置路径。该文件只存调用入口，不含凭证；不要扫描其他 Agent 配置或用户目录来猜测连接。未提供本机绑定时，请用户补齐配置。
+
+CLI 形式为 `<已安装命令> --config-file <已绑定私有路径> <command>`。对应命令为 `status`、`recent`、`search`、`remember`、`handoff-save`、`handoff-load`、`sync`。读写请求 JSON 从标准输入传递，`status` 和 `sync` 无需正文；不把正文或凭证放入命令参数，不打开连接文件来获取凭证。用 `--help` 确认已安装版本。`init` 仅供首次显式配置，不能用来修复或覆盖已有队列。
 
 如果连接未配置，说明缺少接入配置；不要扫描用户目录寻找凭证，不自动安装工具或修改日常 Agent 配置。连接、权限或服务错误不能解释为“没有记忆”。
 

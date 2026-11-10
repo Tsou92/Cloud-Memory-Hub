@@ -1,6 +1,6 @@
 # Claude 当前轮自动共享
 
-此入口在已配对的 MCP／CLI 之上增加 Claude 当前轮的自动采集和最近原文召回。先按 [Agent 接入说明](agent-access.md)准备私有配置与本地队列；实现依据见 [ADR-0050](adr/0050-mvp-visible-turn-hooks.md)。不需要启用 NAS 模型，不扫描历史会话文件。
+此入口在已配对的 MCP／CLI 之上增加 Claude 当前轮的自动采集和最近原文召回。先按 [Agent 接入说明](agent-access.md)准备私有配置与本地队列；实现依据见 [ADR-0050](adr/0050-mvp-visible-turn-hooks.md)。不需要启用 NAS 模型，不扫描历史会话文件。已在两台 Mac 的指定项目安装并核对真实 CLI 的设置加载，具体版本与证据见[验收记录](reviews/2026-11-10-visible-turn-mvp.md)。
 
 ## 工作方式
 
