@@ -53,6 +53,8 @@ preview.4 Skill／CLI 与独立 MCP 进程的接续读回，非原生 MCP 热加
 
 2026-11-10 发行诊断补充（FR-07、FR-12、ENG-01）：补丁 `0041-raw-search-failure-diagnostics.patch` 复用现有 `test_raw_search_without_model.py`，仅在原文检索状态断言失败时展示 `state`、`paths`、`total_ms`、`truncated`。查询、断言条件和时间预算保持原样；失败渲染检查使用合成样例，确认不输出正文、身份编号或凭证。这是定位 Linux 失败的观测信息，不代表检索问题已修复或运行时回归已全部通过。
 
+2026-11-10 导入测试启动同步补充（FR-08、ENG-01）：提交 `434cfca` 的 [push 检查](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42843951929)全部通过；同一源码的 [PR 检查](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42844585492)在三个导入调度用例中将尚未启动的任务判为失败。原文检索用例在两次检查中均通过，但此前未定因的失败仍保留，不能称为已修复。导入测试原先以 20／40 次 `sleep(0)` 推定后台线程已经完成启动；这不构成就绪证明。补丁 `0042-import-supervisor-test-readiness.patch` 只让三例等待各自适配器真实进入扫描，保留并发门、RUNNING、冻结、取消等待者与最终 COMPLETED 断言，产品调度代码及请求预算不变。本地负对照仅延后首次后台读取 45 次协作让出：原三例均失败，补丁后三例通过，完整测试文件 12 项通过；完整 Linux 回归及正式镜像验收仍须以补丁后的实际结果为准。
+
 | 编号 | 需求来源 | 核心验收 | 验证层次 |
 | --- | --- | --- | --- |
 | FR-01 | 需求 §1、§6 | 跨设备任务接续；背景、决策、进度与下一步有来源 | 质量评测＋真机 |

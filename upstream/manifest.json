@@ -209,6 +209,11 @@
       "path": "patches/0041-raw-search-failure-diagnostics.patch",
       "scope": "test_only_raw_search_failure_metadata_without_content_identifiers_retries_or_budget_changes",
       "digest": "sha256:ce4d6868a57560cc88fc30c834bd410f662b9fafb76d945944a64c1ad12bcf5d"
+    },
+    {
+      "path": "patches/0042-import-supervisor-test-readiness.patch",
+      "scope": "test_only_wait_for_real_adapter_scan_readiness_before_concurrency_freeze_and_waiter_cancellation_assertions",
+      "digest": "sha256:4a9c79568fa4fe77962a3eb730a2378d28889f2047b58ab63f866f15e9550dc4"
     }
   ]
 }
