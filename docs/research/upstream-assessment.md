@@ -1,5 +1,7 @@
 # Hy-Memory / MemHub 复用评估
 
+2026-11-10 显式记忆投影：同安装镜像的禁网合成重现证明 HY 正常执行场景分类和工具消息过滤，但 Hub 把 remember 文字当作工具输出，导致过滤后空输入。只修正 Hub 新接纳时的 assistant / AGENT 角色映射，继续复用原提炼和存储流程；旧队列和回执不改、不自动重放。依据见 [ADR-0054](../adr/0054-explicit-memory-input-role.md)。
+
 2026-11-10 模型配置修复：原 `model_probe._models_request` 仅判断已填模型，网页没有候选列表入口；复用既有 HTTP、URL 校验、凭证库和表单，增加只读有界模型列表 API 与选择控件。真实合成请求证明 64 token 探针会截断完整可用的 Anthropic 模型，因此调整预算和纯 JSON 提示，保留严格响应验证。兼容网关的列表认证重试仅限同地址 GET，不改生成协议。设计见 [ADR-0053](../adr/0053-model-catalog-and-probe-budget.md)。
 
 2026-11-10 Anthropic 接入：补丁 0026 复用固定上游 LLMProvider 的限流、重试、JSON 和工具调用返回合同，以及 Core 已有 Messages 请求、模型配置/激活、用量审计和网页表单。原 SDK 仅有 OpenAI 生成后端，Core/UI 明确拒绝 Anthropic，因此增加协议转换和开放既有路径；不新增代理、提炼引擎、数据库或配置页面。默认继续使用内置本地向量；探测与生成共用严格响应解析。设计、兼容修复和未验证边界见 [ADR-0052](../adr/0052-anthropic-memory-provider.md)。

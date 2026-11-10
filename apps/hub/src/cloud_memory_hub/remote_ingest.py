@@ -82,8 +82,18 @@ def write_request(event: EventEnvelope, *, request_id: str | None = None) -> Wri
         messages, metadata = content.messages, content.metadata
     else:
         operation = Operation.model_validate(event.content)
-        messages = (Message(role="tool", text=operation.text),)
         metadata = operation.metadata
+        version = metadata.get("agent_access_version")
+        # ADR-0054: an explicit Agent memory is authored text, not tool output.
+        # Keep ordinary operations and unknown markers on their existing path.
+        role = (
+            "assistant"
+            if metadata.get("agent_access_kind") == "remember"
+            and type(version) is int
+            and version == 1
+            else "tool"
+        )
+        messages = (Message(role=role, text=operation.text),)
     observed = event.occurred_at or datetime(1970, 1, 1, tzinfo=UTC)
     source = SOURCE_PREFIX + event.source_id
     namespace = f"cmh:{event.instance_id}:{event.scope_id}"
