@@ -6,6 +6,9 @@
 
 - 需求：FR-11、FR-13、R3-01；设计见 [ADR-0063](../../../docs/adr/0063-managed-backup-and-recovery.md)。
 - `test_backup_store.py` 与 `test_backup_runtime.py`：三卷清单、真实 Core／SDK 快照、WAL、损坏／不安全文件、失败发布、保留清理、持久计划、真实子进程及 Uvicorn 停机／重启、满盘状态故障恢复和真实快照组合。合计 59 项；对应上游快照／备份／维护恢复回归 27 项通过。
+- `test_backup_archive.py` 与 `test_backup_maintenance.py`：私有完整归档往返、大小及元数据预算、路径／链接／多成员拒绝、中文长路径、临时文件清理和实际离线维护 CLI。
+- `test_backup_restore.py`：空三卷导入、同实例保护版本与历史回滚、当前权限／治理优先、来源与未知任务拒绝、中断门禁及真实 Core／SDK／HTTP 重启后的忘记和凭证保留。
+- `test_backup_catalog.py` 与 `test_backup_api.py`：有界清单目录、租约释放、无 payload 扫描、管理员／同源访问、严格输入及固定错误；上游 `HubBackups`、`hub-backups` 和 `R6Settings` 测试覆盖设置、手动请求、状态刷新及未知结果。
 - 证据与未部署边界见[备份第一步记录](../../../docs/reviews/2026-11-10-managed-backup.md)。
 
 ## ADR-0062：客户端只读处理进度

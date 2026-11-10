@@ -23,7 +23,7 @@ RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
     src/MemorySpace.library.test.tsx src/SdkMemoryLibrary.test.tsx src/SdkRawHistory.test.tsx \
     src/ModelSettings.test.tsx src/OnboardingModelStep.test.tsx src/R6Settings.test.tsx \
     src/HubConsole.test.tsx src/HubQuestion.test.tsx src/hub-api.test.ts src/HubGovernance.test.tsx \
-    src/HubConnections.test.tsx
+    src/HubConnections.test.tsx src/HubBackups.test.tsx src/hub-backups.test.ts
 
 FROM source AS python-build
 RUN python -m pip install --no-cache-dir uv==0.12.5

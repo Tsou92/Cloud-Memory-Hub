@@ -13,6 +13,7 @@ def create_hub(config: HubConfig):
     from one_memory.config import Settings
     from pydantic import SecretStr
 
+    from cloud_memory_hub.backup_api import backup_routes
     from cloud_memory_hub.boundary import CloudBoundary
     from cloud_memory_hub.console_api import console_routes
     from cloud_memory_hub.console_qa import ConsoleQuestions, console_question_routes
@@ -160,6 +161,7 @@ def create_hub(config: HubConfig):
         devices, ingest, reads, previews, executor, admission=sdk_admission
     )
     remote_api.routes.extend(console_routes(console))
+    remote_api.routes.extend(backup_routes(config))
     questions = ConsoleQuestions(core, console)
     core.state.cmh_questions = questions
     remote_api.routes.extend(console_question_routes(questions))
