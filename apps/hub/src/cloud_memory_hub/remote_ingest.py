@@ -236,27 +236,31 @@ class RemoteIngest:
 
     def create_source(self, registration: SourceRegistration) -> dict:
         with self._database(writing=True) as db:
-            device = db.execute(
-                "SELECT status FROM devices WHERE device_id=?", (registration.device_id,)
-            ).fetchone()
-            if device is None or device[0] != "active":
-                raise AccessError("device_not_active", 409)
-            if not db.execute(
-                "SELECT 1 FROM projects WHERE project_id=?", (registration.scope_id,)
-            ).fetchone():
-                raise AccessError("unknown_scope", 422)
-            source = {
-                "source_id": str(uuid4()),
-                **registration.model_dump(),
-                "revision": 1,
-                "status": "active",
-            }
-            db.execute(
-                "INSERT INTO cmh_sources VALUES "
-                "(:source_id,:device_id,:scope_id,:adapter_id,:display_name,:revision,:status)",
-                source,
-            )
-            return source
+            return self._create_source(db, registration)
+
+    def _create_source(self, db, registration):
+        """Register in the existing access transaction; never open a nested checkout."""
+        device = db.execute(
+            "SELECT status FROM devices WHERE device_id=?", (registration.device_id,)
+        ).fetchone()
+        if device is None or device[0] != "active":
+            raise AccessError("device_not_active", 409)
+        if not db.execute(
+            "SELECT 1 FROM projects WHERE project_id=?", (registration.scope_id,)
+        ).fetchone():
+            raise AccessError("unknown_scope", 422)
+        source = {
+            "source_id": str(uuid4()),
+            **registration.model_dump(),
+            "revision": 1,
+            "status": "active",
+        }
+        db.execute(
+            "INSERT INTO cmh_sources VALUES "
+            "(:source_id,:device_id,:scope_id,:adapter_id,:display_name,:revision,:status)",
+            source,
+        )
+        return source
 
     def list_sources(self) -> list[dict]:
         with self._database() as db:

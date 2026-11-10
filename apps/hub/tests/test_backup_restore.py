@@ -2,6 +2,7 @@
 
 import json
 import os
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from cloud_memory_hub.remote_access import (
     ScopeGrant,
 )
 from cloud_memory_hub.remote_ingest import RemoteIngest, SourceRegistration
+from cloud_memory_hub.remote_pairing import PairingClaim, PairingRequest, PairingStore
 from cloud_memory_hub.storage_lease import (
     LOCK_NAME,
     RESTORE_MARKER,
@@ -326,6 +328,75 @@ def test_empty_import_keeps_all_identity_and_credentials(layout, tmp_path):
     ).read_bytes()
     assert access(replace(config, config_dir=targets[1])).instance_id == manifest["instance_id"]
     assert all(not (path / RESTORE_MARKER).exists() for path in targets)
+
+
+@pytest.mark.parametrize("mode", ["history", "empty_import"])
+def test_restore_cancels_pending_and_claimed_pairings_without_revoking_devices(
+    layout, tmp_path, mode
+):
+    config, root = layout
+    authority = access(config)
+    pairings = PairingStore(RemoteIngest(authority, lambda: None), config.public_origin)
+    project = authority.create_project(NamedResource(display_name="Synthetic pairing project"))
+    requests = []
+    for name in ("pending", "claimed", "cancelled"):
+        invitation = pairings.create(
+            PairingRequest(scope_id=project["project_id"], display_name=f"Synthetic {name}")
+        )
+        requests.append(
+            PairingClaim(
+                pairing_id=invitation.pairing["pairing_id"],
+                invitation_secret=invitation.invitation_secret.get_secret_value(),
+                claimant_secret=secrets.token_urlsafe(32),
+            )
+        )
+    claimed = pairings.claim(requests[1])
+    token = f"cmhdev_v1_{claimed['device_id']}_{requests[1].claimant_secret.get_secret_value()}"
+    pairings.revoke(requests[2].pairing_id)
+    selected, _ = saved(layout)
+    # The selected version still contains an unconsumed invitation at this point.
+    pairings.claim(requests[0])
+    if mode == "history":
+        restore_backup(config, selected, root)
+        restored = config
+    else:
+        targets = [
+            tmp_path / ("pairing-import-" + name) for name in ("data", "config", "governance")
+        ]
+        import_backup(
+            selected,
+            data_dir=targets[0],
+            config_dir=targets[1],
+            governance_dir=targets[2],
+            backup_root=tmp_path / "pairing-import-versions",
+            source_stopped=True,
+        )
+        restored = replace(
+            config, data_dir=targets[0], config_dir=targets[1], governance_dir=targets[2]
+        )
+    current = PairingStore(RemoteIngest(access(restored), lambda: None), restored.public_origin)
+    for request in requests:
+        assert current.get(request.pairing_id)["state"] == "cancelled"
+        with pytest.raises(AccessError, match="pairing_invalid_or_expired"):
+            current.claim(request)
+    assert current.access.authenticate(token)["device_id"] == claimed["device_id"]
+    assert (
+        current.ingest.source_access(token, claimed["source_id"])["scope_id"] == claimed["scope_id"]
+    )
+    # Cancelling restored invitations does not disable fresh enrollment.
+    fresh = current.create(
+        PairingRequest(scope_id=project["project_id"], display_name="Synthetic new")
+    )
+    assert (
+        current.claim(
+            PairingClaim(
+                pairing_id=fresh.pairing["pairing_id"],
+                invitation_secret=fresh.invitation_secret.get_secret_value(),
+                claimant_secret=secrets.token_urlsafe(32),
+            )
+        )["device_id"]
+        != claimed["device_id"]
+    )
 
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
