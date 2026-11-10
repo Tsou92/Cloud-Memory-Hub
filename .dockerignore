@@ -26,6 +26,12 @@ apps/hub/src/*
 !apps/hub/src/cloud_memory_hub/
 apps/hub/src/cloud_memory_hub/*
 !apps/hub/src/cloud_memory_hub/*.py
+!apps/hub/src/cloud_memory_hub/onboarding/
+apps/hub/src/cloud_memory_hub/onboarding/*
+!apps/hub/src/cloud_memory_hub/onboarding/__init__.py
+!apps/hub/src/cloud_memory_hub/onboarding/connect.py
+!apps/hub/src/cloud_memory_hub/onboarding/install.sh
+!apps/hub/src/cloud_memory_hub/onboarding/install.ps1
 **/.venv/
 **/node_modules/
 **/.env*
