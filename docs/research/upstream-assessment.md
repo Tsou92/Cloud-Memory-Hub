@@ -1,5 +1,7 @@
 # Hy-Memory / MemHub 复用评估
 
+2026-11-10 模型配置修复：原 `model_probe._models_request` 仅判断已填模型，网页没有候选列表入口；复用既有 HTTP、URL 校验、凭证库和表单，增加只读有界模型列表 API 与选择控件。真实合成请求证明 64 token 探针会截断完整可用的 Anthropic 模型，因此调整预算和纯 JSON 提示，保留严格响应验证。兼容网关的列表认证重试仅限同地址 GET，不改生成协议。设计见 [ADR-0053](../adr/0053-model-catalog-and-probe-budget.md)。
+
 2026-11-10 Anthropic 接入：补丁 0026 复用固定上游 LLMProvider 的限流、重试、JSON 和工具调用返回合同，以及 Core 已有 Messages 请求、模型配置/激活、用量审计和网页表单。原 SDK 仅有 OpenAI 生成后端，Core/UI 明确拒绝 Anthropic，因此增加协议转换和开放既有路径；不新增代理、提炼引擎、数据库或配置页面。默认继续使用内置本地向量；探测与生成共用严格响应解析。设计、兼容修复和未验证边界见 [ADR-0052](../adr/0052-anthropic-memory-provider.md)。
 
 2026-11-10 MVP 每轮共享：继续直接复用固定上游 `one_memory.live_capture._messages` 对 UserPromptSubmit 和 Stop 的可见文字提取，不调用会依赖本机 EvidenceStore 或回退扫描 transcript 的完整 capture_hook。远程上传沿用 AgentSettings、prepare_event、LocalOutbox 和 send_pending；下一轮使用已有 history-list／ReadReply 与有限上下文呈现，无需 NAS 模型提炼。新增的工作目录绑定与稳定远程事件身份属于 Hub 的连接合同，不新建采集数据库、搜索引擎或上游补丁。设计见 [ADR-0050](../adr/0050-mvp-visible-turn-hooks.md)，实际测试结果另行记录，源码复用不作为宿主通过的证据。
