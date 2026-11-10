@@ -1,0 +1,1726 @@
+diff --git a/memhub/apps/core/src/one_memory/api.py b/memhub/apps/core/src/one_memory/api.py
+index 74edac0..43e3bd5 100644
+--- a/memhub/apps/core/src/one_memory/api.py
++++ b/memhub/apps/core/src/one_memory/api.py
+@@ -190,4 +190,5 @@
+     MemoryTaskStore,
+ )
++from one_memory.model_catalog import ModelCatalog, ModelCatalogRequest, ModelCatalogResult
+ from one_memory.model_presets import seed_preset_profile
+ from one_memory.model_probe import ModelProber, ModelProbeResult
+@@ -1125,4 +1126,8 @@
+                 secrets=app.state.secret_store,
+             )
++            app.state.model_catalog = ModelCatalog(
++                store=app.state.model_profile_store,
++                secrets=app.state.secret_store,
++            )
+             app.state.memory_processing_supervisor = MemoryProcessingSupervisor(
+                 tasks=app.state.memory_task_store,
+@@ -2857,4 +2862,15 @@
+         return await _translate_transition(_supervisor(app).cancel(job_id))
+ 
++    @app.post(
++        "/api/v1/model-catalog",
++        response_model=ModelCatalogResult,
++        dependencies=protected,
++    )
++    async def model_catalog(request: ModelCatalogRequest) -> ModelCatalogResult:
++        try:
++            return await app.state.model_catalog.fetch(request)
++        except SecretStoreUnavailableError as error:
++            raise HTTPException(status_code=503, detail=_secret_store_detail(error)) from None
++
+     @app.get(
+         "/api/v1/model-profiles",
+diff --git a/memhub/apps/core/src/one_memory/model_catalog.py b/memhub/apps/core/src/one_memory/model_catalog.py
+new file mode 100644
+index 0000000..c7e4f3f
+--- /dev/null
++++ b/memhub/apps/core/src/one_memory/model_catalog.py
+@@ -0,0 +1,252 @@
++"""Bounded model discovery without generation or profile mutations (ADR-0053)."""
++
++from __future__ import annotations
++
++import asyncio
++from enum import StrEnum
++from urllib.parse import urlparse
++from uuid import UUID
++
++import httpx
++from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
++
++from one_memory.http_client import create_async_client
++from one_memory.model_probe import _body_error_code, _headers
++from one_memory.model_profiles import ModelProfileStore, ProviderKind, validate_model_base_url
++from one_memory.secrets import SecretStore
++
++MAX_RESPONSE_BYTES = 1024 * 1024
++MAX_MODELS = 200
++
++
++class CatalogCode(StrEnum):
++    OK = "ok"
++    UNSUPPORTED = "unsupported"
++    MISSING_API_KEY = "missing_api_key"  # pragma: allowlist secret
++    UNREACHABLE = "unreachable"
++    UNAUTHORIZED = "unauthorized"
++    INVALID_RESPONSE = "invalid_response"
++    RATE_LIMITED = "rate_limited"
++    INSUFFICIENT_BALANCE = "insufficient_balance"
++    PROFILE_CHANGED = "profile_changed"
++
++
++class ModelCatalogRequest(BaseModel):
++    model_config = ConfigDict(frozen=True, extra="forbid")
++
++    provider_kind: ProviderKind
++    base_url: str = Field(min_length=1, max_length=2048)
++    api_key: SecretStr | None = None
++    profile_id: str | None = Field(default=None, min_length=36, max_length=36)
++    expected_profile_revision: int | None = Field(default=None, ge=1, strict=True)
++
++    @model_validator(mode="after")
++    def validate_request(self) -> ModelCatalogRequest:
++        validate_model_base_url(self.base_url)
++        parsed = urlparse(self.base_url)
++        if parsed.query or parsed.fragment:
++            raise ValueError("Model base URL cannot contain query or fragment")
++        if (self.profile_id is None) != (self.expected_profile_revision is None):
++            raise ValueError("Profile identity and revision must be supplied together")
++        if self.profile_id is not None and str(UUID(self.profile_id)) != self.profile_id:
++            raise ValueError("Profile identity must be canonical")
++        return self
++
++
++class CatalogModel(BaseModel):
++    model_config = ConfigDict(frozen=True, extra="forbid")
++
++    id: str = Field(min_length=1, max_length=256)
++    display_name: str = Field(min_length=1, max_length=256)
++
++
++class ModelCatalogResult(BaseModel):
++    model_config = ConfigDict(frozen=True, extra="forbid")
++
++    code: CatalogCode
++    models: tuple[CatalogModel, ...] = Field(default=(), max_length=MAX_MODELS)
++    has_more: bool = False
++
++
++class ModelCatalog:
++    def __init__(
++        self,
++        *,
++        store: ModelProfileStore,
++        secrets: SecretStore,
++        transport: httpx.AsyncBaseTransport | None = None,
++    ) -> None:
++        self.store = store
++        self.secrets = secrets
++        self.transport = transport
++
++    async def fetch(self, request: ModelCatalogRequest) -> ModelCatalogResult:
++        if request.provider_kind not in {
++            ProviderKind.ANTHROPIC,
++            ProviderKind.OPENAI_COMPATIBLE,
++            ProviderKind.OLLAMA,
++        }:
++            return ModelCatalogResult(code=CatalogCode.UNSUPPORTED)
++        try:
++            secret = await asyncio.to_thread(self._secret, request)
++        except KeyError:
++            return ModelCatalogResult(code=CatalogCode.PROFILE_CHANGED)
++        if request.provider_kind is not ProviderKind.OLLAMA and not secret:
++            return ModelCatalogResult(code=CatalogCode.MISSING_API_KEY)
++        url = _models_url(request.provider_kind, request.base_url)
++        headers = (
++            {}
++            if request.provider_kind is ProviderKind.OLLAMA
++            else _headers(request.provider_kind, secret)
++        )
++        async with create_async_client(
++            timeout=20.0, follow_redirects=False, transport=self.transport
++        ) as client:
++            try:
++                response = await _bounded_get(client, url, headers)
++                if request.provider_kind is ProviderKind.ANTHROPIC and response.status_code in {
++                    401,
++                    403,
++                }:
++                    if (
++                        request.api_key is None
++                        and request.profile_id is not None
++                        and not await asyncio.to_thread(self._profile_matches, request)
++                    ):
++                        return ModelCatalogResult(code=CatalogCode.PROFILE_CHANGED)
++                    # Some Messages gateways expose an OpenAI-authenticated catalog.
++                    # Retry only this GET, at the identical URL, without forwarding
++                    # x-api-key. This does not change the generation protocol.
++                    headers = _headers(ProviderKind.OPENAI_COMPATIBLE, secret)
++                    headers["anthropic-version"] = "2023-06-01"
++                    response = await _bounded_get(client, url, headers)
++            except (httpx.RequestError, ValueError):
++                return ModelCatalogResult(code=CatalogCode.UNREACHABLE)
++            except _ResponseTooLarge:
++                return ModelCatalogResult(code=CatalogCode.INVALID_RESPONSE)
++        if (
++            request.api_key is None
++            and request.profile_id is not None
++            and not await asyncio.to_thread(self._profile_matches, request)
++        ):
++            return ModelCatalogResult(code=CatalogCode.PROFILE_CHANGED)
++        result = _catalog_response(response)
++        if secret and any(
++            secret in model.id or secret in model.display_name for model in result.models
++        ):
++            return ModelCatalogResult(code=CatalogCode.INVALID_RESPONSE)
++        return result
++
++    def _profile_matches(self, request: ModelCatalogRequest) -> bool:
++        profile = self.store.get(request.profile_id or "", self.secrets)
++        return bool(
++            profile
++            and profile.revision == request.expected_profile_revision
++            and profile.provider_kind == request.provider_kind
++            and (profile.base_url or "").rstrip("/") == request.base_url.rstrip("/")
++        )
++
++    def _secret(self, request: ModelCatalogRequest) -> str | None:
++        if request.api_key is not None:
++            return request.api_key.get_secret_value()
++        if request.profile_id is None:
++            return None
++        if not self._profile_matches(request):
++            raise KeyError("profile_changed")
++        assert request.expected_profile_revision is not None
++        secret = self.store.resolve_snapshot_secret(
++            request.profile_id, request.expected_profile_revision, self.secrets
++        )
++        # Re-read after the secure-store access, which can take user interaction.
++        if not self._profile_matches(request):
++            raise KeyError("profile_changed")
++        return secret
++
++
++def _models_url(provider: ProviderKind, base_url: str) -> str:
++    if provider is ProviderKind.ANTHROPIC:
++        from hy_memory.agent.anthropic_messages import messages_url
++
++        return messages_url(base_url).removesuffix("/messages") + "/models"
++    suffix = "/api/tags" if provider is ProviderKind.OLLAMA else "/models"
++    return base_url.rstrip("/") + suffix
++
++
++class _ResponseTooLarge(Exception):
++    pass
++
++
++async def _bounded_get(
++    client: httpx.AsyncClient, url: str, headers: dict[str, str]
++) -> httpx.Response:
++    async with client.stream("GET", url, headers=headers) as response:
++        # Authentication classification needs no provider-controlled body.
++        if response.status_code in {401, 403}:
++            return httpx.Response(response.status_code)
++        content = bytearray()
++        async for chunk in response.aiter_bytes(chunk_size=65536):
++            if len(content) + len(chunk) > MAX_RESPONSE_BYTES:
++                raise _ResponseTooLarge
++            content.extend(chunk)
++        return httpx.Response(response.status_code, content=bytes(content))
++
++
++def _catalog_response(response: httpx.Response) -> ModelCatalogResult:
++    statuses = {
++        400: CatalogCode.UNSUPPORTED,
++        401: CatalogCode.UNAUTHORIZED,
++        403: CatalogCode.UNAUTHORIZED,
++        404: CatalogCode.UNSUPPORTED,
++        405: CatalogCode.UNSUPPORTED,
++        501: CatalogCode.UNSUPPORTED,
++        402: CatalogCode.INSUFFICIENT_BALANCE,
++        429: CatalogCode.RATE_LIMITED,
++    }
++    if response.status_code in statuses:
++        return ModelCatalogResult(code=statuses[response.status_code])
++    body_error = _body_error_code(response)
++    if body_error is not None:
++        try:
++            code = CatalogCode(body_error.value)
++        except ValueError:
++            code = CatalogCode.INVALID_RESPONSE
++        return ModelCatalogResult(code=code)
++    if not response.is_success:
++        return ModelCatalogResult(code=CatalogCode.INVALID_RESPONSE)
++    try:
++        body = response.json()
++        return _parse_models(body)
++    except (ValueError, TypeError, KeyError):
++        return ModelCatalogResult(code=CatalogCode.INVALID_RESPONSE)
++
++
++def _parse_models(body: object) -> ModelCatalogResult:
++    if not isinstance(body, dict):
++        raise ValueError("invalid_catalog")
++    values = body.get("models") if isinstance(body.get("models"), list) else body.get("data")
++    if not isinstance(values, list) or not isinstance(body.get("has_more", False), bool):
++        raise ValueError("invalid_catalog")
++    models: list[CatalogModel] = []
++    seen: set[str] = set()
++    has_more = body.get("has_more", False)
++    for value in values:
++        if not isinstance(value, dict):
++            raise ValueError("invalid_catalog_item")
++        model_id = value.get("id") or value.get("name") or value.get("model")
++        label = value.get("display_name") or model_id
++        if not all(
++            isinstance(field, str)
++            and 0 < len(field) <= 256
++            and field.strip() == field
++            and all(ord(char) >= 32 and ord(char) != 127 for char in field)
++            for field in (model_id, label)
++        ):
++            raise ValueError("invalid_catalog_item")
++        if model_id in seen:
++            continue
++        seen.add(model_id)
++        if len(models) >= MAX_MODELS:
++            has_more = True
++            break
++        models.append(CatalogModel(id=model_id, display_name=label))
++    return ModelCatalogResult(code=CatalogCode.OK, models=tuple(models), has_more=has_more)
+diff --git a/memhub/apps/core/src/one_memory/model_probe.py b/memhub/apps/core/src/one_memory/model_probe.py
+index dd3ea0a..8d48cca 100644
+--- a/memhub/apps/core/src/one_memory/model_probe.py
++++ b/memhub/apps/core/src/one_memory/model_probe.py
+@@ -542,6 +542,11 @@
+                 {
+                     "model": profile.model,
+-                    "max_tokens": 64,
+-                    "messages": [{"role": "user", "content": "Return memory_probe=true as JSON"}],
++                    "max_tokens": 512,
++                    "messages": [
++                        {
++                            "role": "user",
++                            "content": 'Return only this JSON object, with no explanation or Markdown: {"memory_probe": true}',
++                        }
++                    ],
+                 },
+             ),
+diff --git a/memhub/apps/core/tests/TEST_INDEX.md b/memhub/apps/core/tests/TEST_INDEX.md
+index 78a6068..25244f5 100644
+--- a/memhub/apps/core/tests/TEST_INDEX.md
++++ b/memhub/apps/core/tests/TEST_INDEX.md
+@@ -202,4 +202,5 @@
+ | `test_memory_write_routes.py` | `integration` | A3-01: the HTTP write entry, tested against a real FastAPI app. |
+ | `test_migrate_off_sqlite.py` | `contract` | A1-06: the migration is only done when reconciliation agrees. |
++| `test_model_catalog.py` | `contract` | ADR-0053: catalog selection is bounded, credential-bound, and generation-free. |
+ | `test_model_creation_api.py` | `integration` | Normal protected model creation routes with temporary data and in-memory secrets. |
+ | `test_model_creation_operations.py` | `contract` | 覆盖 lookup without table is read only and legacy create does not initialize、operation commits with profile and version without autoactivation、any replay conflicts before secret put 等 21 个场景。 |
+@@ -347,3 +348,3 @@
+ | `test_write_queue_lease_renewal.py` | `contract` | Rule 8: a lease must outlive the work it covers, and be renewed while it runs. |
+ 
+-共 341 个测试文件。
++共 342 个测试文件。
+diff --git a/memhub/apps/core/tests/core_test_classification.py b/memhub/apps/core/tests/core_test_classification.py
+index c4e1c40..d5422e5 100644
+--- a/memhub/apps/core/tests/core_test_classification.py
++++ b/memhub/apps/core/tests/core_test_classification.py
+@@ -15,6 +15,6 @@
+ 
+ PRIMARY_MARKERS = ("unit", "contract", "integration", "performance", "live")
+-EXPECTED_TEST_FILE_COUNT = 341
+-EXPECTED_TEST_FILES_SHA256 = "cc8c8282371eb13bd4e2a27be388d967e63ad7c58a0226bae3ec8a96b0c2a427"
++EXPECTED_TEST_FILE_COUNT = 342
++EXPECTED_TEST_FILES_SHA256 = "871064fda6319d0c8de3171dd2bd905db69cc9687de4fce2391b7b7789711c6b"  # pragma: allowlist secret
+ 
+ # Pure transformations, validation models, parity checks and state machines.
+diff --git a/memhub/apps/core/tests/test_model_catalog.py b/memhub/apps/core/tests/test_model_catalog.py
+new file mode 100644
+index 0000000..cc94121
+--- /dev/null
++++ b/memhub/apps/core/tests/test_model_catalog.py
+@@ -0,0 +1,512 @@
++"""ADR-0053: catalog selection is bounded, credential-bound, and generation-free."""
++
++import asyncio
++import json
++from uuid import uuid4
++
++import httpx
++import pytest
++from pydantic import SecretStr, ValidationError
++
++from one_memory.api import create_app
++from one_memory.config import Settings
++from one_memory.model_catalog import (
++    MAX_RESPONSE_BYTES,
++    CatalogCode,
++    ModelCatalog,
++    ModelCatalogRequest,
++)
++from one_memory.model_profiles import ModelProfileInput, ModelProfilePatch, ModelProfileStore
++from one_memory.secrets import InMemorySecretStore
++
++API_KEY = "synthetic-catalog-key"  # pragma: allowlist secret
++ADMIN_TOKEN = "synthetic-admin-token"  # pragma: allowlist secret
++
++
++@pytest.fixture
++def catalog_store(tmp_path):
++    return ModelProfileStore(tmp_path / "catalog.sqlite3"), InMemorySecretStore()
++
++
++def _request(**overrides):
++    return ModelCatalogRequest(
++        **{
++            "provider_kind": "anthropic",
++            "base_url": "https://models.example.test",
++            "api_key": SecretStr(API_KEY),
++            **overrides,
++        }
++    )
++
++
++def _fetch(catalog_store, handler, **overrides):
++    store, secrets = catalog_store
++    return asyncio.run(
++        ModelCatalog(store=store, secrets=secrets, transport=httpx.MockTransport(handler)).fetch(
++            _request(**overrides)
++        )
++    )
++
++
++def _profile(catalog_store):
++    store, secrets = catalog_store
++    return store.create(
++        ModelProfileInput(
++            name="Synthetic catalog",
++            provider_kind="anthropic",
++            base_url="https://models.example.test",
++            model="synthetic-model",
++            api_key=SecretStr(API_KEY),
++        ),
++        secrets,
++    )
++
++
++@pytest.mark.parametrize("suffix", ["", "/", "/v1", "/v1/", "/v1/messages"])
++def test_anthropic_catalog_normalizes_paths_and_preserves_display_name(catalog_store, suffix):
++    requests = []
++
++    def handler(request):
++        requests.append(request)
++        assert request.method == "GET" and request.url.path == "/v1/models"
++        assert request.headers["x-api-key"] == API_KEY
++        assert request.headers["anthropic-version"] == "2023-06-01"
++        assert "authorization" not in request.headers
++        assert request.content == b""
++        return httpx.Response(
++            200,
++            json={"data": [{"id": "synthetic-model", "display_name": "Synthetic model"}]},
++        )
++
++    result = _fetch(catalog_store, handler, base_url="https://models.example.test" + suffix)
++    assert result.code == CatalogCode.OK
++    assert [(item.id, item.display_name) for item in result.models] == [
++        ("synthetic-model", "Synthetic model")
++    ]
++    assert result.has_more is False and len(requests) == 1
++    assert catalog_store[0].list(catalog_store[1]) == []
++    assert API_KEY not in result.model_dump_json()
++
++
++@pytest.mark.parametrize("status", [401, 403])
++def test_anthropic_catalog_retries_bearer_once_at_identical_url(catalog_store, status):
++    requests = []
++
++    def handler(request):
++        requests.append(request)
++        if len(requests) == 1:
++            return httpx.Response(status, json={"error": {"message": API_KEY}})
++        assert request.url == requests[0].url and request.method == "GET"
++        assert request.headers["Authorization"] == f"Bearer {API_KEY}"
++        assert "x-api-key" not in request.headers
++        return httpx.Response(200, json={"data": [{"id": "synthetic-model"}]})
++
++    result = _fetch(catalog_store, handler)
++    assert result.code == CatalogCode.OK and len(requests) == 2
++    assert API_KEY not in result.model_dump_json()
++
++
++def test_anthropic_failed_bearer_retry_does_not_loop(catalog_store):
++    requests = []
++
++    def handler(request):
++        requests.append(request)
++        return httpx.Response(401, content=API_KEY.encode())
++
++    result = _fetch(catalog_store, handler)
++    assert result.code == CatalogCode.UNAUTHORIZED and len(requests) == 2
++    assert result.models == () and API_KEY not in result.model_dump_json()
++
++
++@pytest.mark.parametrize(
++    "provider,base,path,body",
++    [
++        (
++            "openai_compatible",
++            "https://models.example.test/v1",
++            "/v1/models",
++            {"data": [{"id": "synthetic-model", "owned_by": "ignored"}]},
++        ),
++        (
++            "ollama",
++            "http://127.0.0.1:11434",
++            "/api/tags",
++            {"models": [{"name": "synthetic-model"}]},
++        ),
++    ],
++)
++def test_existing_provider_catalogs(catalog_store, provider, base, path, body):
++    def handler(request):
++        assert request.method == "GET" and request.url.path == path
++        if provider == "ollama":
++            assert "authorization" not in request.headers
++        else:
++            assert request.headers["authorization"] == f"Bearer {API_KEY}"
++        return httpx.Response(200, json=body)
++
++    result = _fetch(
++        catalog_store,
++        handler,
++        provider_kind=provider,
++        base_url=base,
++        api_key=None if provider == "ollama" else SecretStr(API_KEY),
++    )
++    assert result.code == CatalogCode.OK
++    assert result.models[0].display_name == "synthetic-model"
++
++
++@pytest.mark.parametrize(
++    "status,code",
++    [
++        (400, "unsupported"),
++        (404, "unsupported"),
++        (405, "unsupported"),
++        (501, "unsupported"),
++        (402, "insufficient_balance"),
++        (429, "rate_limited"),
++        (500, "invalid_response"),
++    ],
++)
++def test_catalog_http_errors_are_safe_and_do_not_retry(catalog_store, status, code):
++    requests = []
++
++    def handler(request):
++        requests.append(request)
++        return httpx.Response(status, content=API_KEY.encode())
++
++    result = _fetch(catalog_store, handler)
++    assert result.code.value == code and result.models == ()
++    assert len(requests) == 1 and API_KEY not in result.model_dump_json()
++
++
++def test_openai_auth_failure_is_not_retried(catalog_store):
++    requests = []
++
++    def handler(request):
++        requests.append(request)
++        return httpx.Response(401)
++
++    assert _fetch(catalog_store, handler, provider_kind="openai_compatible").code == "unauthorized"
++    assert len(requests) == 1
++
++
++@pytest.mark.parametrize(
++    "error,code",
++    [
++        ("authentication_error", "unauthorized"),
++        ("rate_limit_error", "rate_limited"),
++        ("insufficient_balance", "insufficient_balance"),
++        ("unknown_model", "invalid_response"),
++    ],
++)
++def test_http_200_error_envelopes_are_not_model_lists(catalog_store, error, code):
++    result = _fetch(
++        catalog_store,
++        lambda _: httpx.Response(200, json={"error": {"type": error, "message": API_KEY}}),
++    )
++    assert result.code == code and result.models == ()
++    assert API_KEY not in result.model_dump_json()
++
++
++def test_catalog_does_not_follow_redirects(catalog_store):
++    requests = []
++
++    def handler(request):
++        requests.append(request)
++        return httpx.Response(302, headers={"location": "https://other.example.test/models"})
++
++    assert _fetch(catalog_store, handler).code == CatalogCode.INVALID_RESPONSE
++    assert len(requests) == 1
++
++
++def test_network_error_is_safe(catalog_store):
++    def handler(request):
++        raise httpx.ConnectError(API_KEY, request=request)
++
++    result = _fetch(catalog_store, handler)
++    assert result.code == CatalogCode.UNREACHABLE and API_KEY not in result.model_dump_json()
++
++
++@pytest.mark.parametrize(
++    "body",
++    [
++        [],
++        {},
++        {"data": "bad"},
++        {"data": [{}]},
++        {"data": [None]},
++        {"data": [{"id": "x" * 257}]},
++        {"data": [{"id": "bad\nmodel"}]},
++        {"data": [{"id": "model", "display_name": "x" * 257}]},
++        {"data": [{"id": 42}]},
++        {"data": [], "has_more": "yes"},
++    ],
++)
++def test_catalog_rejects_malformed_or_unbounded_fields(catalog_store, body):
++    assert (
++        _fetch(catalog_store, lambda _: httpx.Response(200, json=body)).code == "invalid_response"
++    )
++
++
++@pytest.mark.parametrize("has_more", [False, True])
++def test_catalog_preserves_pagination_flag_and_deduplicates(catalog_store, has_more):
++    result = _fetch(
++        catalog_store,
++        lambda _: httpx.Response(
++            200,
++            json={
++                "data": [{"id": "model-a"}, {"id": "model-a"}, {"id": "model-b"}],
++                "has_more": has_more,
++            },
++        ),
++    )
++    assert [item.id for item in result.models] == ["model-a", "model-b"]
++    assert result.has_more is has_more
++
++
++def test_catalog_caps_models_without_changing_model_ids(catalog_store):
++    result = _fetch(
++        catalog_store,
++        lambda _: httpx.Response(
++            200, json={"data": [{"id": f"model-{index}"} for index in range(201)]}
++        ),
++    )
++    assert result.code == "ok" and len(result.models) == 200 and result.has_more
++    assert result.models[-1].id == "model-199"
++
++
++def test_empty_catalog_is_a_valid_empty_selection(catalog_store):
++    result = _fetch(catalog_store, lambda _: httpx.Response(200, json={"data": []}))
++    assert result.code == "ok" and result.models == () and not result.has_more
++
++
++@pytest.mark.parametrize("field", ["id", "display_name"])
++def test_catalog_rejects_secret_echo_in_candidate_fields(catalog_store, field):
++    result = _fetch(
++        catalog_store,
++        lambda _: httpx.Response(200, json={"data": [{"id": "model", field: f"echo-{API_KEY}"}]}),
++    )
++    assert result.code == "invalid_response" and result.models == ()
++    assert API_KEY not in result.model_dump_json()
++
++
++def test_catalog_limits_response_while_streaming(catalog_store):
++    class LargeStream(httpx.AsyncByteStream):
++        chunks_read = 0
++
++        async def __aiter__(self):
++            for _ in range(40):
++                self.chunks_read += 1
++                yield b" " * 65536
++
++    stream = LargeStream()
++    result = _fetch(catalog_store, lambda _: httpx.Response(200, stream=stream))
++    assert result.code == "invalid_response"
++    assert stream.chunks_read == MAX_RESPONSE_BYTES // 65536 + 1
++
++
++def test_exact_response_limit_and_malformed_json(catalog_store):
++    body = json.dumps({"data": []}).encode()
++    body += b" " * (MAX_RESPONSE_BYTES - len(body))
++    assert _fetch(catalog_store, lambda _: httpx.Response(200, content=body)).code == "ok"
++    assert _fetch(catalog_store, lambda _: httpx.Response(200, content=b"not-json")).code == (
++        "invalid_response"
++    )
++
++
++def test_saved_key_is_used_without_mutating_profile(catalog_store):
++    profile = _profile(catalog_store)
++
++    def handler(request):
++        assert request.headers["x-api-key"] == API_KEY
++        return httpx.Response(200, json={"data": [{"id": "another-model"}]})
++
++    result = _fetch(
++        catalog_store,
++        handler,
++        api_key=None,
++        profile_id=profile.profile_id,
++        expected_profile_revision=profile.revision,
++    )
++    assert result.code == "ok"
++    assert catalog_store[0].require(profile.profile_id, catalog_store[1]) == profile
++
++
++@pytest.mark.parametrize("change", ["revision", "provider", "address", "missing"])
++def test_saved_key_binding_fails_before_resolution_or_network(catalog_store, monkeypatch, change):
++    profile = _profile(catalog_store)
++    overrides = {
++        "api_key": None,
++        "profile_id": profile.profile_id,
++        "expected_profile_revision": profile.revision,
++    }
++    if change == "revision":
++        overrides["expected_profile_revision"] += 1
++    elif change == "provider":
++        overrides["provider_kind"] = "openai_compatible"
++    elif change == "address":
++        overrides["base_url"] = "https://other.example.test"
++    else:
++        overrides["profile_id"] = str(uuid4())
++
++    def forbidden(*_args, **_kwargs):
++        raise AssertionError("must not resolve or send")
++
++    monkeypatch.setattr(catalog_store[1], "resolve", forbidden)
++    assert _fetch(catalog_store, forbidden, **overrides).code == "profile_changed"
++
++
++def test_profile_revision_is_rechecked_after_key_access(catalog_store, monkeypatch):
++    store, secrets = catalog_store
++    profile = _profile(catalog_store)
++    original_resolve = secrets.resolve
++
++    def resolve_and_update(reference):
++        value = original_resolve(reference)
++        store.update(
++            profile.profile_id,
++            ModelProfilePatch(expected_revision=profile.revision, model="updated-model"),
++            secrets,
++        )
++        return value
++
++    monkeypatch.setattr(secrets, "resolve", resolve_and_update)
++    result = _fetch(
++        catalog_store,
++        lambda _: pytest.fail("changed profile must not dispatch"),
++        api_key=None,
++        profile_id=profile.profile_id,
++        expected_profile_revision=profile.revision,
++    )
++    assert result.code == "profile_changed"
++
++
++def test_profile_change_during_first_get_prevents_bearer_retry(catalog_store):
++    store, secrets = catalog_store
++    profile = _profile(catalog_store)
++    requests = []
++
++    def handler(request):
++        requests.append(request)
++        store.update(
++            profile.profile_id,
++            ModelProfilePatch(expected_revision=profile.revision, model="updated-model"),
++            secrets,
++        )
++        return httpx.Response(401)
++
++    result = _fetch(
++        catalog_store,
++        handler,
++        api_key=None,
++        profile_id=profile.profile_id,
++        expected_profile_revision=profile.revision,
++    )
++    assert result.code == "profile_changed" and len(requests) == 1
++
++
++def test_explicit_new_key_can_discover_a_new_address_without_saving(catalog_store, monkeypatch):
++    profile = _profile(catalog_store)
++
++    def forbidden(*_args, **_kwargs):
++        raise AssertionError("new key must not resolve a stored credential")
++
++    monkeypatch.setattr(catalog_store[1], "resolve", forbidden)
++
++    def handler(request):
++        assert request.url.host == "new.example.test"
++        assert request.headers["x-api-key"] == API_KEY
++        return httpx.Response(200, json={"data": []})
++
++    result = _fetch(
++        catalog_store,
++        handler,
++        base_url="https://new.example.test",
++        profile_id=profile.profile_id,
++        expected_profile_revision=profile.revision,
++    )
++    assert result.code == "ok"
++    assert catalog_store[0].require(profile.profile_id, catalog_store[1]) == profile
++
++
++@pytest.mark.parametrize(
++    "provider,code", [("anthropic", "missing_api_key"), ("hy_default", "unsupported")]
++)
++def test_missing_credentials_and_unsupported_providers_do_not_dispatch(
++    catalog_store, provider, code
++):
++    result = _fetch(
++        catalog_store,
++        lambda _: pytest.fail("must not dispatch"),
++        api_key=None,
++        provider_kind=provider,
++    )
++    assert result.code == code
++
++
++@pytest.mark.parametrize(
++    "base",
++    [
++        "http://remote.example.test",
++        "https://user:pass@example.test",  # pragma: allowlist secret
++        "https://models.example.test?token=test",
++        "https://models.example.test/#fragment",
++    ],
++)
++def test_catalog_reuses_endpoint_validation(base):
++    with pytest.raises(ValidationError):
++        _request(base_url=base)
++
++
++@pytest.mark.integration
++def test_catalog_route_requires_admin_and_returns_only_safe_fields(tmp_path):
++    async def scenario():
++        secrets = InMemorySecretStore()
++        app = create_app(
++            Settings(
++                data_dir=tmp_path / "data", source_home=tmp_path, api_token=SecretStr(ADMIN_TOKEN)
++            ),
++            secret_store=secrets,
++        )
++        requests = []
++
++        def handler(request):
++            requests.append(request)
++            return httpx.Response(200, json={"data": [{"id": "synthetic-model"}]})
++
++        async with (
++            app.router.lifespan_context(app),
++            httpx.AsyncClient(
++                transport=httpx.ASGITransport(app=app),
++                base_url="http://test",
++                headers={"Origin": "http://127.0.0.1:5173"},
++            ) as client,
++        ):
++            app.state.model_catalog = ModelCatalog(
++                store=app.state.model_profile_store,
++                secrets=secrets,
++                transport=httpx.MockTransport(handler),
++            )
++            payload = {
++                "provider_kind": "anthropic",
++                "base_url": "https://models.example.test",
++                "api_key": API_KEY,
++            }
++            rejected = await client.post("/api/v1/model-catalog", json=payload)
++            assert rejected.status_code == 401 and requests == []
++            client.headers["Authorization"] = f"Bearer {ADMIN_TOKEN}"
++            result = await client.post("/api/v1/model-catalog", json=payload)
++            assert result.status_code == 200 and result.json() == {
++                "code": "ok",
++                "models": [{"id": "synthetic-model", "display_name": "synthetic-model"}],
++                "has_more": False,
++            }
++            assert API_KEY not in result.text and len(requests) == 1
++            assert app.state.model_profile_store.list(secrets) == []
++            invalid = await client.post(
++                "/api/v1/model-catalog", json={**payload, "base_url": "invalid"}
++            )
++            assert invalid.status_code == 422 and API_KEY not in invalid.text
++            assert len(requests) == 1
++
++    asyncio.run(scenario())
+diff --git a/memhub/apps/core/tests/test_model_probe.py b/memhub/apps/core/tests/test_model_probe.py
+index 7b6b804..7a0aad9 100644
+--- a/memhub/apps/core/tests/test_model_probe.py
++++ b/memhub/apps/core/tests/test_model_probe.py
+@@ -19,4 +19,52 @@
+ 
+ 
++def test_anthropic_probe_allows_complete_json_after_reasoning_budget(tmp_path, monkeypatch):
++    store = ModelProfileStore(tmp_path / "one-memory.sqlite3")
++    secrets = InMemorySecretStore()
++    profile = store.create(
++        ModelProfileInput(
++            name="Messages budget regression",
++            provider_kind=ProviderKind.ANTHROPIC,
++            model="synthetic-model",
++            api_key=SecretStr(API_KEY),
++            disable_thinking=False,
++        ),
++        secrets,
++    )
++    monkeypatch.setattr(
++        "one_memory.local_embedding.LocalEmbedder.encode", lambda *args: [[0.0] * 512]
++    )
++    calls = []
++
++    def respond(request):
++        body = json.loads(request.content)
++        calls.append(body)
++        # Reproduce a compatible service that spends the short budget before
++        # emitting text. Truncated HTTP 200 is not successful model output.
++        complete = (
++            body["max_tokens"] > 64
++            and "no explanation or Markdown" in body["messages"][0]["content"]
++        )
++        return httpx.Response(
++            200,
++            json={
++                "type": "message",
++                "role": "assistant",
++                "stop_reason": "end_turn" if complete else "max_tokens",
++                "usage": {"input_tokens": 38, "output_tokens": 12 if complete else 64},
++                "content": [{"type": "text", "text": '{"memory_probe":true}'}] if complete else [],
++            },
++        )
++
++    result = asyncio.run(
++        ModelProber(store=store, secrets=secrets, transport=httpx.MockTransport(respond)).probe(
++            profile.profile_id
++        )
++    )
++    assert len(calls) == 1
++    assert result.capabilities.model_available
++    assert result.capabilities.embedding_available
++
++
+ @pytest.mark.parametrize("suffix", ["", "/v1", "/v1/messages"])
+ @pytest.mark.parametrize("disable_thinking", [False, True])
+@@ -996,6 +1044,11 @@
+         assert body == {
+             "model": "unchanged-model",
+-            "max_tokens": 64,
+-            "messages": [{"role": "user", "content": "Return memory_probe=true as JSON"}],
++            "max_tokens": 512,
++            "messages": [
++                {
++                    "role": "user",
++                    "content": 'Return only this JSON object, with no explanation or Markdown: {"memory_probe": true}',
++                }
++            ],
+             "thinking": {"type": "disabled"},
+         }
+diff --git a/memhub/apps/web/src/ModelCatalogPicker.test.tsx b/memhub/apps/web/src/ModelCatalogPicker.test.tsx
+new file mode 100644
+index 0000000..ad97ea4
+--- /dev/null
++++ b/memhub/apps/web/src/ModelCatalogPicker.test.tsx
+@@ -0,0 +1,152 @@
++// @vitest-environment jsdom
++import {
++  act,
++  cleanup,
++  fireEvent,
++  render,
++  screen,
++  waitFor,
++} from "@testing-library/react";
++import { createRef } from "react";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { getModelCatalog } from "./api";
++import {
++  type ModelCatalogActions,
++  ModelCatalogPicker,
++} from "./ModelCatalogPicker";
++import type { ModelCatalogResult } from "./model-catalog-client";
++
++vi.mock("./api", () => ({ getModelCatalog: vi.fn() }));
++const catalog = vi.mocked(getModelCatalog);
++const result = (id = "model-a"): ModelCatalogResult => ({
++  code: "ok",
++  models: [{ id, display_name: "Readable model" }],
++  has_more: false,
++});
++const props = () => ({
++  provider: "anthropic" as const,
++  baseUrl: "https://models.example.invalid",
++  apiKey: "synthetic-key", // pragma: allowlist secret
++  endpointReady: true,
++  disabled: false,
++  selectedModel: "hand-written-model",
++  onSelect: vi.fn(),
++});
++afterEach(cleanup);
++beforeEach(() => {
++  catalog.mockReset();
++  catalog.mockResolvedValue(result());
++});
++
++it("fetches independently and changes the model only when the user selects a candidate", async () => {
++  const p = props();
++  render(<ModelCatalogPicker {...p} />);
++  expect(catalog).not.toHaveBeenCalled();
++  fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
++  const picker = await screen.findByLabelText("从模型列表选择");
++  expect(catalog).toHaveBeenCalledExactlyOnceWith(
++    {
++      provider_kind: "anthropic",
++      base_url: p.baseUrl,
++      api_key: p.apiKey,
++    },
++    expect.any(AbortSignal),
++  );
++  expect(p.onSelect).not.toHaveBeenCalled();
++  fireEvent.change(picker, { target: { value: "model-a" } });
++  expect(p.onSelect).toHaveBeenCalledExactlyOnceWith("model-a");
++  expect(catalog).toHaveBeenCalledTimes(1);
++  expect(screen.getByText(/列表仅供选择，测试通过后才会启用模型/)).toBeTruthy();
++});
++
++it.each([
++  { baseUrl: "https://other.example.invalid" },
++  { apiKey: "replacement-synthetic-key" }, // pragma: allowlist secret
++  { provider: "openai_compatible" as const },
++])(
++  "clears old candidates and discards a late response after input changes: %j",
++  async (change) => {
++    let finish!: (value: ModelCatalogResult) => void;
++    catalog.mockImplementationOnce(
++      () =>
++        new Promise((resolve) => {
++          finish = resolve;
++        }),
++    );
++    const p = props();
++    const view = render(<ModelCatalogPicker {...p} />);
++    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
++    const firstSignal = catalog.mock.calls[0][1];
++    view.rerender(<ModelCatalogPicker {...p} {...change} />);
++    expect(firstSignal?.aborted).toBe(true);
++    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
++    expect(
++      await screen.findByRole("option", { name: /Readable model · model-a/ }),
++    ).toBeTruthy();
++    await act(async () => finish(result("late-old-model")));
++    expect(screen.queryByRole("option", { name: /late-old-model/ })).toBeNull();
++    expect(screen.getByRole("option", { name: /model-a/ })).toBeTruthy();
++    expect(p.onSelect).not.toHaveBeenCalled();
++    view.rerender(
++      <ModelCatalogPicker {...p} {...change} apiKey="changed-again" />, // pragma: allowlist secret
++    );
++    expect(screen.queryByLabelText("从模型列表选择")).toBeNull();
++    expect(catalog).toHaveBeenCalledTimes(2);
++  },
++);
++
++it("auto-fetches a completed input once even after failure, while explicit refresh retries", async () => {
++  catalog.mockResolvedValue({
++    code: "unsupported",
++    models: [],
++    has_more: false,
++  });
++  const controls = createRef<ModelCatalogActions>();
++  render(<ModelCatalogPicker {...props()} controlsRef={controls} />);
++  await act(async () => controls.current?.loadIfNeeded());
++  expect(await screen.findByText(/这个服务暂不提供模型列表/)).toBeTruthy();
++  await act(async () => controls.current?.loadIfNeeded());
++  expect(catalog).toHaveBeenCalledTimes(1);
++  fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
++  await waitFor(() => expect(catalog).toHaveBeenCalledTimes(2));
++});
++
++it("uses only the supplied saved profile revision when the key is blank", async () => {
++  render(
++    <ModelCatalogPicker
++      {...props()}
++      apiKey=""
++      savedProfile={{ profile_id: "profile-1", revision: 4 }}
++    />,
++  );
++  fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
++  await screen.findByLabelText("从模型列表选择");
++  expect(catalog.mock.calls[0][0]).toEqual({
++    provider_kind: "anthropic",
++    base_url: "https://models.example.invalid",
++    profile_id: "profile-1",
++    expected_profile_revision: 4,
++  });
++});
++
++it("does not request a catalog until an endpoint and credential are available", () => {
++  const controls = createRef<ModelCatalogActions>();
++  render(<ModelCatalogPicker {...props()} apiKey="" controlsRef={controls} />);
++  expect(screen.getByRole("button", { name: "获取模型列表" })).toHaveProperty(
++    "disabled",
++    true,
++  );
++  act(() => controls.current?.loadIfNeeded());
++  expect(catalog).not.toHaveBeenCalled();
++});
++
++it("keeps partial-list and request-error feedback free of provider diagnostic content", async () => {
++  catalog.mockResolvedValueOnce({ ...result(), has_more: true });
++  render(<ModelCatalogPicker {...props()} />);
++  fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
++  expect(await screen.findByText(/列表尚未完整返回/)).toBeTruthy();
++  catalog.mockRejectedValueOnce(new Error("private-provider-diagnostics"));
++  fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
++  expect(await screen.findByText(/暂时无法获取模型列表/)).toBeTruthy();
++  expect(screen.queryByText(/private-provider-diagnostics/)).toBeNull();
++});
+diff --git a/memhub/apps/web/src/ModelCatalogPicker.tsx b/memhub/apps/web/src/ModelCatalogPicker.tsx
+new file mode 100644
+index 0000000..f3fbdd6
+--- /dev/null
++++ b/memhub/apps/web/src/ModelCatalogPicker.tsx
+@@ -0,0 +1,181 @@
++import type { ProviderKind } from "@one-memory/contracts";
++import {
++  type Ref,
++  useEffect,
++  useImperativeHandle,
++  useMemo,
++  useRef,
++  useState,
++} from "react";
++import { getModelCatalog } from "./api";
++import type {
++  ModelCatalogCode,
++  ModelCatalogInput,
++  ModelCatalogResult,
++} from "./model-catalog-client";
++
++export interface ModelCatalogActions {
++  loadIfNeeded(): void;
++}
++
++const MESSAGES: Record<
++  Exclude<ModelCatalogCode, "ok"> | "request_failed",
++  string
++> = {
++  unsupported: "这个服务暂不提供模型列表，可以继续手动填写模型名。",
++  missing_api_key: "请先填写 API Key，再获取模型列表。", // pragma: allowlist secret
++  unreachable: "暂时无法连接模型列表接口，请检查地址或继续手动填写。",
++  unauthorized: "模型列表认证未通过，请检查 API Key 是否属于当前服务。",
++  invalid_response: "模型列表的返回格式无法识别，可以继续手动填写模型名。",
++  rate_limited: "模型列表请求频率受限，请稍后刷新或手动填写。",
++  insufficient_balance: "模型账户余额不足，请检查账户或更换 API Key。",
++  profile_changed: "已保存的配置发生变化，请刷新配置后重试。",
++  request_failed: "暂时无法获取模型列表，可以稍后刷新或继续手动填写。",
++};
++
++export function ModelCatalogPicker({
++  provider,
++  baseUrl,
++  apiKey,
++  savedProfile,
++  endpointReady,
++  disabled,
++  selectedModel,
++  onSelect,
++  controlsRef,
++}: {
++  provider: ProviderKind;
++  baseUrl: string;
++  apiKey: string;
++  savedProfile?: { profile_id: string; revision: number };
++  endpointReady: boolean;
++  disabled: boolean;
++  selectedModel: string;
++  onSelect(model: string): void;
++  controlsRef?: Ref<ModelCatalogActions>;
++}) {
++  const input = useMemo<ModelCatalogInput>(
++    () => ({
++      provider_kind: provider,
++      base_url: baseUrl.trim(),
++      ...(apiKey.trim()
++        ? { api_key: apiKey.trim() }
++        : savedProfile
++          ? {
++              profile_id: savedProfile.profile_id,
++              expected_profile_revision: savedProfile.revision,
++            }
++          : {}),
++    }),
++    [
++      provider,
++      baseUrl,
++      apiKey,
++      savedProfile?.profile_id,
++      savedProfile?.revision,
++    ],
++  );
++  const [state, setState] = useState<{
++    input: ModelCatalogInput;
++    loading: boolean;
++    result?: ModelCatalogResult;
++    failed?: boolean;
++  } | null>(null);
++  const request = useRef<AbortController | null>(null);
++  const lastAttempt = useRef<ModelCatalogInput | null>(null);
++  useEffect(
++    () => () => {
++      request.current?.abort();
++      request.current = null;
++    },
++    [input],
++  );
++  const current = state?.input === input ? state : null;
++  const available =
++    endpointReady &&
++    (provider === "ollama" || !!input.api_key || !!input.profile_id);
++
++  async function load(force = false) {
++    if (disabled || !available || request.current) return;
++    if (!force && JSON.stringify(lastAttempt.current) === JSON.stringify(input))
++      return;
++    lastAttempt.current = input;
++    const controller = new AbortController();
++    request.current = controller;
++    setState({ input, loading: true });
++    try {
++      const result = await getModelCatalog(input, controller.signal);
++      if (!controller.signal.aborted && request.current === controller) {
++        setState({ input, loading: false, result });
++      }
++    } catch {
++      if (!controller.signal.aborted && request.current === controller) {
++        setState({ input, loading: false, failed: true });
++      }
++    } finally {
++      if (request.current === controller) request.current = null;
++    }
++  }
++  useImperativeHandle(controlsRef, () => ({
++    loadIfNeeded: () => {
++      void load();
++    },
++  }));
++  const result = current?.result;
++  return (
++    <div className="model-form-field">
++      <button
++        type="button"
++        className="quiet"
++        disabled={disabled || !available || current?.loading}
++        onClick={() => void load(true)}
++      >
++        {current?.loading
++          ? "正在获取模型列表…"
++          : current
++            ? "刷新模型列表"
++            : "获取模型列表"}
++      </button>
++      <small>
++        填写接口地址和密钥后可自动获取，也可手动刷新。列表仅供选择，测试通过后才会启用模型。
++      </small>
++      {result?.code === "ok" && result.models.length > 0 && (
++        <label>
++          从模型列表选择
++          <select
++            aria-label="从模型列表选择"
++            disabled={disabled}
++            value={
++              result.models.some((item) => item.id === selectedModel)
++                ? selectedModel
++                : ""
++            }
++            onChange={(event) => {
++              if (event.target.value) onSelect(event.target.value);
++            }}
++          >
++            <option value="">选择候选，或保留手动填写的模型名</option>
++            {result.models.map((item) => (
++              <option key={item.id} value={item.id}>
++                {item.display_name === item.id
++                  ? item.id
++                  : `${item.display_name} · ${item.id}`}
++              </option>
++            ))}
++          </select>
++        </label>
++      )}
++      <small role="status" aria-live="polite">
++        {current?.failed
++          ? MESSAGES.request_failed
++          : result?.code === "ok"
++            ? result.models.length
++              ? `已获取 ${result.models.length} 个候选模型。${result.has_more ? "列表尚未完整返回，未显示的模型仍可手填。" : ""}`
++              : "服务返回的模型列表为空，仍可手动填写模型名。"
++            : result
++              ? MESSAGES[result.code]
++              : ""}
++      </small>
++    </div>
++  );
++}
+diff --git a/memhub/apps/web/src/ModelSettings.test.tsx b/memhub/apps/web/src/ModelSettings.test.tsx
+index 91a4627..d19212f 100644
+--- a/memhub/apps/web/src/ModelSettings.test.tsx
++++ b/memhub/apps/web/src/ModelSettings.test.tsx
+@@ -28,4 +28,6 @@
+ const remove = vi.fn();
+ const update = vi.fn();
++const catalog = vi.hoisted(() => vi.fn());
++vi.mock("./api", () => ({ getModelCatalog: catalog }));
+ 
+ it("explains an insufficient model balance with the required recovery", () => {
+@@ -151,6 +153,127 @@
+     create.mockResolvedValue(profile);
+     update.mockResolvedValue({ ...preset, has_api_key: true, revision: 2 });
++    catalog.mockResolvedValue({
++      code: "unsupported",
++      models: [],
++      has_more: false,
++    });
+   });
+ 
++  it("automatically fetches once on completed input blur and keeps the model editable", async () => {
++    catalog.mockResolvedValue({
++      code: "ok",
++      models: [{ id: "listed-model", display_name: "Listed model" }],
++      has_more: false,
++    });
++    const user = userEvent.setup();
++    render(<ModelSettings />);
++    await user.type(screen.getByLabelText("生成模型名"), "manual-model");
++    await user.type(screen.getByLabelText(/^API Key/), "synthetic-key");
++    expect(catalog).not.toHaveBeenCalled();
++    fireEvent.blur(screen.getByLabelText(/^API Key/));
++    const picker = await screen.findByLabelText("从模型列表选择");
++    fireEvent.blur(screen.getByLabelText(/^API Key/));
++    expect(catalog).toHaveBeenCalledTimes(1);
++    expect(screen.getByLabelText("生成模型名")).toHaveProperty(
++      "value",
++      "manual-model",
++    );
++    await user.selectOptions(picker, "listed-model");
++    expect(screen.getByLabelText("生成模型名")).toHaveProperty(
++      "value",
++      "listed-model",
++    );
++    await user.clear(screen.getByLabelText("生成模型名"));
++    await user.type(screen.getByLabelText("生成模型名"), "hand-edited-model");
++    expect(catalog).toHaveBeenCalledTimes(1);
++    expect(create).not.toHaveBeenCalled();
++    expect(update).not.toHaveBeenCalled();
++    expect(probeProfile).not.toHaveBeenCalled();
++    expect(activate).not.toHaveBeenCalled();
++  });
++
++  it("reuses a saved key only for the original provider endpoint and revision", async () => {
++    const controls = createRef<ModelSettingsActions>();
++    render(<ModelSettings controlsRef={controls} />);
++    act(() => {
++      controls.current?.edit(profile.profile_id);
++    });
++    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
++    await waitFor(() => expect(catalog).toHaveBeenCalledTimes(1));
++    expect(catalog.mock.calls[0][0]).toEqual({
++      provider_kind: profile.provider_kind,
++      base_url: profile.base_url,
++      profile_id: profile.profile_id,
++      expected_profile_revision: profile.revision,
++    });
++    await screen.findByText(/这个服务暂不提供模型列表/);
++    fireEvent.change(screen.getByLabelText("Base URL"), {
++      target: { value: "https://other.example.invalid" },
++    });
++    expect(screen.getByRole("button", { name: "获取模型列表" })).toHaveProperty(
++      "disabled",
++      true,
++    );
++    fireEvent.blur(screen.getByLabelText("Base URL"));
++    expect(catalog).toHaveBeenCalledTimes(1);
++    fireEvent.change(screen.getByLabelText(/^API Key/), {
++      target: { value: "new-synthetic-key" },
++    });
++    fireEvent.blur(screen.getByLabelText(/^API Key/));
++    await waitFor(() => expect(catalog).toHaveBeenCalledTimes(2));
++    expect(catalog.mock.calls[1][0]).toEqual({
++      provider_kind: profile.provider_kind,
++      base_url: "https://other.example.invalid",
++      api_key: "new-synthetic-key", // pragma: allowlist secret
++    });
++  });
++
++  it.each(["invalid-response", "missing-stages", "other-profile"])(
++    "does not infer an absent model or unreachable address from capability flags: %s",
++    async (mode) => {
++      profiles = [];
++      create.mockResolvedValue({
++        ...profile,
++        profile_id: "created",
++        revision: 1,
++      });
++      probeProfile.mockResolvedValue({
++        profile_id: mode === "other-profile" ? "unrelated" : "created",
++        profile_revision: 1,
++        capabilities: profile.capabilities,
++        stages:
++          mode === "missing-stages"
++            ? []
++            : [
++                {
++                  stage: "model",
++                  ok: false,
++                  code:
++                    mode === "other-profile"
++                      ? "model_not_found"
++                      : "invalid_response",
++                  latency_ms: 1,
++                },
++              ],
++      });
++      const user = userEvent.setup();
++      render(<ModelSettings />);
++      await user.type(screen.getByLabelText("生成模型名"), "synthetic-model");
++      await user.type(screen.getByLabelText(/^API Key/), "synthetic-key");
++      await user.click(screen.getByRole("button", { name: "保存并测试启用" }));
++      await waitFor(() => expect(probeProfile).toHaveBeenCalled());
++      if (mode === "invalid-response") {
++        expect(
++          await screen.findByText(/服务返回不完整或不符合协议/),
++        ).toBeTruthy();
++      } else {
++        expect(await screen.findByText(/尚未取得有效的测试详情/)).toBeTruthy();
++      }
++      expect(screen.queryByText(/服务商没有这个模型名/)).toBeNull();
++      expect(screen.queryByText(/连不上接口地址/)).toBeNull();
++      expect(activate).not.toHaveBeenCalled();
++    },
++  );
++
+   it("submits a generation-only profile and leaves embedding to the builtin", async () => {
+     const user = userEvent.setup();
+diff --git a/memhub/apps/web/src/ModelSettings.tsx b/memhub/apps/web/src/ModelSettings.tsx
+index 8a7aec3..2679626 100644
+--- a/memhub/apps/web/src/ModelSettings.tsx
++++ b/memhub/apps/web/src/ModelSettings.tsx
+@@ -17,4 +17,8 @@
+   useState,
+ } from "react";
++import {
++  type ModelCatalogActions,
++  ModelCatalogPicker,
++} from "./ModelCatalogPicker";
+ import { OptionMenu } from "./OptionMenu";
+ import { PROVIDER_PRESETS } from "./provider-presets";
+@@ -107,4 +111,10 @@
+   model_not_found: "服务商没有这个模型名，请对照服务商的模型列表核对。",
+   unreachable: "连不上接口地址，请检查网络和服务地址是否正确。",
++  missing_api_key: "请填写 API Key 后重新测试。", // pragma: allowlist secret
++  invalid_response:
++    "服务返回不完整或不符合协议，请重新测试；尚不能判断模型是否可用。",
++  rate_limited: "请求频率受限，请稍后重新测试。",
++  insufficient_balance: "模型账户余额不足，请充值或更换 API Key 后重新测试。",
++  embedding_unavailable: "向量模型未能通过测试，请检查向量配置。",
+ };
+ 
+@@ -113,26 +123,19 @@
+ ): Partial<Record<FieldName, string>> {
+   if (!result) return {};
+-  const stages = new Map(result.stages.map((stage) => [stage.stage, stage]));
+   const errors: Partial<Record<FieldName, string>> = {};
+-  const text = (stage: string) => {
+-    const stageResult = stages.get(stage);
+-    return stageResult && stageResult.code !== "ok"
+-      ? (FIELD_PROBE_TEXT[stageResult.code] ?? undefined)
+-      : undefined;
+-  };
+-  if (!result.capabilities.endpoint_reachable) {
+-    errors["base-url"] = text("endpoint") ?? FIELD_PROBE_TEXT.unreachable;
+-  }
+-  if (!result.capabilities.model_available) {
+-    if (stages.get("model")?.code === "unauthorized") {
+-      errors["api-key"] = FIELD_PROBE_TEXT.unauthorized;
+-    } else {
+-      errors.model = text("model") ?? FIELD_PROBE_TEXT.model_not_found;
++  for (const stage of result.stages) {
++    const text = FIELD_PROBE_TEXT[stage.code];
++    if (!text) continue;
++    if (stage.code === "unauthorized" || stage.code === "missing_api_key") {
++      errors["api-key"] = text;
++    } else if (stage.code === "unreachable") {
++      errors[stage.stage === "embedding" ? "embedding-base-url" : "base-url"] =
++        text;
++    } else if (stage.stage === "embedding") {
++      errors["embedding-model"] = text;
++    } else if (stage.stage === "model") {
++      errors.model = text;
+     }
+   }
+-  if (!result.capabilities.embedding_available) {
+-    errors["embedding-model"] ??=
+-      text("embedding") ?? FIELD_PROBE_TEXT.embedding_unavailable;
+-  }
+   return errors;
+ }
+@@ -248,4 +251,5 @@
+   const [embeddingModel, setEmbeddingModel] = useState("");
+   const [apiKey, setApiKey] = useState("");
++  const catalogActions = useRef<ModelCatalogActions>(null);
+   const [disableThinking, setDisableThinking] = useState(true);
+   const [customOpen, setCustomOpen] = useState(false);
+@@ -324,4 +328,13 @@
+       !endpointMoved
+     );
++  const catalogSavedProfile =
++    editing &&
++    !editChanged &&
++    provider === editing.provider_kind &&
++    baseUrl.trim().replace(/\/+$/, "") ===
++      (editing.base_url ?? "").trim().replace(/\/+$/, "") &&
++    (editing.has_configured_api_key ?? editing.has_api_key)
++      ? { profile_id: editing.profile_id, revision: editing.revision }
++      : undefined;
+   const suggestedName = (nextModel: string, nextProvider = provider) =>
+     nextModel.trim()
+@@ -478,8 +491,15 @@
+       !result.capabilities.embedding_available
+     ) {
++      const matching =
++        result?.profile_id === profile.profile_id &&
++        result.profile_revision === profile.revision
++          ? result
++          : null;
+       setSetupError(
+-        "配置已保存，连接测试未通过。请核对配置后重试，历史对话尚未发送。",
++        matching?.stages.length
++          ? "配置已保存，连接测试未通过。请核对配置后重试，历史对话尚未发送。"
++          : "配置已保存，尚未取得有效的测试详情，暂时无法判断连接或模型是否可用。请重新测试，历史对话尚未发送。",
+       );
+-      setFields(probeFieldErrors(result));
++      setFields(probeFieldErrors(matching));
+       return false;
+     }
+@@ -1207,4 +1227,5 @@
+                 setProviderPreset("custom");
+               }}
++              onBlur={() => catalogActions.current?.loadIfNeeded()}
+             />
+             <small id="model-url-help">
+@@ -1230,4 +1251,5 @@
+               disabled={formLocked}
+               onChange={(event) => setApiKey(event.target.value)}
++              onBlur={() => catalogActions.current?.loadIfNeeded()}
+               placeholder="保存后不会再次显示…"
+             />
+@@ -1245,4 +1267,20 @@
+             )}
+           </label>
++          <ModelCatalogPicker
++            provider={provider}
++            baseUrl={baseUrl}
++            apiKey={apiKey}
++            savedProfile={catalogSavedProfile}
++            endpointReady={validEndpoint(baseUrl)}
++            disabled={formLocked || editChanged}
++            controlsRef={catalogActions}
++            selectedModel={model}
++            onSelect={(value) => {
++              setModel(value);
++              setProviderPreset("custom");
++              setFields((previous) => ({ ...previous, model: undefined }));
++              if (!nameEdited) setName(suggestedName(value));
++            }}
++          />
+           <label>
+             <input
+@@ -1622,5 +1660,5 @@
+   }
+   if (!profile.capabilities.model_available) {
+-    return "key 已保存，还没测过这个模型能不能用。";
++    return "key 已保存，模型可用状态待测试确认。";
+   }
+   return "未启用";
+diff --git a/memhub/apps/web/src/api.model-catalog.test.ts b/memhub/apps/web/src/api.model-catalog.test.ts
+new file mode 100644
+index 0000000..bbea4a8
+--- /dev/null
++++ b/memhub/apps/web/src/api.model-catalog.test.ts
+@@ -0,0 +1,30 @@
++// @vitest-environment jsdom
++import { expect, it, vi } from "vitest";
++const post = vi.hoisted(() => vi.fn());
++vi.mock("axios", () => ({
++  default: {
++    create: () => ({ post, interceptors: { request: { use: vi.fn() } } }),
++    isAxiosError: () => false,
++  },
++}));
++import { getModelCatalog } from "./api";
++
++it("uses only the catalog endpoint and forwards cancellation without saving a profile", async () => {
++  const result = {
++    code: "ok",
++    models: [{ id: "model-a", display_name: "Model A" }],
++    has_more: false,
++  };
++  post.mockResolvedValueOnce({ data: result });
++  const signal = new AbortController().signal;
++  const input = {
++    provider_kind: "anthropic" as const,
++    base_url: "https://models.example.invalid",
++    profile_id: "saved",
++    expected_profile_revision: 3,
++  };
++  expect(await getModelCatalog(input, signal)).toEqual(result);
++  expect(post).toHaveBeenCalledExactlyOnceWith("/api/v1/model-catalog", input, {
++    signal,
++  });
++});
+diff --git a/memhub/apps/web/src/api.ts b/memhub/apps/web/src/api.ts
+index 9eeb7c1..fb2ff0c 100644
+--- a/memhub/apps/web/src/api.ts
++++ b/memhub/apps/web/src/api.ts
+@@ -90,4 +90,8 @@
+ } from "./file-upload-client";
+ import { recoverableProbe } from "./model-probe-client";
++import {
++  type ModelCatalogInput,
++  parseModelCatalog,
++} from "./model-catalog-client";
+ 
+ export const DEFAULT_CORE_URL = "http://127.0.0.1:8765";
+@@ -709,4 +713,14 @@
+ }
+ 
++export async function getModelCatalog(
++  input: ModelCatalogInput,
++  signal?: AbortSignal,
++) {
++  const response = await client.post<unknown>("/api/v1/model-catalog", input, {
++    signal,
++  });
++  return parseModelCatalog(response.data);
++}
++
+ export async function getModelCreationOperation(
+   operationId: string,
+diff --git a/memhub/apps/web/src/model-catalog-client.test.ts b/memhub/apps/web/src/model-catalog-client.test.ts
+new file mode 100644
+index 0000000..01f3e3b
+--- /dev/null
++++ b/memhub/apps/web/src/model-catalog-client.test.ts
+@@ -0,0 +1,34 @@
++import { describe, expect, it } from "vitest";
++import { parseModelCatalog } from "./model-catalog-client";
++
++const valid = {
++  code: "ok",
++  models: [{ id: "model-a", display_name: "Model A" }],
++  has_more: false,
++};
++describe("bounded model catalog receipt", () => {
++  it("retains only public model fields", () => {
++    expect(
++      parseModelCatalog({ ...valid, diagnostic: "not forwarded" }),
++    ).toEqual(valid);
++  });
++  it.each([
++    null,
++    { ...valid, code: "unexpected" },
++    { ...valid, has_more: "false" },
++    { ...valid, models: Array(201).fill(valid.models[0]) },
++    { ...valid, models: [valid.models[0], valid.models[0]] },
++    { ...valid, models: [{ id: "x".repeat(257), display_name: "Model" }] },
++    { ...valid, models: [{ id: "model", display_name: " " }] },
++    { ...valid, diagnostic: "x".repeat(1024 * 1024) },
++    { ...valid, code: "unauthorized" },
++  ])("rejects invalid or oversized receipt %#", (value) => {
++    expect(() => parseModelCatalog(value)).toThrow("model_catalog_invalid");
++  });
++  it("accepts an empty unsupported result without inventing model availability", () => {
++    expect(
++      parseModelCatalog({ code: "unsupported", models: [], has_more: false })
++        .code,
++    ).toBe("unsupported");
++  });
++});
+diff --git a/memhub/apps/web/src/model-catalog-client.ts b/memhub/apps/web/src/model-catalog-client.ts
+new file mode 100644
+index 0000000..74da930
+--- /dev/null
++++ b/memhub/apps/web/src/model-catalog-client.ts
+@@ -0,0 +1,63 @@
++import type { ProviderKind } from "@one-memory/contracts";
++
++export const MODEL_CATALOG_CODES = [
++  "ok",
++  "unsupported",
++  "missing_api_key",
++  "unreachable",
++  "unauthorized",
++  "invalid_response",
++  "rate_limited",
++  "insufficient_balance",
++  "profile_changed",
++] as const;
++export type ModelCatalogCode = (typeof MODEL_CATALOG_CODES)[number];
++export interface ModelCatalogInput {
++  provider_kind: ProviderKind;
++  base_url: string;
++  api_key?: string;
++  profile_id?: string;
++  expected_profile_revision?: number;
++}
++export interface ModelCatalogResult {
++  code: ModelCatalogCode;
++  models: Array<{ id: string; display_name: string }>;
++  has_more: boolean;
++}
++
++export function parseModelCatalog(value: unknown): ModelCatalogResult {
++  const invalid = () => new Error("model_catalog_invalid");
++  if (!value || typeof value !== "object" || Array.isArray(value))
++    throw invalid();
++  if (new TextEncoder().encode(JSON.stringify(value)).length > 1024 * 1024)
++    throw invalid();
++  const row = value as Record<string, unknown>;
++  if (
++    !MODEL_CATALOG_CODES.includes(row.code as ModelCatalogCode) ||
++    typeof row.has_more !== "boolean" ||
++    !Array.isArray(row.models) ||
++    row.models.length > 200
++  ) {
++    throw invalid();
++  }
++  const ids = new Set<string>();
++  const models = row.models.map((item: unknown) => {
++    if (!item || typeof item !== "object" || Array.isArray(item))
++      throw invalid();
++    const model = item as Record<string, unknown>;
++    for (const field of ["id", "display_name"]) {
++      if (
++        typeof model[field] !== "string" ||
++        !model[field].trim() ||
++        model[field].length > 256
++      )
++        throw invalid();
++    }
++    const id = model.id as string;
++    if (ids.has(id)) throw invalid();
++    ids.add(id);
++    return { id, display_name: model.display_name as string };
++  });
++  if (row.code !== "ok" && (models.length || row.has_more)) throw invalid();
++  return { code: row.code as ModelCatalogCode, models, has_more: row.has_more };
++}
