@@ -84,8 +84,8 @@ Mac 验收使用其中的最终客户端包。保留运行 ID、附件摘要、�
 指向刚才下载并验收的原七附件目录：
 
 ```sh
-python -m scripts.release_artifacts verify --tag v0.1.1 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY
-python -m scripts.release_artifacts publish --tag v0.1.1 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY --repository Tsou92/Cloud-Memory-Hub
+python -m scripts.release_artifacts verify --tag v0.1.2 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY
+python -m scripts.release_artifacts publish --tag v0.1.2 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY --repository Tsou92/Cloud-Memory-Hub
 ```
 
 发布器仍执行下文的远端标签、草稿、上传、重新下载与摘要核对，不跳过任何校验。

@@ -189,6 +189,11 @@
       "path": "patches/0037-one-link-agent-onboarding.patch",
       "scope": "default_one_time_link_agent_onboarding_with_secret_free_recovery_and_advanced_json_compatibility",
       "digest": "sha256:5bc614f10606226151b6f2ac81ac8f39469db4cde9a0cb4fbc4c77da13ac945e"
+    },
+    {
+      "path": "patches/0038-raw-lexical-timeout-fallback.patch",
+      "scope": "preserve_authorized_lexical_candidates_on_optional_raw_semantic_timeout_without_extending_read_deadlines",
+      "digest": "sha256:778b6680a7a26fc15ccb23f4d0fa6a26e63266c6b2abdff32c91b5586850cfc0"
     }
   ]
 }
