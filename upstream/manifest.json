@@ -179,6 +179,11 @@
       "path": "patches/0035-console-form-history-and-backup-guidance.patch",
       "scope": "console_model_form_layout_readable_hub_history_and_existing_backup_guide",
       "digest": "sha256:263f8dcf46990da49e7ccc69c98e8ac1f6beeab34711082825c547552b9a2424"
+    },
+    {
+      "path": "patches/0036-console-first-use-guidance.patch",
+      "scope": "novice_console_onboarding_model_setup_pairing_guidance_and_scoped_original_navigation",
+      "digest": "sha256:61194a619b71345382301057e1116c9b5d4904152a15ec3725781bf6a795e039"
     }
   ]
 }
