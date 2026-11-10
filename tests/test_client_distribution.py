@@ -180,6 +180,33 @@ class DistributionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source_file_invalid"):
             builder.stage_project(source, self.root / "rejected", "src")
 
+    @patch.object(builder, "run")
+    def test_build_constraints_work_under_a_directory_with_spaces(self, run):
+        work = self.root / "checkout with spaces"
+        source = work / "sources/example"
+        source.mkdir(parents=True)
+        output = work / "package/wheels"
+        output.mkdir(parents=True)
+        constraints = work / "build-constraints.txt"
+        constraints.write_text(builder.BUILD_CONSTRAINTS)
+        wheel = output / "example-1.0-py3-none-any.whl"
+
+        def build(arguments, *, cwd):
+            constraint_arg = arguments[arguments.index("--build-constraints") + 1]
+            # Match uv's build-constraint propagation: whitespace splits paths.
+            self.assertEqual(len(constraint_arg.split()), 1)
+            self.assertEqual((cwd / constraint_arg).read_text(), builder.BUILD_CONSTRAINTS)
+            self.assertEqual(cwd / arguments[-1], source)
+            self.assertEqual(cwd / arguments[arguments.index("--out-dir") + 1], output)
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("example-1.0.dist-info/METADATA", "Name: example\nVersion: 1.0\n")
+            return ""
+
+        run.side_effect = build
+        self.assertEqual(
+            builder.build_wheel(source, output, constraints, "python3.12", "example"), wheel
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
