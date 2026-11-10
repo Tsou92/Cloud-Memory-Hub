@@ -1,0 +1,1564 @@
+diff --git a/memhub/apps/web/src/HubConnections.tsx b/memhub/apps/web/src/HubConnections.tsx
+--- a/memhub/apps/web/src/HubConnections.tsx
++++ b/memhub/apps/web/src/HubConnections.tsx
+@@ -1,4 +1,5 @@
+ import { useCallback, useEffect, useRef, useState } from "react";
++import { HubAgentConnect } from "./HubAgentConnect";
+ import type { HubProject } from "./hub-api";
+ import {
+   agentAdapter,
+@@ -51,13 +52,15 @@
+         onRefresh={onRefreshProjects}
+       />
+       {project ? (
+-        <HubDevicePairing
+-          key={`${instance}:${project.scope_id}`}
+-          instance={instance}
+-          project={project}
+-        />
++        <div key={`${instance}:${project.scope_id}`}>
++          <HubAgentConnect instance={instance} project={project} />
++          <details>
++            <summary>高级：JSON 配对与设备授权管理</summary>
++            <HubDevicePairing instance={instance} project={project} />
++          </details>
++        </div>
+       ) : (
+-        <p>先创建或选择一个项目，再为每台设备分别生成配对文件。</p>
++        <p>先创建或选择一个项目，再连接 Agent。</p>
+       )}
+     </>
+   );
+diff --git a/memhub/apps/web/src/HubConnections.test.tsx b/memhub/apps/web/src/HubConnections.test.tsx
+--- a/memhub/apps/web/src/HubConnections.test.tsx
++++ b/memhub/apps/web/src/HubConnections.test.tsx
+@@ -2,12 +2,14 @@
+ import {
+   act,
+   cleanup,
++  fireEvent,
+   render,
+   screen,
+   waitFor,
+   within,
+ } from "@testing-library/react";
+ import userEvent from "@testing-library/user-event";
++import type { ReactElement } from "react";
+ import { afterEach, beforeEach, expect, it, vi } from "vitest";
+ import { HubConnections } from "./HubConnections";
+ import {
+@@ -173,6 +175,12 @@
+   vi.restoreAllMocks();
+   vi.unstubAllGlobals();
+ });
++function renderAdvanced(element: ReactElement) {
++  const view = render(element);
++  const summary = screen.queryByText("高级：JSON 配对与设备授权管理");
++  if (summary) fireEvent.click(summary);
++  return view;
++}
+ async function start() {
+   await waitFor(() =>
+     expect(
+@@ -203,7 +211,7 @@
+ }
+
+ it("creates an independent scoped identity, verifies access and downloads only the pairing contract", async () => {
+-  render(<HubConnections {...props} />);
++  renderAdvanced(<HubConnections {...props} />);
+   await start();
+   await userEvent.click(
+     await screen.findByRole("button", { name: "下载配对文件" }),
+@@ -278,7 +286,7 @@
+
+ it("does not repeat unknown device creation and requires an explicit existing device and rotation", async () => {
+   dropDevice = true;
+-  render(<HubConnections {...props} />);
++  renderAdvanced(<HubConnections {...props} />);
+   await start();
+   await screen.findByText(/设备创建响应未确认/);
+   expect(
+@@ -318,7 +326,7 @@
+
+ it("retains source-write uncertainty across reload and rotation until a source is explicitly selected", async () => {
+   dropSource = true;
+-  const first = render(<HubConnections {...props} />);
++  const first = renderAdvanced(<HubConnections {...props} />);
+   await start();
+   await screen.findByText(/核对来源登记结果/);
+   await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+@@ -328,7 +336,7 @@
+   expect(retained.source_creation_unknown).toBe(true);
+   expect(retained.device_id).toBe(deviceId);
+   first.unmount();
+-  render(<HubConnections {...props} />);
++  renderAdvanced(<HubConnections {...props} />);
+   await screen.findByRole("checkbox", { name: /我确认重新签发/ });
+   await userEvent.click(
+     screen.getByRole("checkbox", { name: /我确认重新签发/ }),
+@@ -358,7 +366,7 @@
+
+ it("requires a fresh grant review after revision conflict and preserves another project's grants", async () => {
+   conflictGrant = true;
+-  render(<HubConnections {...props} />);
++  renderAdvanced(<HubConnections {...props} />);
+   await start();
+   await screen.findByText(/设备或来源已被其他操作修改/);
+   expect(
+@@ -399,7 +407,7 @@
+
+ it("never offers a download when the actual source-access reply names another instance", async () => {
+   wrongInstance = true;
+-  render(<HubConnections {...props} />);
++  renderAdvanced(<HubConnections {...props} />);
+   await start();
+   await screen.findByRole("alert");
+   expect(screen.queryByRole("button", { name: "下载配对文件" })).toBeNull();
+@@ -415,7 +423,7 @@
+     ]),
+   );
+   sources.push(source());
+-  render(<HubConnections {...props} />);
++  renderAdvanced(<HubConnections {...props} />);
+   await userEvent.click(
+     await screen.findByRole("button", { name: "撤销此设备" }),
+   );
+@@ -442,7 +450,7 @@
+     ]),
+   );
+   sources.push(source());
+-  render(<HubConnections {...props} />);
++  renderAdvanced(<HubConnections {...props} />);
+   await userEvent.click(
+     await screen.findByRole("button", { name: "停止此来源" }),
+   );
+@@ -473,7 +481,7 @@
+     }
+     return handler(url, init);
+   });
+-  const view = render(<HubConnections key="a" {...props} />);
++  const view = renderAdvanced(<HubConnections key="a" {...props} />);
+   await start();
+   await waitFor(() => expect(finish).toBeTruthy());
+   view.rerender(
+@@ -500,7 +508,7 @@
+ });
+
+ it("creates a project with normalized display text and exposes the returned project identity", async () => {
+-  render(<HubConnections {...props} project={null} />);
++  renderAdvanced(<HubConnections {...props} project={null} />);
+   await userEvent.type(
+     screen.getByRole("textbox", { name: "项目名称" }),
+     " 新项目（工作） ",
+@@ -521,7 +529,7 @@
+       ? Promise.reject(new TypeError("lost"))
+       : handler(url, init),
+   );
+-  const view = render(<HubConnections {...props} project={null} />);
++  const view = renderAdvanced(<HubConnections {...props} project={null} />);
+   await userEvent.type(
+     screen.getByRole("textbox", { name: "项目名称" }),
+     "合成项目",
+@@ -558,7 +566,7 @@
+           )
+         : handler(url, init),
+     );
+-    render(<HubConnections {...props} project={null} />);
++    renderAdvanced(<HubConnections {...props} project={null} />);
+     await userEvent.type(
+       screen.getByRole("textbox", { name: "项目名称" }),
+       "合成项目",
+@@ -581,7 +589,7 @@
+         ? Promise.resolve(response({ detail: "invalid_request" }, 422))
+         : handler(url, init),
+     );
+-    render(<HubConnections {...props} />);
++    renderAdvanced(<HubConnections {...props} />);
+     await start();
+     await screen.findByText(/填写的名称或配对信息不符合要求/);
+     reject = false;
+@@ -604,7 +612,7 @@
+       ? Promise.reject(new TypeError("lost"))
+       : handler(url, init),
+   );
+-  render(<HubConnections {...props} project={null} />);
++  renderAdvanced(<HubConnections {...props} project={null} />);
+   await userEvent.type(
+     screen.getByRole("textbox", { name: "项目名称" }),
+     "合成项目",
+@@ -633,7 +641,7 @@
+         ? Promise.reject(new TypeError("lost"))
+         : handler(url, init),
+     );
+-    render(<HubConnections {...props} />);
++    renderAdvanced(<HubConnections {...props} />);
+     await start();
+     await screen.findByRole("alert");
+     await userEvent.click(
+@@ -687,7 +695,7 @@
+       source_creation_unknown: false,
+     }),
+   );
+-  render(<HubConnections {...props} />);
++  renderAdvanced(<HubConnections {...props} />);
+   await screen.findByRole("option", { name: /另一设备/ });
+   await userEvent.selectOptions(
+     screen.getByRole("combobox", { name: "已有设备" }),
+diff --git a/memhub/apps/web/src/HubConsole.test.tsx b/memhub/apps/web/src/HubConsole.test.tsx
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -562,7 +562,7 @@
+     "首个合成项目",
+   );
+   await userEvent.click(screen.getByRole("button", { name: "创建项目" }));
+-  await screen.findByRole("heading", { name: "为「首个合成项目」接入设备" });
++  await screen.findByRole("heading", { name: "连接 Agent" });
+   expect(
+     (screen.getByRole("combobox", { name: "当前项目" }) as HTMLSelectElement)
+       .value,
+@@ -573,7 +573,11 @@
+
+ it("offers an ordered first-use guide and model navigation without creating another project", async () => {
+   render(<HubConsole />);
+-  await screen.findByRole("region", { name: "开始使用" });
++  const guide = await screen.findByRole("region", { name: "开始使用" });
++  expect(guide.textContent).toContain("一次性链接");
++  expect(guide.textContent).toContain("MCP 与 Skill");
++  expect(guide.textContent).toContain("无需安装独立 App");
++  expect(guide.textContent).not.toMatch(/配对文件|连接组件|每台 Mac/);
+   expect(screen.getByText(/你已经有项目了/)).toBeTruthy();
+   expect(screen.queryByRole("button", { name: "创建第一个项目" })).toBeNull();
+   expect(screen.getByRole("button", { name: "创建另一个项目" })).toBeTruthy();
+@@ -590,6 +594,14 @@
+
+ it("guides an empty project to its real scoped history without calling it shared", async () => {
+   fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (url.endsWith("summary"))
++      return handler(url, init).then(async (response) =>
++        Response.json({
++          ...(await response.json()),
++          sources: [],
++          sources_total: 0,
++        }),
++      );
+     if (url.endsWith("memory-list")) {
+       const body = JSON.parse(String(init?.body));
+       return Promise.resolve(
+@@ -603,6 +615,8 @@
+   render(<HubConsole />);
+   await select();
+   await screen.findByText("当前项目尚无可显示的记忆。");
++  expect(await screen.findByText(/先为第一台设备生成一次性链接/)).toBeTruthy();
++  expect(screen.queryByText(/配对文件|连接组件/)).toBeNull();
+   expect(
+     screen.getByText("请用 Cloud Memory Hub 记住：这是我的第一次共享测试。"),
+   ).toBeTruthy();
+diff --git a/memhub/apps/web/src/HubAgentConnect.tsx b/memhub/apps/web/src/HubAgentConnect.tsx
+new file mode 100644
+--- /dev/null
++++ b/memhub/apps/web/src/HubAgentConnect.tsx
+@@ -0,0 +1,422 @@
++import { useEffect, useRef, useState } from "react";
++import type { HubProject } from "./hub-api";
++import {
++  type Agent,
++  agents,
++  createInvitation,
++  type Invitation,
++  InvitationError,
++  type InvitationProgress,
++  type InvitationStatus,
++  invitationInstructions,
++  invitationKey,
++  invitationMessage,
++  readInvitation,
++  readInvitationProgress,
++} from "./hub-invitation";
++import { pairingMessage, validLabel } from "./hub-pairing";
++import { R6Button } from "./R6Controls";
++
++export function HubAgentConnect({
++  instance,
++  project,
++}: {
++  instance: string;
++  project: HubProject;
++}) {
++  const key = invitationKey(instance, project.scope_id);
++  const [name, setName] = useState("");
++  const [agent, setAgent] = useState<Agent>("claude");
++  const [progress, setProgress] = useState<InvitationProgress | null>(null);
++  const [invitation, setInvitation] = useState<Invitation | null>(null);
++  const [status, setStatus] = useState<InvitationStatus | null>(null);
++  const [initialized, setInitialized] = useState(false);
++  const [storageError, setStorageError] = useState(false);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState("");
++  const [errorCode, setErrorCode] = useState("");
++  const [notice, setNotice] = useState("");
++  const [confirmed, setConfirmed] = useState(false);
++  const refresh = useRef<() => void>(() => {});
++  const writer = useRef<AbortController | null>(null);
++  const writing = useRef(false);
++  const alive = useRef(true);
++  function save(next: InvitationProgress | null) {
++    setProgress(next);
++    try {
++      if (next) sessionStorage.setItem(key, JSON.stringify(next));
++      else sessionStorage.removeItem(key);
++    } catch {
++      setStorageError(true);
++      throw new InvitationError("storage_unavailable");
++    }
++  }
++  useEffect(() => {
++    alive.current = true;
++    try {
++      setProgress(readInvitationProgress(key));
++    } catch {
++      setStorageError(true);
++    }
++    setInitialized(true);
++    return () => {
++      alive.current = false;
++      writer.current?.abort();
++    };
++  }, [key]);
++  useEffect(() => {
++    const id = progress?.pairing_id;
++    if (!id || busy) return;
++    const pairingId = id;
++    let controller: AbortController | null = null;
++    let timer: ReturnType<typeof setTimeout>;
++    async function poll() {
++      controller?.abort();
++      clearTimeout(timer);
++      const current = new AbortController();
++      controller = current;
++      let pending = true;
++      try {
++        const next = await readInvitation(
++          pairingId,
++          project.scope_id,
++          current.signal,
++        );
++        if (current.signal.aborted) return;
++        setStatus(next);
++        setError("");
++        setErrorCode("");
++        pending = next.state === "pending";
++        if (!pending) {
++          setInvitation(null);
++          setNotice("");
++        }
++      } catch (reason) {
++        if (current.signal.aborted) return;
++        setError(invitationMessage(reason));
++        setErrorCode(
++          reason instanceof InvitationError ? reason.code : "request_failed",
++        );
++        pending = !(
++          reason instanceof InvitationError &&
++          [
++            "administrator_required",
++            "authentication_required",
++            "pairing_not_found",
++          ].includes(reason.code)
++        );
++        if (!pending) setInvitation(null);
++      }
++      if (pending && !current.signal.aborted)
++        timer = setTimeout(() => void poll(), 5000);
++    }
++    refresh.current = () => void poll();
++    void poll();
++    return () => {
++      refresh.current = () => {};
++      controller?.abort();
++      clearTimeout(timer);
++    };
++  }, [progress?.pairing_id, project.scope_id, busy]);
++  async function mutate(revoke: boolean) {
++    if (
++      writing.current ||
++      storageError ||
++      !initialized ||
++      (revoke ? !progress?.pairing_id || !confirmed : !!progress)
++    )
++      return;
++    let label = "";
++    if (!revoke) {
++      try {
++        label = validLabel(name);
++      } catch (reason) {
++        setError(pairingMessage(reason));
++        return;
++      }
++    }
++    const controller = new AbortController();
++    writer.current = controller;
++    writing.current = true;
++    setBusy(true);
++    setError("");
++    setErrorCode("");
++    setNotice("");
++    setConfirmed(false);
++    try {
++      if (revoke) {
++        const pairingId = progress?.pairing_id;
++        if (!pairingId) throw new InvitationError("invalid_response");
++        setInvitation(null);
++        const next = await readInvitation(
++          pairingId,
++          project.scope_id,
++          controller.signal,
++          true,
++        );
++        if (!controller.signal.aborted) {
++          setStatus(next);
++          setInvitation(null);
++        }
++      } else {
++        save({ version: 1, pairing_id: null });
++        const next = await createInvitation(
++          project.scope_id,
++          label,
++          controller.signal,
++          (id) => save({ version: 1, pairing_id: id }),
++        );
++        if (!controller.signal.aborted) setInvitation(next);
++      }
++    } catch (reason) {
++      if (!controller.signal.aborted) {
++        if (!revoke && reason instanceof InvitationError && reason.rejected) {
++          try {
++            save(null);
++          } catch {
++            /* Keep storage failure visible. */
++          }
++        }
++        setError(invitationMessage(reason));
++        setErrorCode(
++          reason instanceof InvitationError ? reason.code : "request_failed",
++        );
++      }
++    } finally {
++      writing.current = false;
++      if (alive.current) setBusy(false);
++    }
++  }
++  function finish() {
++    try {
++      save(null);
++      setInvitation(null);
++      setStatus(null);
++      setConfirmed(false);
++      setError("");
++      setErrorCode("");
++      setNotice("");
++    } catch (reason) {
++      setError(invitationMessage(reason));
++    }
++  }
++  async function copy(text: string) {
++    try {
++      await navigator.clipboard.writeText(text);
++      if (alive.current) setNotice("已复制。请只交给要接入的设备或 Agent。");
++    } catch {
++      if (alive.current) setNotice("未能自动复制，请选中下方文本手动复制。");
++    }
++  }
++  const instructions = invitation && invitationInstructions(invitation, agent);
++  const terminal = status && status.state !== "pending";
++  const expiry = status?.expires_at ?? invitation?.expires_at;
++  return (
++    <section className="hub-card hub-pairing" aria-label="连接 Agent">
++      <h2>连接 Agent</h2>
++      <p>
++        当前项目：{project.display_name}
++        。可在页面上方切换项目；每台设备分别创建链接。
++      </p>
++      <p>
++        无需独立 App。把一句话交给 Agent，或在目标设备运行一条命令，安装 MCP 和
++        Skill。新设备仅获得当前项目的上传、记忆读取和历史读取权限。
++      </p>
++      {project.scope_id === "global" ? (
++        <p>请先选择或创建一个项目；全局偏好不能用于设备配对。</p>
++      ) : (
++        <>
++          <label>
++            要连接的 Agent{" "}
++            <select
++              value={agent}
++              onChange={(event) => setAgent(event.target.value as Agent)}
++            >
++              {Object.entries(agents).map(([id, label]) => (
++                <option value={id} key={id}>
++                  {label}
++                </option>
++              ))}
++            </select>
++          </label>
++          {!progress ? (
++            <form
++              onSubmit={(event) => {
++                event.preventDefault();
++                void mutate(false);
++              }}
++            >
++              <label>
++                设备显示名{" "}
++                <input
++                  value={name}
++                  maxLength={80}
++                  placeholder="例如：办公室 Mac mini"
++                  disabled={busy}
++                  onChange={(event) => setName(event.target.value)}
++                />
++              </label>
++              <R6Button
++                type="submit"
++                variant="primary"
++                pending={busy}
++                disabled={!name.trim() || storageError || !initialized}
++              >
++                生成 10 分钟连接链接
++              </R6Button>
++            </form>
++          ) : (
++            <>
++              <p role="status">
++                {status?.state === "claimed"
++                  ? "已配对：设备身份已签发。"
++                  : status?.state === "expired"
++                    ? "链接已过期。"
++                    : status?.state === "cancelled"
++                      ? "邀请已撤销。"
++                      : progress.pairing_id
++                        ? "等待连接：正在核对邀请状态。"
++                        : "创建结果尚未确认，未取得可用链接。"}
++              </p>
++              {progress.pairing_id && (
++                <details>
++                  <summary>邀请编号</summary>
++                  <code>{progress.pairing_id}</code>
++                </details>
++              )}
++              {expiry && <p>有效期至：{new Date(expiry).toLocaleString()}</p>}
++              {instructions && !terminal && (
++                <>
++                  <p>
++                    链接有效期 10
++                    分钟，仅供一台设备领取。刷新或离开页面后不再显示链接；请勿公开分享。
++                  </p>
++                  <label>
++                    给 Agent 的一句话{" "}
++                    <textarea readOnly rows={4} value={instructions.prompt} />
++                  </label>
++                  <R6Button onClick={() => void copy(instructions.prompt)}>
++                    复制给 Agent 的一句话
++                  </R6Button>
++                  <details>
++                    <summary>在终端运行一条命令</summary>
++                    <label>
++                      macOS / Linux{" "}
++                      <textarea readOnly rows={3} value={instructions.unix} />
++                    </label>
++                    <R6Button onClick={() => void copy(instructions.unix)}>
++                      复制 macOS / Linux 命令
++                    </R6Button>
++                    <label>
++                      Windows PowerShell{" "}
++                      <textarea
++                        readOnly
++                        rows={3}
++                        value={instructions.powershell}
++                      />
++                    </label>
++                    <R6Button
++                      onClick={() => void copy(instructions.powershell)}
++                    >
++                      复制 PowerShell 命令
++                    </R6Button>
++                    <p>
++                      宿主和系统的支持情况以实际安装检查为准；脚本存在不代表该宿主已通过验收。
++                    </p>
++                  </details>
++                  <R6Button
++                    variant="quiet"
++                    onClick={() => void copy(instructions.link)}
++                  >
++                    仅复制连接链接
++                  </R6Button>
++                </>
++              )}
++              {progress.pairing_id && !invitation && !terminal && (
++                <p>
++                  此页已没有邀请秘密。可以查询原邀请或撤销后重新生成；不会自动重复创建。
++                </p>
++              )}
++              {status?.state === "claimed" && (
++                <p>
++                  配对不代表设备在线，也不代表 MCP 和 Skill
++                  已安装完成。请按目标设备的安装结果完成连接验证；如提示重新加载，请在对应
++                  Agent 中操作。
++                </p>
++              )}
++              {status?.state === "cancelled" && (
++                <p>
++                  此链接不能再领取。若此前已签发设备身份，撤销邀请不会撤销该设备；设备访问请在高级设备授权中管理。
++                </p>
++              )}
++              {progress.pairing_id && (
++                <R6Button
++                  variant="quiet"
++                  disabled={busy}
++                  onClick={() => refresh.current()}
++                >
++                  查询邀请状态
++                </R6Button>
++              )}
++              {progress.pairing_id &&
++                !terminal &&
++                errorCode !== "pairing_not_found" && (
++                  <>
++                    <label>
++                      <input
++                        type="checkbox"
++                        checked={confirmed}
++                        disabled={busy}
++                        onChange={(event) => setConfirmed(event.target.checked)}
++                      />
++                      我确认撤销此邀请链接；已签发设备的授权不受影响。
++                    </label>
++                    <R6Button
++                      disabled={busy || !confirmed || storageError}
++                      onClick={() => void mutate(true)}
++                    >
++                      撤销邀请链接
++                    </R6Button>
++                  </>
++                )}
++              {!progress.pairing_id && !busy && (
++                <>
++                  <p>
++                    请求可能已在服务器完成，但没有拿到链接。不会自动重发；未领取的旧邀请会在服务器创建后
++                    10 分钟过期。
++                  </p>
++                  <label>
++                    <input
++                      type="checkbox"
++                      checked={confirmed}
++                      onChange={(event) => setConfirmed(event.target.checked)}
++                    />
++                    我理解旧请求仍可能完成，决定结束本次未知尝试。
++                  </label>
++                  <R6Button
++                    disabled={!confirmed || storageError}
++                    onClick={finish}
++                  >
++                    结束本次未知尝试
++                  </R6Button>
++                </>
++              )}
++              {(terminal || errorCode === "pairing_not_found") && (
++                <R6Button disabled={busy || storageError} onClick={finish}>
++                  准备连接另一台设备
++                </R6Button>
++              )}
++            </>
++          )}
++        </>
++      )}
++      {storageError && (
++        <p role="alert">
++          {invitationMessage(new InvitationError("storage_unavailable"))}
++        </p>
++      )}
++      {error && <p role="alert">{error}</p>}
++      {notice && <p role="status">{notice}</p>}
++    </section>
++  );
++}
+diff --git a/memhub/apps/web/src/HubAgentConnect.test.tsx b/memhub/apps/web/src/HubAgentConnect.test.tsx
+new file mode 100644
+--- /dev/null
++++ b/memhub/apps/web/src/HubAgentConnect.test.tsx
+@@ -0,0 +1,401 @@
++// @vitest-environment jsdom
++import {
++  act,
++  cleanup,
++  fireEvent,
++  render,
++  screen,
++  waitFor,
++} from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { HubAgentConnect } from "./HubAgentConnect";
++import { HubConnections } from "./HubConnections";
++import { invitationKey } from "./hub-invitation";
++
++const instance = "22222222-2222-4222-8222-222222222222";
++const scope = "33333333-3333-4333-8333-333333333333";
++const id = "11111111-1111-4111-8111-111111111111";
++const device = "44444444-4444-4444-8444-444444444444";
++const source = "55555555-5555-4555-8555-555555555555";
++const project = { scope_id: scope, display_name: "合成项目" };
++const secret = "A".repeat(43);
++const issued = {
++  pairing_id: id,
++  origin: "https://synthetic.example",
++  invitation_secret: secret,
++  expires_at: "2026-11-10T12:10:00Z",
++};
++let state: "pending" | "claimed" | "cancelled" | "expired";
++let fetcher: ReturnType<typeof vi.fn>;
++let copy: ReturnType<typeof vi.fn>;
++function receipt() {
++  return {
++    pairing_id: id,
++    scope_id: scope,
++    state,
++    expires_at: issued.expires_at,
++    device_id: state === "claimed" ? device : null,
++    source_id: state === "claimed" ? source : null,
++  };
++}
++async function handler(url: string, init: RequestInit = {}) {
++  if (url === "/hub/v1/pairings") return Response.json(issued, { status: 201 });
++  if (url.endsWith("/revoke")) {
++    expect(init.body).toBe("{}");
++    state = "cancelled";
++    return Response.json(receipt());
++  }
++  if (url === `/hub/v1/pairings/${id}`) return Response.json(receipt());
++  if (url.endsWith("/devices")) return Response.json({ devices: [] });
++  if (url.endsWith("/sources")) return Response.json({ sources: [] });
++  throw new Error("unexpected_synthetic_route");
++}
++const creates = () =>
++  fetcher.mock.calls.filter(([url]) => url === "/hub/v1/pairings");
++const reads = () =>
++  fetcher.mock.calls.filter(
++    ([url, init]) => url === `/hub/v1/pairings/${id}` && init.method === "GET",
++  );
++beforeEach(() => {
++  state = "pending";
++  sessionStorage.clear();
++  localStorage.clear();
++  fetcher = vi.fn(handler);
++  vi.stubGlobal("fetch", fetcher);
++  copy = vi.fn().mockResolvedValue(undefined);
++  Object.defineProperty(navigator, "clipboard", {
++    configurable: true,
++    value: { writeText: copy },
++  });
++});
++afterEach(() => {
++  cleanup();
++  vi.useRealTimers();
++  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
++});
++function view() {
++  return render(<HubAgentConnect instance={instance} project={project} />);
++}
++async function create() {
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "设备显示名" }),
++    "合成 Mac",
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "生成 10 分钟连接链接" }),
++  );
++}
++
++it("defaults to link onboarding while keeping JSON and authorization in a closed advanced section", async () => {
++  render(
++    <HubConnections
++      instance={instance}
++      project={project}
++      onCreated={vi.fn()}
++      onRefreshProjects={vi.fn()}
++    />,
++  );
++  expect(screen.getByRole("heading", { name: "连接 Agent" })).toBeTruthy();
++  const advanced = screen
++    .getByText("高级：JSON 配对与设备授权管理")
++    .closest("details");
++  expect(advanced?.hasAttribute("open")).toBe(false);
++  await userEvent.click(screen.getByText("高级：JSON 配对与设备授权管理"));
++  expect(advanced?.hasAttribute("open")).toBe(true);
++  expect(
++    screen.getByRole("button", { name: "创建独立设备并配对" }),
++  ).toBeTruthy();
++  expect(
++    screen.getByRole("heading", { name: "本项目的设备与来源" }),
++  ).toBeTruthy();
++});
++it("copies Agent instructions without storing invitation secrets or issuing a local credential", async () => {
++  view();
++  await create();
++  await userEvent.selectOptions(
++    screen.getByRole("combobox", { name: "要连接的 Agent" }),
++    "hermes",
++  );
++  await userEvent.click(
++    await screen.findByRole("button", { name: "复制给 Agent 的一句话" }),
++  );
++  expect(copy.mock.calls[0][0]).toContain(
++    `为Hermes安装MCP和Skill并验证连接：https://synthetic.example/hub/connect#pairing_id=${id}&secret=${secret}`,
++  );
++  expect(sessionStorage.getItem(invitationKey(instance, scope))).toBe(
++    JSON.stringify({ version: 1, pairing_id: id }),
++  );
++  expect(JSON.stringify(sessionStorage)).not.toContain(secret);
++  expect(localStorage.length).toBe(0);
++  expect(creates()).toHaveLength(1);
++  expect(
++    fetcher.mock.calls.every(
++      ([url]) => !url.includes("secret=") && !url.includes("/devices"),
++    ),
++  ).toBe(true);
++});
++it("restores only the known id, queries it, and explicitly revokes before preparing another invitation", async () => {
++  const first = view();
++  await create();
++  await screen.findByRole("button", { name: "复制给 Agent 的一句话" });
++  first.unmount();
++  view();
++  await waitFor(() => expect(reads().length).toBeGreaterThan(0));
++  expect(
++    screen.queryByRole("button", { name: "复制给 Agent 的一句话" }),
++  ).toBeNull();
++  expect(screen.getByText(/此页已没有邀请秘密/)).toBeTruthy();
++  await userEvent.click(
++    screen.getByRole("checkbox", { name: /我确认撤销此邀请链接/ }),
++  );
++  await userEvent.click(screen.getByRole("button", { name: "撤销邀请链接" }));
++  await screen.findByText("邀请已撤销。");
++  expect(screen.getByText(/撤销邀请不会撤销该设备/)).toBeTruthy();
++  await userEvent.click(
++    screen.getByRole("button", { name: "准备连接另一台设备" }),
++  );
++  expect(creates()).toHaveLength(1);
++  expect(sessionStorage.getItem(invitationKey(instance, scope))).toBeNull();
++});
++it.each(["claimed", "expired"] as const)(
++  "shows server %s state and removes secret without claiming installation or online status",
++  async (next) => {
++    view();
++    await create();
++    await screen.findByRole("button", { name: "复制给 Agent 的一句话" });
++    state = next;
++    await userEvent.click(screen.getByRole("button", { name: "查询邀请状态" }));
++    await screen.findByText(
++      next === "claimed" ? "已配对：设备身份已签发。" : "链接已过期。",
++    );
++    expect(
++      screen.queryByRole("button", { name: "复制给 Agent 的一句话" }),
++    ).toBeNull();
++    if (next === "claimed")
++      expect(
++        screen.getByText(
++          /配对不代表设备在线，也不代表 MCP 和 Skill 已安装完成/,
++        ),
++      ).toBeTruthy();
++    expect(creates()).toHaveLength(1);
++  },
++);
++it("retains a lost create response across reload and requires explicit completion without automatically creating again", async () => {
++  fetcher.mockImplementation((url: string, init: RequestInit) =>
++    url === "/hub/v1/pairings"
++      ? Promise.reject(new TypeError("private diagnostic"))
++      : handler(url, init),
++  );
++  const first = view();
++  await create();
++  await screen.findByText("创建结果尚未确认，未取得可用链接。");
++  first.unmount();
++  view();
++  expect(
++    screen.queryByRole("button", { name: "生成 10 分钟连接链接" }),
++  ).toBeNull();
++  expect(document.body.textContent).not.toContain("private diagnostic");
++  await userEvent.click(
++    screen.getByRole("checkbox", { name: /我理解旧请求仍可能完成/ }),
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "结束本次未知尝试" }),
++  );
++  expect(
++    screen.getByRole("button", { name: "生成 10 分钟连接链接" }),
++  ).toBeTruthy();
++  expect(creates()).toHaveLength(1);
++});
++it("allows an explicit retry only after a definite pre-write refusal", async () => {
++  fetcher.mockResolvedValueOnce(
++    Response.json({ detail: "administrator_required" }, { status: 403 }),
++  );
++  view();
++  await create();
++  await screen.findByRole("alert");
++  expect(
++    screen.getByRole("button", { name: "生成 10 分钟连接链接" }),
++  ).toBeTruthy();
++  expect(sessionStorage.getItem(invitationKey(instance, scope))).toBeNull();
++  expect(creates()).toHaveLength(1);
++});
++it("keeps a known identity when a create response has an invalid secret", async () => {
++  fetcher.mockImplementation((url: string, init: RequestInit) =>
++    url === "/hub/v1/pairings"
++      ? Promise.resolve(Response.json({ ...issued, invitation_secret: 7 }))
++      : handler(url, init),
++  );
++  view();
++  await create();
++  await waitFor(() => expect(reads()).toHaveLength(1));
++  expect(sessionStorage.getItem(invitationKey(instance, scope))).toContain(id);
++  expect(
++    screen.queryByRole("button", { name: "复制给 Agent 的一句话" }),
++  ).toBeNull();
++  expect(screen.getByRole("button", { name: "撤销邀请链接" })).toBeTruthy();
++});
++it("does not treat an uncertain revoke or 409 as success and preserves the id", async () => {
++  fetcher.mockImplementation((url: string, init: RequestInit) =>
++    url.endsWith("/revoke")
++      ? Promise.resolve(
++          Response.json({ detail: "private body" }, { status: 409 }),
++        )
++      : handler(url, init),
++  );
++  view();
++  await create();
++  await screen.findByRole("button", { name: "复制给 Agent 的一句话" });
++  await userEvent.click(
++    screen.getByRole("checkbox", { name: /我确认撤销此邀请链接/ }),
++  );
++  await userEvent.click(screen.getByRole("button", { name: "撤销邀请链接" }));
++  await waitFor(() => expect(reads().length).toBeGreaterThan(1));
++  expect(screen.queryByText("邀请已撤销。")).toBeNull();
++  expect(sessionStorage.getItem(invitationKey(instance, scope))).toContain(id);
++  expect(
++    screen.queryByRole("button", { name: "准备连接另一台设备" }),
++  ).toBeNull();
++  expect(document.body.textContent).not.toContain("private body");
++});
++it("polls at five seconds and stops on completion", async () => {
++  vi.useFakeTimers();
++  view();
++  fireEvent.change(screen.getByRole("textbox", { name: "设备显示名" }), {
++    target: { value: "合成" },
++  });
++  await act(async () => {
++    fireEvent.click(
++      screen.getByRole("button", { name: "生成 10 分钟连接链接" }),
++    );
++  });
++  expect(reads()).toHaveLength(1);
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(4999);
++  });
++  expect(reads()).toHaveLength(1);
++  state = "claimed";
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(1);
++  });
++  expect(reads()).toHaveLength(2);
++  await act(async () => {
++    await vi.advanceTimersByTimeAsync(20000);
++  });
++  expect(reads()).toHaveLength(2);
++});
++it("aborts an old project creation and never puts its late secret into the next project", async () => {
++  let deliver: (value: Response) => void = () => {};
++  fetcher.mockImplementation((url: string, init: RequestInit) =>
++    url === "/hub/v1/pairings"
++      ? new Promise<Response>((resolve) => {
++          deliver = resolve;
++        })
++      : handler(url, init),
++  );
++  const first = render(
++    <HubAgentConnect key={scope} instance={instance} project={project} />,
++  );
++  await create();
++  const signal = creates()[0][1].signal as AbortSignal;
++  first.rerender(
++    <HubAgentConnect
++      key={device}
++      instance={instance}
++      project={{ scope_id: device, display_name: "另一合成项目" }}
++    />,
++  );
++  expect(signal.aborted).toBe(true);
++  await act(async () => {
++    deliver(Response.json(issued));
++  });
++  expect(document.body.textContent).not.toContain(secret);
++  expect(sessionStorage.getItem(invitationKey(instance, scope))).toBe(
++    JSON.stringify({ version: 1, pairing_id: null }),
++  );
++  expect(sessionStorage.getItem(invitationKey(instance, device))).toBeNull();
++  expect(creates()).toHaveLength(1);
++});
++it("requires an actual project and does not create an implicit global grant", () => {
++  render(
++    <HubAgentConnect
++      instance={instance}
++      project={{ scope_id: "global", display_name: "全局偏好" }}
++    />,
++  );
++  expect(
++    screen.queryByRole("button", { name: "生成 10 分钟连接链接" }),
++  ).toBeNull();
++  expect(fetcher).not.toHaveBeenCalled();
++});
++
++it("does not send a create when its non-secret operation marker cannot be saved", async () => {
++  vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
++    throw new Error("synthetic storage unavailable");
++  });
++  view();
++  await create();
++  expect(fetcher).not.toHaveBeenCalled();
++  expect(
++    screen
++      .getAllByRole("alert")
++      .some((node) => node.textContent?.includes("会话存储")),
++  ).toBe(true);
++});
++
++it("offers manual copying when clipboard permission is unavailable", async () => {
++  copy.mockRejectedValue(new Error("private clipboard diagnostic"));
++  view();
++  await create();
++  await userEvent.click(
++    await screen.findByRole("button", { name: "复制给 Agent 的一句话" }),
++  );
++  await screen.findByText("未能自动复制，请选中下方文本手动复制。");
++  expect(
++    (
++      screen.getByRole("textbox", {
++        name: "给 Agent 的一句话",
++      }) as HTMLTextAreaElement
++    ).value,
++  ).toContain("#pairing_id=");
++  expect(document.body.textContent).not.toContain(
++    "private clipboard diagnostic",
++  );
++});
++
++it("aborts a previous project's status read and ignores its late claimed receipt", async () => {
++  sessionStorage.setItem(
++    invitationKey(instance, scope),
++    JSON.stringify({ version: 1, pairing_id: id }),
++  );
++  let deliver: (value: Response) => void = () => {};
++  fetcher.mockImplementation(
++    () =>
++      new Promise<Response>((resolve) => {
++        deliver = resolve;
++      }),
++  );
++  const current = render(
++    <HubAgentConnect key={scope} instance={instance} project={project} />,
++  );
++  await waitFor(() => expect(reads()).toHaveLength(1));
++  const signal = reads()[0][1].signal as AbortSignal;
++  current.rerender(
++    <HubAgentConnect
++      key={device}
++      instance={instance}
++      project={{ scope_id: device, display_name: "另一合成项目" }}
++    />,
++  );
++  expect(signal.aborted).toBe(true);
++  state = "claimed";
++  await act(async () => {
++    deliver(Response.json(receipt()));
++  });
++  expect(screen.queryByText("已配对：设备身份已签发。")).toBeNull();
++  expect(
++    screen.getByRole("button", { name: "生成 10 分钟连接链接" }),
++  ).toBeTruthy();
++  expect(sessionStorage.getItem(invitationKey(instance, scope))).toContain(id);
++});
+diff --git a/memhub/apps/web/src/hub-invitation.ts b/memhub/apps/web/src/hub-invitation.ts
+new file mode 100644
+--- /dev/null
++++ b/memhub/apps/web/src/hub-invitation.ts
+@@ -0,0 +1,224 @@
++/** ADR-0065: invitation secrets stay in memory, never browser storage or query strings. */
++import { validLabel } from "./hub-pairing";
++
++export const agents = {
++  claude: "Claude Code",
++  codex: "Codex",
++  opencode: "OpenCode",
++  hermes: "Hermes",
++  generic: "其他支持 MCP 的 Agent",
++};
++export type Agent = keyof typeof agents;
++export interface Invitation {
++  pairing_id: string;
++  invitation_secret: string;
++  expires_at: string;
++  origin: string;
++}
++export interface InvitationStatus {
++  pairing_id: string;
++  scope_id: string;
++  state: "pending" | "claimed" | "cancelled" | "expired";
++  expires_at: string;
++  device_id: string | null;
++  source_id: string | null;
++}
++export interface InvitationProgress {
++  version: 1;
++  pairing_id: string | null;
++}
++const uuid =
++  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
++const messages: Record<string, string> = {
++  administrator_required: "管理员登录已失效，请重新登录后查询原邀请。",
++  authentication_required: "管理员登录已失效，请重新登录后查询原邀请。",
++  invalid_request: "请检查项目和设备显示名后重试。",
++  unknown_scope: "项目已不存在，请刷新并选择有效项目。",
++  pairing_not_found: "服务器已找不到此邀请。可结束本次记录，再明确创建新邀请。",
++  pairing_unavailable: "当前 Hub 尚未启用一次性接入，请升级服务后重试。",
++  pairing_origin_invalid: "Hub 的公开访问地址配置有误，请修正服务地址后重试。",
++  storage_unavailable:
++    "浏览器无法保留邀请编号，请恢复站点会话存储后继续；不会自动新建邀请。",
++  invalid_response: "邀请响应未能核对，请查询原邀请状态；不要重复生成链接。",
++  request_failed: "请求结果尚未确认，请查询原邀请状态后再继续。",
++};
++export class InvitationError extends Error {
++  constructor(
++    readonly code: string,
++    readonly rejected = false,
++  ) {
++    super(messages[code] ?? messages.request_failed);
++  }
++}
++export function invitationMessage(reason: unknown) {
++  return reason instanceof InvitationError
++    ? reason.message
++    : messages.request_failed;
++}
++function invalid(): never {
++  throw new InvitationError("invalid_response");
++}
++function object(value: unknown): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
++  return value as Record<string, unknown>;
++}
++function identity(value: unknown): value is string {
++  return typeof value === "string" && uuid.test(value);
++}
++function date(value: unknown): value is string {
++  return typeof value === "string" && Number.isFinite(Date.parse(value));
++}
++function safeOrigin(value: unknown): string {
++  if (
++    typeof value !== "string" ||
++    !/^[\x21-\x7e]+$/.test(value) ||
++    /['"\\]/.test(value)
++  )
++    invalid();
++  let url: URL;
++  try {
++    url = new URL(value);
++  } catch {
++    return invalid();
++  }
++  const loopback =
++    url.hostname === "localhost" ||
++    url.hostname === "[::1]" ||
++    /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
++  if (
++    !/^https?:\/\/[^/?#]+$/i.test(value) ||
++    url.username ||
++    url.password ||
++    (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
++  )
++    invalid();
++  return value;
++}
++async function request(
++  path: string,
++  signal: AbortSignal,
++  body?: unknown,
++): Promise<unknown> {
++  const response = await fetch(`/hub/v1/pairings${path}`, {
++    method: body === undefined ? "GET" : "POST",
++    credentials: "same-origin",
++    cache: "no-store",
++    signal,
++    headers: body === undefined ? {} : { "Content-Type": "application/json" },
++    body: body === undefined ? undefined : JSON.stringify(body),
++  });
++  if (!response.ok) {
++    let code: unknown;
++    try {
++      code = object(await response.json()).detail;
++    } catch {
++      /* Never expose response text. */
++    }
++    const known =
++      typeof code === "string" && Object.hasOwn(messages, code)
++        ? code
++        : "request_failed";
++    const rejected =
++      (response.status === 403 && code === "administrator_required") ||
++      (response.status === 422 &&
++        ["invalid_request", "unknown_scope"].includes(String(code))) ||
++      (response.status === 503 &&
++        ["pairing_unavailable", "pairing_origin_invalid"].includes(
++          String(code),
++        ));
++    throw new InvitationError(known, rejected);
++  }
++  try {
++    return await response.json();
++  } catch {
++    return invalid();
++  }
++}
++export async function createInvitation(
++  scope: string,
++  name: string,
++  signal: AbortSignal,
++  onIdentity: (id: string) => void,
++): Promise<Invitation> {
++  if (!identity(scope)) throw new InvitationError("unknown_scope", true);
++  const row = object(
++    await request("", signal, {
++      scope_id: scope,
++      display_name: validLabel(name),
++    }),
++  );
++  if (!identity(row.pairing_id)) invalid();
++  if (signal.aborted) throw new DOMException("aborted", "AbortError");
++  onIdentity(row.pairing_id);
++  const invitationValue = row.invitation_secret;
++  if (
++    typeof invitationValue !== "string" ||
++    !/^[A-Za-z0-9_-]{43}$/.test(invitationValue) ||
++    !date(row.expires_at)
++  )
++    invalid();
++  return {
++    pairing_id: row.pairing_id,
++    invitation_secret: invitationValue,
++    expires_at: row.expires_at,
++    origin: safeOrigin(row.origin),
++  };
++}
++export async function readInvitation(
++  id: string,
++  scope: string,
++  signal: AbortSignal,
++  revoke = false,
++): Promise<InvitationStatus> {
++  if (!identity(id)) invalid();
++  const row = object(
++    await request(
++      `/${id}${revoke ? "/revoke" : ""}`,
++      signal,
++      revoke ? {} : undefined,
++    ),
++  );
++  if (
++    row.pairing_id !== id ||
++    row.scope_id !== scope ||
++    !["pending", "claimed", "cancelled", "expired"].includes(
++      String(row.state),
++    ) ||
++    !date(row.expires_at) ||
++    !(row.device_id === null || identity(row.device_id)) ||
++    !(row.source_id === null || identity(row.source_id)) ||
++    (row.state === "claimed" &&
++      (!identity(row.device_id) || !identity(row.source_id))) ||
++    (revoke && row.state !== "cancelled")
++  )
++    invalid();
++  return row as unknown as InvitationStatus;
++}
++export const invitationKey = (instance: string, scope: string) =>
++  `cmh-invitation:${instance}:${scope}`;
++export function readInvitationProgress(key: string): InvitationProgress | null {
++  const raw = sessionStorage.getItem(key);
++  if (raw === null) return null;
++  const row = object(JSON.parse(raw));
++  if (
++    row.version !== 1 ||
++    !(row.pairing_id === null || identity(row.pairing_id))
++  )
++    invalid();
++  return { version: 1, pairing_id: row.pairing_id };
++}
++function shellQuote(value: string): string {
++  return `'${value.replaceAll("'", "'\\''")}'`;
++}
++const unixInstallProgram =
++  'umask 077; cmh_file=$(mktemp) || exit 1; trap \'rm -f -- "$cmh_file"\' EXIT; curl -fsSL --proto-redir \'=https\' "$1/hub/install.sh" -o "$cmh_file" && sh "$cmh_file" --link "$2" --agent "$3"';
++export function invitationInstructions(invitation: Invitation, agent: Agent) {
++  const origin = safeOrigin(invitation.origin);
++  const link = `${origin}/hub/connect#pairing_id=${invitation.pairing_id}&secret=${invitation.invitation_secret}`;
++  return {
++    link,
++    prompt: `请按此连接页说明，使用连接器为${agents[agent]}安装MCP和Skill并验证连接：${link}。保留其他配置，不输出长期凭证，需要重新加载时告诉我。`,
++    unix: `sh -c ${shellQuote(unixInstallProgram)} cmh-connect ${shellQuote(origin)} ${shellQuote(link)} ${agent}`,
++    powershell: `& { $ErrorActionPreference = 'Stop'; $cmhScript = irm -ErrorAction Stop '${origin}/hub/install.ps1'; & ([scriptblock]::Create($cmhScript)) -Link '${link}' -Agent ${agent} }`,
++  };
++}
+diff --git a/memhub/apps/web/src/hub-invitation.test.ts b/memhub/apps/web/src/hub-invitation.test.ts
+new file mode 100644
+--- /dev/null
++++ b/memhub/apps/web/src/hub-invitation.test.ts
+@@ -0,0 +1,215 @@
++import { spawnSync } from "node:child_process";
++import {
++  existsSync,
++  mkdtempSync,
++  readFileSync,
++  rmSync,
++  writeFileSync,
++} from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { afterEach, expect, it, vi } from "vitest";
++import {
++  createInvitation,
++  invitationInstructions,
++  readInvitation,
++} from "./hub-invitation";
++
++const scope = "33333333-3333-4333-8333-333333333333";
++const id = "11111111-1111-4111-8111-111111111111";
++const issued = {
++  pairing_id: id,
++  origin: "https://synthetic.example",
++  invitation_secret: "A".repeat(43),
++  expires_at: "2026-11-10T12:10:00Z",
++};
++const receipt = {
++  pairing_id: id,
++  scope_id: scope,
++  state: "pending",
++  expires_at: issued.expires_at,
++  device_id: null,
++  source_id: null,
++};
++afterEach(() => vi.unstubAllGlobals());
++
++it("creates only through same-origin administrator API and uses server origin in fragment-only instructions", async () => {
++  const fetcher = vi.fn().mockResolvedValue(Response.json(issued));
++  vi.stubGlobal("fetch", fetcher);
++  const onIdentity = vi.fn();
++  const result = await createInvitation(
++    scope,
++    " 合成设备 ",
++    new AbortController().signal,
++    onIdentity,
++  );
++  expect(onIdentity).toHaveBeenCalledWith(id);
++  expect(fetcher).toHaveBeenCalledWith(
++    "/hub/v1/pairings",
++    expect.objectContaining({
++      credentials: "same-origin",
++      cache: "no-store",
++      method: "POST",
++      body: JSON.stringify({ scope_id: scope, display_name: "合成设备" }),
++    }),
++  );
++  const instructions = invitationInstructions(result, "codex");
++  expect(new URL(instructions.link).search).toBe("");
++  expect(instructions.link).toBe(
++    `https://synthetic.example/hub/connect#pairing_id=${id}&secret=${issued.invitation_secret}`,
++  );
++  expect(instructions.unix).toContain("sh -c ");
++  expect(instructions.unix).toContain("--proto-redir");
++  expect(instructions.unix).toContain(
++    `cmh-connect 'https://synthetic.example' '${instructions.link}' codex`,
++  );
++  expect(instructions.powershell).toBe(
++    `& { $ErrorActionPreference = 'Stop'; $cmhScript = irm -ErrorAction Stop 'https://synthetic.example/hub/install.ps1'; & ([scriptblock]::Create($cmhScript)) -Link '${instructions.link}' -Agent codex }`,
++  );
++  expect(instructions.prompt).toContain("为Codex安装MCP和Skill并验证连接");
++});
++
++it.each([
++  ["success", 0, true],
++  ["http404", 22, false],
++  ["offline", 7, false],
++  ["partial", 18, false],
++  ["installer_failed", 19, true],
++] as const)(
++  "runs the exact copied Unix command: %s",
++  (mode, expectedExit, executed) => {
++    const directory = mkdtempSync(join(tmpdir(), "cmh-invitation-command-"));
++    const downloadMarker = join(directory, "download-path");
++    const executionMarker = join(directory, "executed");
++    const instructions = invitationInstructions(issued, "codex");
++    try {
++      writeFileSync(
++        join(directory, "curl"),
++        `#!/bin/sh
++while [ "$#" -gt 0 ]; do
++  case "$1" in
++    -o) shift; cmh_output=$1 ;;
++    --proto-redir) shift; [ "$1" = '=https' ] || exit 90 ;;
++  esac
++  shift
++done
++[ -n "$cmh_output" ] || exit 91
++printf '%s' "$cmh_output" > "$CMH_DOWNLOAD_MARK"
++case "$CMH_TEST_MODE" in
++  http404) exit 22 ;;
++  offline) exit 7 ;;
++esac
++cat > "$cmh_output" <<'SYNTHETIC_INSTALLER'
++[ "$1" = '--link' ] && [ "$2" = "$CMH_EXPECTED_LINK" ] && [ "$3" = '--agent' ] && [ "$4" = 'codex' ] || exit 92
++printf 'executed' > "$CMH_EXECUTION_MARK"
++[ "$CMH_TEST_MODE" != 'installer_failed' ] || exit 19
++SYNTHETIC_INSTALLER
++[ "$CMH_TEST_MODE" != 'partial' ] || exit 18
++`,
++        { mode: 0o700 },
++      );
++      const result = spawnSync("sh", ["-c", instructions.unix], {
++        encoding: "utf8",
++        env: {
++          ...process.env,
++          PATH: `${directory}:/usr/bin:/bin`,
++          TMPDIR: directory,
++          CMH_TEST_MODE: mode,
++          CMH_DOWNLOAD_MARK: downloadMarker,
++          CMH_EXECUTION_MARK: executionMarker,
++          CMH_EXPECTED_LINK: instructions.link,
++        },
++        timeout: 5000,
++      });
++      expect(result.status).toBe(expectedExit);
++      expect(result.stdout).toBe("");
++      expect(existsSync(executionMarker)).toBe(executed);
++      expect(existsSync(readFileSync(downloadMarker, "utf8"))).toBe(false);
++    } finally {
++      rmSync(directory, { recursive: true, force: true });
++    }
++  },
++);
++it.each([
++  "https://synthetic.example/path",
++  "http://synthetic.example",
++  "https://synthetic-user@synthetic.example",
++  "https://synthetic.example/'",
++  "https://synthetic.example?secret=bad",
++])("keeps known id but refuses unsafe origin %s", async (origin) => {
++  vi.stubGlobal(
++    "fetch",
++    vi.fn().mockResolvedValue(Response.json({ ...issued, origin })),
++  );
++  const known = vi.fn();
++  await expect(
++    createInvitation(scope, "合成", new AbortController().signal, known),
++  ).rejects.toMatchObject({ code: "invalid_response" });
++  expect(known).toHaveBeenCalledWith(id);
++});
++it.each([
++  "https://SYNTHETIC.example:443",
++  "http://127.0.0.1:8800",
++  "http://[::1]:8800",
++])("preserves the configured valid origin %s", async (origin) => {
++  vi.stubGlobal(
++    "fetch",
++    vi.fn().mockResolvedValue(Response.json({ ...issued, origin })),
++  );
++  const result = await createInvitation(
++    scope,
++    "合成",
++    new AbortController().signal,
++    vi.fn(),
++  );
++  expect(
++    invitationInstructions(result, "generic").link.startsWith(
++      `${origin}/hub/connect#`,
++    ),
++  ).toBe(true);
++});
++it("rejects a cross-project receipt and does not accept 409 as revocation success", async () => {
++  const fetcher = vi
++    .fn()
++    .mockResolvedValueOnce(Response.json({ ...receipt, scope_id: id }))
++    .mockResolvedValueOnce(
++      Response.json(
++        { detail: "private diagnostic and secret" },
++        { status: 409 },
++      ),
++    );
++  vi.stubGlobal("fetch", fetcher);
++  await expect(
++    readInvitation(id, scope, new AbortController().signal),
++  ).rejects.toMatchObject({ code: "invalid_response" });
++  await expect(
++    readInvitation(id, scope, new AbortController().signal, true),
++  ).rejects.toMatchObject({ code: "request_failed", rejected: false });
++  expect(fetcher.mock.calls[1][1].body).toBe("{}");
++});
++it("requires a cancelled receipt for revoke and valid bound identities for claimed", async () => {
++  vi.stubGlobal(
++    "fetch",
++    vi
++      .fn()
++      .mockResolvedValueOnce(Response.json(receipt))
++      .mockResolvedValueOnce(Response.json({ ...receipt, state: "claimed" })),
++  );
++  await expect(
++    readInvitation(id, scope, new AbortController().signal, true),
++  ).rejects.toMatchObject({ code: "invalid_response" });
++  await expect(
++    readInvitation(id, scope, new AbortController().signal),
++  ).rejects.toMatchObject({ code: "invalid_response" });
++});
++it.each(["global", "../other"])(
++  "does not send invalid project %s",
++  async (scopeId) => {
++    const fetcher = vi.fn();
++    vi.stubGlobal("fetch", fetcher);
++    await expect(
++      createInvitation(scopeId, "合成", new AbortController().signal, vi.fn()),
++    ).rejects.toMatchObject({ code: "unknown_scope", rejected: true });
++    expect(fetcher).not.toHaveBeenCalled();
++  },
++);
+diff --git a/memhub/apps/web/src/HubConsole.tsx b/memhub/apps/web/src/HubConsole.tsx
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -502,7 +502,10 @@
+             </ul>
+             {!summary.sources.length && (
+               <>
+-                <p>还没有为这个项目连接设备。先为第一台 Mac 准备配对文件。</p>
++                <p>
++                  还没有为这个项目连接设备。先为第一台设备生成一次性链接，再按页面指引连接
++                  Agent。
++                </p>
+                 <R6Button onClick={() => onNavigate("connections")}>
+                   连接第一台设备
+                 </R6Button>
+@@ -572,8 +575,9 @@
+         <li>
+           <strong>连接第一台设备</strong>
+           <p>
+-            为每台 Mac 下载各自的配对文件，再按指引安装连接组件并连接你的 AI
+-            应用。
++            在「项目与设备接入」中为每台设备生成一次性链接，把页面提供的一句话交给
++            Agent，或在对应电脑运行一条命令，配置 MCP 与 Skill。无需安装独立
++            App。
+           </p>
+         </li>
+         <li>

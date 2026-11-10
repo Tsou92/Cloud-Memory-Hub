@@ -240,12 +240,19 @@ class DeviceAccessStore:
         device_id = str(uuid4())
         credential = _new_credential(device_id)
         with self._connection(writing=True) as db:
-            db.execute(
-                "INSERT INTO devices VALUES (?, ?, ?, 1, 'active', ?)",
-                (device_id, request.display_name, _digest(credential), _now()),
-            )
-            receipt = self._receipt(db, device_id)
+            receipt = self._create_device(db, request, device_id, credential)
         return IssuedCredential(device=receipt, credential=SecretStr(credential))
+
+    def _create_device(self, db, request, device_id, credential):
+        """Insert inside the caller's transaction, including atomic pairing claims."""
+        match = TOKEN_PATTERN.fullmatch(credential)
+        if match is None or match[1] != device_id:
+            raise AccessError("invalid_device_credential", 401)
+        db.execute(
+            "INSERT INTO devices VALUES (?, ?, ?, 1, 'active', ?)",
+            (device_id, request.display_name, _digest(credential), _now()),
+        )
+        return self._receipt(db, device_id)
 
     def list_devices(self) -> list[dict]:
         with self._connection() as db:
@@ -258,22 +265,25 @@ class DeviceAccessStore:
 
     def replace_grants(self, device_id: str, request: GrantRequest) -> dict:
         with self._connection(writing=True) as db:
-            self._require_revision(db, device_id, request.expected_revision)
-            for grant in request.grants:
-                if not db.execute(
-                    "SELECT 1 FROM projects WHERE project_id=?", (grant.scope_id,)
-                ).fetchone():
-                    raise AccessError("unknown_scope", 422)
-            db.execute("DELETE FROM grants WHERE device_id=?", (device_id,))
-            db.executemany(
-                "INSERT INTO grants VALUES (?, ?, ?)",
-                [
-                    (device_id, grant.scope_id, json.dumps(grant.permissions))
-                    for grant in request.grants
-                ],
-            )
-            db.execute("UPDATE devices SET revision=revision+1 WHERE device_id=?", (device_id,))
-            return self._receipt(db, device_id)
+            return self._replace_grants(db, device_id, request)
+
+    def _replace_grants(self, db, device_id, request):
+        self._require_revision(db, device_id, request.expected_revision)
+        for grant in request.grants:
+            if not db.execute(
+                "SELECT 1 FROM projects WHERE project_id=?", (grant.scope_id,)
+            ).fetchone():
+                raise AccessError("unknown_scope", 422)
+        db.execute("DELETE FROM grants WHERE device_id=?", (device_id,))
+        db.executemany(
+            "INSERT INTO grants VALUES (?, ?, ?)",
+            [
+                (device_id, grant.scope_id, json.dumps(grant.permissions))
+                for grant in request.grants
+            ],
+        )
+        db.execute("UPDATE devices SET revision=revision+1 WHERE device_id=?", (device_id,))
+        return self._receipt(db, device_id)
 
     def rotate(self, device_id: str, request: RevisionRequest) -> IssuedCredential:
         credential = _new_credential(device_id)

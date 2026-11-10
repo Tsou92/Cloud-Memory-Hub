@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import math
 import sqlite3
+import struct
 from hashlib import sha256
 from uuid import uuid4
 
@@ -298,21 +300,74 @@ def test_tampered_execution_state_quarantines(tmp_path, monkeypatch, damage):
         create_hub(config)
 
 
-def hnsw_slack(path):
-    # Known gap (ADR-0032): Chroma's Rust HNSW writer preallocates
-    # data_level0.bin and leaves unused slots uninitialised, so they can hold
-    # fragments of recently freed process memory. Measured by
-    # test_hnsw_slack_is_the_only_residue_and_is_not_a_stored_record.
-    return path.name == "data_level0.bin"
+def hnsw_unused_start(path):
+    """Recognize only the pinned 64-bit v1 layout's unused allocation tail.
+
+    Chroma 1.5.9 pins hnswlib 6868102; initPersistentIndex writes the full
+    malloc allocation for both files. The header's cur_element_count bounds
+    used slots, including deleted elements. Never exempt a file just by name.
+    """
+    if path.name not in {"data_level0.bin", "length.bin"}:
+        return None
+    try:
+        header = (path.parent / "header.bin").read_bytes()
+        (
+            version,
+            level0_offset,
+            capacity,
+            count,
+            stride,
+            label_offset,
+            data_offset,
+            max_level,
+            entrypoint,
+            max_m,
+            max_m0,
+            m,
+            multiplier,
+            construction,
+        ) = struct.unpack("<IQQQQQQiIQQQdQ", header)
+        if (
+            version != 1
+            or level0_offset != 0
+            or not 0 <= count <= capacity
+            or capacity == 0
+            or not 1 < m == max_m
+            or max_m0 != 2 * m
+            or data_offset != 4 + max_m0 * 4
+            or label_offset <= data_offset
+            or (label_offset - data_offset) % 4
+            or stride != label_offset + 8
+            or not math.isfinite(multiplier)
+            or multiplier <= 0
+            or construction < m
+            or (count == 0 and (max_level != -1 or entrypoint != 2**32 - 1))
+            or (count > 0 and (max_level < 0 or entrypoint >= count))
+            or (path.parent / "data_level0.bin").stat().st_size != capacity * stride
+            or (path.parent / "length.bin").stat().st_size != capacity * 4
+        ):
+            return None
+    except (OSError, struct.error):
+        # Unknown, truncated or mismatched layouts remain subject to full scan.
+        return None
+    return count * (4 if path.name == "length.bin" else stride)
 
 
 def scan(root, needle):
-    """Every file under the instance that still contains the bytes."""
-    return sorted(
-        str(path.relative_to(root))
-        for path in root.rglob("*")
-        if path.is_file() and not hnsw_slack(path) and needle.encode() in path.read_bytes()
-    )
+    """Find residue outside the proven, previously accepted HNSW unused tail."""
+    matches = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        first = path.read_bytes().find(needle.encode())
+        if first < 0:
+            continue
+        unused = hnsw_unused_start(path)
+        # A match crossing the used/unused boundary starts before unused.
+        # The first match is enough: every later occurrence has a higher offset.
+        if unused is None or first < unused:
+            matches.append(str(path.relative_to(root)))
+    return sorted(matches)
 
 
 def test_purge_removes_every_stored_copy_and_keeps_unrelated_data(tmp_path, monkeypatch):
@@ -1495,8 +1550,6 @@ def test_t0342b_scan_running_outcome_raw_among_1000(t0342a_config, monkeypatch):
 def test_hnsw_slack_is_the_only_residue_and_is_not_a_stored_record(tmp_path, monkeypatch):
     """Pin the known gap: residue, if any, is only in HNSW slack, never in a slot
     the index counts as an element; everything else is clean."""
-    import struct
-
     config = config_for(tmp_path)
 
     async def scenario():
@@ -1524,8 +1577,9 @@ def test_hnsw_slack_is_the_only_residue_and_is_not_a_stored_record(tmp_path, mon
             assert reply.status_code == 200, reply.text
 
     asyncio.run(scenario())
-    for level0 in tmp_path.rglob("data_level0.bin"):
-        header = (level0.parent / "header.bin").read_bytes()
-        _, _, _, count, size = struct.unpack_from("<IQQQQ", header, 0)
-        used = level0.read_bytes()[: count * size]
-        assert b"Synthetic fact 3" not in used
+    for filename in ("data_level0.bin", "length.bin"):
+        for path in tmp_path.rglob(filename):
+            unused = hnsw_unused_start(path)
+            assert unused is not None, "the pinned HNSW layout must be recognized"
+            assert b"Synthetic fact 3" not in path.read_bytes()[:unused]
+    assert scan(tmp_path, "Synthetic fact 3") == []

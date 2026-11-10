@@ -1,0 +1,2132 @@
+diff --git a/memhub/apps/web/src/HubConnections.test.tsx b/memhub/apps/web/src/HubConnections.test.tsx
+index 70f77ec..6f9d47a 100644
+--- a/memhub/apps/web/src/HubConnections.test.tsx
++++ b/memhub/apps/web/src/HubConnections.test.tsx
+@@ -224,6 +224,13 @@ it("creates an independent scoped identity, verifies access and downloads only t
+     { scope_id: scopeA, permissions: requiredPermissions },
+   ]);
+   expect(sources[0].adapter_id).toBe(agentAdapter);
++  expect(
++    (
++      screen
++        .getByText("连接详情（排查问题时使用）")
++        .closest("details") as HTMLDetailsElement
++    ).open,
++  ).toBe(false);
+   expect(JSON.stringify(sessionStorage)).not.toContain(currentCredential);
+   expect(JSON.stringify(localStorage)).not.toContain(currentCredential);
+   expect(document.body.textContent).not.toContain(currentCredential);
+@@ -237,6 +244,36 @@ it("creates an independent scoped identity, verifies access and downloads only t
+   );
+   expect(screen.queryByRole("button", { name: "下载配对文件" })).toBeNull();
+   expect(sessionStorage.getItem(progressKey(instance, scopeA))).toBeNull();
++  expect(screen.getByRole("region", { name: "下载后怎么继续" })).toBeTruthy();
++  expect(
++    screen.getByRole("heading", { name: "继续连接「合成 Mac」" }),
++  ).toBeTruthy();
++  expect(
++    screen.queryByRole("button", { name: "创建独立设备并配对" }),
++  ).toBeNull();
++  expect(
++    screen
++      .getByRole("link", { name: "Mac 安装与配对指南" })
++      .getAttribute("href"),
++  ).toBe(
++    "https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/client-installation.md#安装与配对",
++  );
++  expect(
++    screen
++      .getByRole("link", { name: "连接 AI 应用的步骤" })
++      .getAttribute("href"),
++  ).toContain("#连接-agent");
++  expect(
++    screen.getByRole("link", { name: "第一次共享验证" }).getAttribute("href"),
++  ).toContain("#两台设备验证");
++  expect(document.body.textContent).not.toContain("cloud-memory-setup import");
++  expect(document.body.textContent).not.toContain(currentCredential);
++  await userEvent.click(screen.getByRole("button", { name: "连接另一台设备" }));
++  expect(
++    screen.getByRole("button", { name: "创建独立设备并配对" }),
++  ).toBeTruthy();
++  expect(postCount("/devices")).toBe(1);
++  expect(postCount("/sources")).toBe(1);
+ });
+
+ it("does not repeat unknown device creation and requires an explicit existing device and rotation", async () => {
+diff --git a/memhub/apps/web/src/HubConnections.tsx b/memhub/apps/web/src/HubConnections.tsx
+index a7a672b..00c68c1 100644
+--- a/memhub/apps/web/src/HubConnections.tsx
++++ b/memhub/apps/web/src/HubConnections.tsx
+@@ -247,6 +247,9 @@ function HubDevicePairing({
+   const [rotateConfirmed, setRotateConfirmed] = useState(false);
+   const [endConfirmed, setEndConfirmed] = useState(false);
+   const [ready, setReady] = useState(false);
++  const [completedDeviceName, setCompletedDeviceName] = useState<string | null>(
++    null,
++  );
+   const [confirmation, setConfirmation] = useState<
+     | { kind: "device"; value: PairDevice }
+     | { kind: "source"; value: PairSource }
+@@ -502,6 +505,7 @@ function HubDevicePairing({
+     credential.current = null;
+     pairing.current = null;
+     setReady(false);
++    setCompletedDeviceName(null);
+     setRotateConfirmed(false);
+     setChosenSource("");
+     try {
+@@ -567,11 +571,12 @@ function HubDevicePairing({
+       setStorageError(true);
+       return;
+     }
++    setCompletedDeviceName(currentDevice?.display_name ?? name);
+     credential.current = null;
+     pairing.current = null;
+     setReady(false);
+     setProgress(null);
+-    setNotice("此页配对凭据已清除。设备授权仍保留。");
++    setNotice("此页配对凭据已清除。设备授权仍保留，请继续导入已下载的文件。");
+     setName("");
+   }
+   function endUnknownAttempt() {
+@@ -648,49 +653,87 @@ function HubDevicePairing({
+       <section className="hub-card hub-pairing" aria-label="设备配对">
+         <h2>为「{project.display_name}」接入设备</h2>
+         <p>
+-          每台设备使用独立身份。新设备会获得本项目的记忆读取、历史读取和上传权限。
++          每台 Mac 各用一份配对文件，共享同一个项目。文件准备好后，还需要在那台
++          Mac 上安装连接组件并连接 AI 应用。
+         </p>
++        <p>新设备会获得本项目的记忆读取、历史读取和上传权限。</p>
+         {storageError && (
+           <p role="alert">
+             无法读取或保留配对阶段，暂不继续写入。请恢复当前站点的会话存储后核对设备列表。
+           </p>
+         )}
+         {!progress ? (
+-          <form
+-            onSubmit={(event) => {
+-              event.preventDefault();
+-              void create();
+-            }}
+-          >
+-            <label>
+-              设备名称{" "}
+-              <input
+-                value={name}
+-                maxLength={80}
+-                onChange={(event) => setName(event.target.value)}
+-                disabled={busy || storageError}
+-              />
+-            </label>
+-            <R6Button
+-              type="submit"
+-              pending={busy}
+-              disabled={!name.trim() || storageError || !loaded}
++          completedDeviceName !== null ? (
++            <div className="hub-pairing-saved">
++              <h3>继续连接「{completedDeviceName}」</h3>
++              <p>
++                请使用刚下载的配对文件继续下面的步骤，无需为这台 Mac
++                再创建设备。
++              </p>
++              <R6Button
++                variant="quiet"
++                onClick={() => setCompletedDeviceName(null)}
++              >
++                连接另一台设备
++              </R6Button>
++            </div>
++          ) : (
++            <form
++              onSubmit={(event) => {
++                event.preventDefault();
++                void create();
++              }}
+             >
+-              创建独立设备并配对
+-            </R6Button>
+-          </form>
++              <label>
++                设备名称{" "}
++                <input
++                  value={name}
++                  placeholder="例如：家里的 MacBook"
++                  maxLength={80}
++                  onChange={(event) => setName(event.target.value)}
++                  disabled={busy || storageError}
++                />
++              </label>
++              <R6Button
++                type="submit"
++                pending={busy}
++                disabled={!name.trim() || storageError || !loaded}
++              >
++                创建独立设备并配对
++              </R6Button>
++            </form>
++          )
+         ) : (
+           <>
+             <p role="status">当前阶段：{phaseNames[progress.phase]}</p>
+-            {progress.device_id && (
++            {currentDevice && (
+               <p>
+-                设备编号：<code>{progress.device_id}</code>
++                设备：<strong>{currentDevice.display_name}</strong>
+               </p>
+             )}
+-            {progress.source_id && (
+-              <p>
+-                来源编号：<code>{progress.source_id}</code>
+-              </p>
++            {progress.phase === "ready" ? (
++              <details>
++                <summary>连接详情（排查问题时使用）</summary>
++                <p>
++                  设备编号：<code>{progress.device_id}</code>
++                </p>
++                <p>
++                  来源编号：<code>{progress.source_id}</code>
++                </p>
++              </details>
++            ) : (
++              <>
++                {progress.device_id && (
++                  <p>
++                    设备编号：<code>{progress.device_id}</code>
++                  </p>
++                )}
++                {progress.source_id && (
++                  <p>
++                    来源编号：<code>{progress.source_id}</code>
++                  </p>
++                )}
++              </>
+             )}
+             {progress.phase === "create_unknown" && (
+               <p>
+@@ -820,12 +863,6 @@ function HubDevicePairing({
+                 >
+                   下载配对文件
+                 </R6Button>
+-                <p>在目标 Mac 安装连接组件后运行：</p>
+-                <pre>
+-                  <code>
+-                    cloud-memory-setup import --pairing-file '&lt;下载文件&gt;'
+-                  </code>
+-                </pre>
+               </>
+             )}
+             {progress.phase === "ready" && (
+@@ -839,6 +876,7 @@ function HubDevicePairing({
+             )}
+           </>
+         )}
++        {(ready || completedDeviceName !== null) && <PairingNextSteps />}
+         <details>
+           <summary>恢复未完成配对或选择已有设备</summary>
+           <p>
+@@ -962,3 +1000,59 @@ function HubDevicePairing({
+     </>
+   );
+ }
++
++function PairingNextSteps() {
++  const guide =
++    "https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/client-installation.md";
++  return (
++    <section className="hub-pairing-next" aria-label="下载后怎么继续">
++      <h3>下载后怎么继续？</h3>
++      <ol>
++        <li>
++          <strong>在要连接的 Mac 上安装连接组件。</strong>
++          <p>
++            按
++            <a href={`${guide}#安装与配对`} target="_blank" rel="noreferrer">
++              Mac 安装与配对指南
++            </a>
++            选择可用的安装方式。保留安装器显示的命令路径，后面还会用到。
++          </p>
++        </li>
++        <li>
++          <strong>导入刚下载的配对文件。</strong>
++          <p>
++            在那台 Mac
++            的终端中，使用安装器显示的完整命令路径导入文件。指南中的路径需要换成本机实际路径；成功后请保留返回的配置文件路径。
++          </p>
++        </li>
++        <li>
++          <strong>连接你正在使用的 AI 应用。</strong>
++          <p>
++            按
++            <a href={`${guide}#连接-agent`} target="_blank" rel="noreferrer">
++              连接 AI 应用的步骤
++            </a>
++            添加配置，保留已有连接，再重新连接或开始新会话。
++          </p>
++        </li>
++        <li>
++          <strong>保存一句测试内容，再从另一台设备读回。</strong>
++          <p>
++            跟随
++            <a href={`${guide}#两台设备验证`} target="_blank" rel="noreferrer">
++              第一次共享验证
++            </a>
++            检查实际结果。配对文件准备好，不代表客户端已经安装或同步成功。
++          </p>
++        </li>
++      </ol>
++      <details>
++        <summary>连接方式中的 MCP 和 Skill 是什么？</summary>
++        <p>
++          MCP 为 AI 应用提供读写记忆的工具；Skill
++          告诉它何时使用这些工具。请按安装指南选择你的应用支持的方式，不需要在这里手动填写设备编号。
++        </p>
++      </details>
++    </section>
++  );
++}
+diff --git a/memhub/apps/web/src/HubConsole.test.tsx b/memhub/apps/web/src/HubConsole.test.tsx
+index a79b4a1..9c5f80b 100644
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -422,7 +422,7 @@ it("refreshes the same project library only after a confirmed forget result", as
+       return Response.json(
+         page("project-a", "memory-list", { items: [], returned_count: 0 }),
+       );
+-    return handler(url, init);
++    return withSource(url, init);
+   });
+   render(<HubConsole />);
+   await select();
+@@ -445,6 +445,31 @@ it("refreshes the same project library only after a confirmed forget result", as
+     fetcher.mock.calls.filter(([url]) => String(url).endsWith("memory-list"))
+       .length,
+   ).toBeGreaterThanOrEqual(2);
++  expect(
++    fetcher.mock.calls.filter(([url]) => String(url).endsWith("history-get")),
++  ).toHaveLength(0);
++  await userEvent.click(
++    screen.getByRole("button", { name: "查看保留的来源原文" }),
++  );
++  expect(await screen.findByText("合成来源前段")).toBeTruthy();
++  expect(fetcher).toHaveBeenCalledWith(
++    "/hub/v1/console/read/history-get",
++    expect.objectContaining({
++      body: JSON.stringify({
++        record_id: "project-a-source",
++        content_offset: 0,
++        scope_id: "project-a",
++      }),
++    }),
++  );
++  expect(
++    fetcher.mock.calls.filter(([url]) => String(url).endsWith("history-list")),
++  ).toHaveLength(0);
++  await select("project-b");
++  expect(
++    screen.queryByRole("button", { name: "查看保留的来源原文" }),
++  ).toBeNull();
++  expect(screen.queryByRole("region", { name: "来源原文" })).toBeNull();
+   expect(local).not.toHaveBeenCalled();
+ });
+
+@@ -502,6 +527,12 @@ it("refreshes history when a previous unknown forget is completed from the recov
+       .length,
+   ).toBeGreaterThanOrEqual(2);
+   expect(sessionStorage.getItem("cmh-forget:instance:project-a")).toBeNull();
++  expect(
++    screen.queryByRole("button", { name: "查看保留的来源原文" }),
++  ).toBeNull();
++  expect(
++    fetcher.mock.calls.filter(([url]) => String(url).endsWith("history-get")),
++  ).toHaveLength(0);
+ });
+
+ it("lets a fresh empty installation create and select its first project from the console", async () => {
+@@ -524,7 +555,7 @@ it("lets a fresh empty installation create and select its first project from the
+   });
+   render(<HubConsole />);
+   await userEvent.click(
+-    await screen.findByRole("button", { name: "创建项目或接入设备" }),
++    await screen.findByRole("button", { name: "创建第一个项目" }),
+   );
+   await userEvent.type(
+     screen.getByRole("textbox", { name: "项目名称" }),
+@@ -539,3 +570,187 @@ it("lets a fresh empty installation create and select its first project from the
+   expect(screen.getByRole("option", { name: "首个合成项目" })).toBeTruthy();
+   expect(local).not.toHaveBeenCalled();
+ });
++
++it("offers an ordered first-use guide and model navigation without creating another project", async () => {
++  render(<HubConsole />);
++  await screen.findByRole("region", { name: "开始使用" });
++  expect(screen.getByText(/你已经有项目了/)).toBeTruthy();
++  expect(screen.queryByRole("button", { name: "创建第一个项目" })).toBeNull();
++  expect(screen.getByRole("button", { name: "创建另一个项目" })).toBeTruthy();
++  await userEvent.click(
++    screen.getByRole("button", { name: "设置记忆整理模型" }),
++  );
++  expect(await screen.findByText("模型设置")).toBeTruthy();
++  expect(fetcher).toHaveBeenCalledTimes(1);
++  expect(
++    (screen.getByRole("combobox", { name: "当前项目" }) as HTMLSelectElement)
++      .value,
++  ).toBe("");
++});
++
++it("guides an empty project to its real scoped history without calling it shared", async () => {
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (url.endsWith("memory-list")) {
++      const body = JSON.parse(String(init?.body));
++      return Promise.resolve(
++        Response.json(
++          page(body.scope_id, "memory-list", { items: [], returned_count: 0 }),
++        ),
++      );
++    }
++    return handler(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await screen.findByText("当前项目尚无可显示的记忆。");
++  expect(
++    screen.getByText("请用 Cloud Memory Hub 记住：这是我的第一次共享测试。"),
++  ).toBeTruthy();
++  expect(screen.getByText(/收到原文后，还需要模型整理/)).toBeTruthy();
++  expect(screen.queryByText("共享成功")).toBeNull();
++  await userEvent.click(screen.getByRole("button", { name: "查看历史原文" }));
++  expect(await screen.findByText("project-a 的合成内容")).toBeTruthy();
++  expect(fetcher).toHaveBeenCalledWith(
++    "/hub/v1/console/read/history-list",
++    expect.objectContaining({
++      body: JSON.stringify({ limit: 10, offset: 0, scope_id: "project-a" }),
++    }),
++  );
++});
++
++it("does not replace a failed home read with empty-project onboarding", async () => {
++  fetcher.mockImplementation((url: string, init?: RequestInit) =>
++    url.endsWith("memory-list")
++      ? Promise.resolve(
++          Response.json({ detail: "service_unavailable" }, { status: 503 }),
++        )
++      : handler(url, init),
++  );
++  render(<HubConsole />);
++  await select();
++  await screen.findByRole("alert");
++  expect(screen.queryByText("当前项目尚无可显示的记忆。")).toBeNull();
++  expect(
++    screen.queryByRole("complementary", { name: "第一次共享怎么验证" }),
++  ).toBeNull();
++});
++
++function withSource(url: string, init?: RequestInit): Promise<Response> {
++  if (url.endsWith("memory-get")) {
++    const body = JSON.parse(String(init?.body));
++    const result = page(body.scope_id, "memory-get");
++    return Promise.resolve(
++      Response.json({
++        ...result,
++        items: result.items.map((item) => ({
++          ...item,
++          source_raw_ids: ["project-a-source"],
++        })),
++      }),
++    );
++  }
++  if (url.endsWith("history-get")) {
++    const body = JSON.parse(String(init?.body));
++    const result = page(body.scope_id, "history-get");
++    const first = "合成来源前段";
++    return Promise.resolve(
++      Response.json({
++        ...result,
++        items: [
++          {
++            ...result.items[0],
++            record_id: body.record_id,
++            content: body.content_offset === 0 ? first : "合成来源后段",
++            content_offset: body.content_offset,
++            next_content_offset:
++              body.content_offset === 0 ? first.length : null,
++          },
++        ],
++      }),
++    );
++  }
++  return withAsk(url, init);
++}
++
++it("opens a cited memory's source through the same project and reads its remaining text", async () => {
++  fetcher.mockImplementation(withSource);
++  render(<HubConsole />);
++  await select();
++  await askAndOpen();
++  await userEvent.click(
++    await screen.findByRole("button", { name: "查看来源原文" }),
++  );
++  await screen.findByText("合成来源前段");
++  expect(screen.getByRole("region", { name: "来源原文" })).toBeTruthy();
++  await userEvent.click(screen.getByRole("button", { name: "继续读取原文" }));
++  expect(await screen.findByText("合成来源前段合成来源后段")).toBeTruthy();
++  for (const content_offset of [0, "合成来源前段".length]) {
++    expect(fetcher).toHaveBeenCalledWith(
++      "/hub/v1/console/read/history-get",
++      expect.objectContaining({
++        body: JSON.stringify({
++          record_id: "project-a-source",
++          content_offset,
++          scope_id: "project-a",
++        }),
++      }),
++    );
++  }
++  await userEvent.click(screen.getByRole("button", { name: "关闭来源原文" }));
++  expect(screen.queryByRole("region", { name: "来源原文" })).toBeNull();
++  expect(local).not.toHaveBeenCalled();
++});
++
++it("closes a source panel on project change and ignores the old source response", async () => {
++  let resolveOld: ((response: Response) => void) | undefined;
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (url.endsWith("history-get"))
++      return new Promise<Response>((resolve) => {
++        resolveOld = resolve;
++      });
++    return withSource(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await userEvent.click(
++    await screen.findByRole("button", { name: "project-a 的合成内容" }),
++  );
++  await userEvent.click(
++    await screen.findByRole("button", { name: "查看来源原文" }),
++  );
++  await waitFor(() => expect(resolveOld).toBeTypeOf("function"));
++  await select("project-b");
++  expect(screen.queryByRole("region", { name: "来源原文" })).toBeNull();
++  await act(async () => {
++    resolveOld?.(Response.json(page("project-a", "history-get")));
++  });
++  expect(screen.queryByText("project-a 的合成内容")).toBeNull();
++  expect(
++    await screen.findByRole("button", { name: "project-b 的合成内容" }),
++  ).toBeTruthy();
++  expect(local).not.toHaveBeenCalled();
++});
++
++it("reports an unavailable source without treating its reference as absent", async () => {
++  fetcher.mockImplementation((url: string, init?: RequestInit) =>
++    url.endsWith("history-get")
++      ? Promise.resolve(
++          Response.json({ detail: "record_not_found" }, { status: 404 }),
++        )
++      : withSource(url, init),
++  );
++  render(<HubConsole />);
++  await select();
++  await askAndOpen();
++  await userEvent.click(
++    await screen.findByRole("button", { name: "查看来源原文" }),
++  );
++  expect(await screen.findByRole("alert")).toHaveProperty(
++    "textContent",
++    "这条内容已不可读取，请刷新当前项目。",
++  );
++  expect(screen.queryByText("本页 0 条")).toBeNull();
++  expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
++  expect(screen.getByRole("button", { name: "查看来源原文" })).toBeTruthy();
++});
+diff --git a/memhub/apps/web/src/HubConsole.tsx b/memhub/apps/web/src/HubConsole.tsx
+index 01f107e..431ceae 100644
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -14,7 +14,11 @@ import {
+ } from "./hub-api";
+ import { R6Button } from "./R6Controls";
+ import { R6Settings } from "./R6Settings";
+-import { type MemoryLibraryReader, SdkMemoryLibrary } from "./SdkMemoryLibrary";
++import {
++  type LibraryMemory,
++  type MemoryLibraryReader,
++  SdkMemoryLibrary,
++} from "./SdkMemoryLibrary";
+ import { type RawHistoryReader, SdkRawHistory } from "./SdkRawHistory";
+ import "./hub-console.css";
+
+@@ -33,6 +37,8 @@ const memory = (item: HubItem) => ({
+   layer: item.layer ?? "",
+   status: "active" as const,
+   next_content_offset: item.next_content_offset,
++  source_raw_ids: item.source_raw_ids,
++  references_truncated: item.references_truncated,
+ });
+ const history = (item: HubItem) => ({
+   raw_id: item.record_id,
+@@ -151,6 +157,7 @@ function Console() {
+             key={`${bootstrap.instance_id}:${project.scope_id}:${view}`}
+             view={view}
+             project={project}
++            onNavigate={setView}
+           />
+         ) : (
+           <section className="hub-card">
+@@ -158,14 +165,23 @@ function Console() {
+               {bootstrap.projects.length ? "选择要查看的项目" : "还没有项目"}
+             </h1>
+             <p>
+-              {bootstrap.projects.length
+-                ? "请选择一个项目，查看该项目的记忆、历史和设备。"
+-                : "创建项目并为每台设备配对后，共享内容会出现在这里。"}
++              项目是一件工作共用的记忆空间，例如“工作计划”或“学习笔记”。不同设备选择同一个项目，就能共享其中的内容。
+             </p>
+-            <R6Button onClick={() => setView("connections")}>
+-              创建项目或接入设备
+-            </R6Button>
+-            <p>全局偏好是独立范围，不会混合显示各项目的内容。</p>
++            {bootstrap.projects.length > 0 ? (
++              <p>你已经有项目了。请在上方“当前项目”中选择它，无需重新创建。</p>
++            ) : (
++              <p>先给要共享的事情起个名字，再按下面的步骤连接设备。</p>
++            )}
++            <GettingStarted
++              hasProjects={bootstrap.projects.length > 0}
++              onNavigate={setView}
++            />
++            <details>
++              <summary>“全局偏好”是什么？</summary>
++              <p>
++                用于不属于单个项目的通用偏好；它不会合并或展示所有项目的内容。
++              </p>
++            </details>
+           </section>
+         )}
+       </main>
+@@ -175,19 +191,31 @@ function Console() {
+ function ProjectContent({
+   view,
+   project,
++  onNavigate,
+ }: {
+   view: Exclude<View, "settings" | "connections">;
+   project: HubProject;
++  onNavigate(view: View): void;
+ }) {
+   const { bootstrap } = useHub();
+   const scope = project.scope_id;
+   const instance = bootstrap.instance_id;
+   const [citationId, setCitationId] = useState<string | null>(null);
++  const [sourceId, setSourceId] = useState<string | null>(null);
+   const [governanceId, setGovernanceId] = useState<string | null>(null);
+   const [refreshVersion, setRefreshVersion] = useState(0);
+   const [notice, setNotice] = useState("");
+-  const actions = (item: { memory_id: string }) => (
+-    <R6Button onClick={() => setGovernanceId(item.memory_id)}>
++  const [pendingSources, setPendingSources] = useState<string[]>([]);
++  const [retainedSources, setRetainedSources] = useState<string[]>([]);
++  const actions = (item: LibraryMemory) => (
++    <R6Button
++      onClick={() => {
++        setPendingSources([...new Set(item.source_raw_ids ?? [])]);
++        setRetainedSources([]);
++        setNotice("");
++        setGovernanceId(item.memory_id);
++      }}
++    >
+       忘记这条记忆
+     </R6Button>
+   );
+@@ -242,19 +270,64 @@ function ProjectContent({
+     }),
+     [instance, scope],
+   );
++  const sourceReader = useMemo<RawHistoryReader | null>(
++    () =>
++      sourceId
++        ? {
++            errorMessage: hubErrorMessage,
++            async list() {
++              return {
++                items: [await readers.history.get(sourceId, 0)],
++                next_offset: null,
++              };
++            },
++            get: readers.history.get,
++          }
++        : null,
++    [sourceId, readers],
++  );
+   return (
+     <>
+       <h1>{project.display_name}</h1>
+       {notice && <p role="status">{notice}</p>}
+-      {view === "home" && <HubHome key={refreshVersion} project={project} />}
+-      {view === "library" && (
+-        <SdkMemoryLibrary
++      {retainedSources.length > 0 && (
++        <aside aria-label="忘记后保留的来源" className="hub-first-memory">
++          <p>
++            下面是这条记忆已提供的来源，可能不是全部来源。只有点击后才会读取，原文不会重新加入历史列表或自动召回。
++          </p>
++          <div className="hub-help-actions">
++            {retainedSources.map((id, index) => (
++              <R6Button
++                key={id}
++                variant="quiet"
++                onClick={() => setSourceId(id)}
++              >
++                查看保留的来源原文
++                {retainedSources.length > 1 ? ` ${index + 1}` : ""}
++              </R6Button>
++            ))}
++          </div>
++        </aside>
++      )}
++      {view === "home" && (
++        <HubHome
+           key={refreshVersion}
+-          active
+-          reader={readers.memory}
+-          renderActions={actions}
++          project={project}
++          onNavigate={onNavigate}
+         />
+       )}
++      {view === "library" && (
++        <>
++          <SdkMemoryLibrary
++            key={refreshVersion}
++            active
++            reader={readers.memory}
++            renderActions={actions}
++            onOpenSource={setSourceId}
++          />
++          <FirstSharedMemory onNavigate={onNavigate} />
++        </>
++      )}
+       {view === "history" && (
+         <SdkRawHistory key={refreshVersion} reader={readers.history} />
+       )}
+@@ -265,7 +338,10 @@ function ProjectContent({
+             instance={instance}
+             scope={scope}
+             enabled={bootstrap.features.includes("scoped_console_ask")}
+-            onOpenMemory={setCitationId}
++            onOpenMemory={(id) => {
++              setCitationId(id);
++              setSourceId(null);
++            }}
+           />
+           {citationId && (
+             <section className="hub-card" aria-label="引用记忆详情">
+@@ -280,30 +356,50 @@ function ProjectContent({
+                 renderActions={actions}
+                 reader={readers.memory}
+                 focusedMemoryId={citationId}
++                onOpenSource={setSourceId}
+               />
+             </section>
+           )}
+         </>
+       )}
++      {sourceReader && sourceId && (
++        <section className="hub-card" aria-label="来源原文">
++          <h2>这条记忆的来源原文</h2>
++          <R6Button variant="quiet" onClick={() => setSourceId(null)}>
++            关闭来源原文
++          </R6Button>
++          <SdkRawHistory key={sourceId} reader={sourceReader} />
++        </section>
++      )}
+       <HubGovernance
+         key={governanceId ?? "pending"}
+         instance={instance}
+         scope={scope}
+         recordId={governanceId}
+-        onClose={() => setGovernanceId(null)}
++        onClose={() => {
++          setGovernanceId(null);
++          setPendingSources([]);
++        }}
+         onCompleted={() => {
+-          setNotice(
+-            "忘记已完成。相关内容已停止自动使用，原始历史仍可主动查阅。",
+-          );
++          setNotice("忘记已完成。相关内容已停止自动使用，原始历史未被删除。");
++          setRetainedSources(governanceId ? pendingSources : []);
++          setPendingSources([]);
+           setGovernanceId(null);
+           setCitationId(null);
++          setSourceId(null);
+           setRefreshVersion((value) => value + 1);
+         }}
+       />
+     </>
+   );
+ }
+-function HubHome({ project }: { project: HubProject }) {
++function HubHome({
++  project,
++  onNavigate,
++}: {
++  project: HubProject;
++  onNavigate(view: View): void;
++}) {
+   const { bootstrap } = useHub();
+   const [summary, setSummary] = useState<HubSummary | null>(null);
+   const [page, setPage] = useState<HubPage | null>(null);
+@@ -361,13 +457,15 @@ function HubHome({ project }: { project: HubProject }) {
+                 <li key={item.record_id}>{item.content}</li>
+               ))}
+             </ul>
+-            {!page.items.length && (
+-              <p>
+-                {page.next_offset !== null
+-                  ? "本批内容已被过滤，请在记忆库继续翻页。"
+-                  : "当前项目尚无可显示的记忆。"}
+-              </p>
+-            )}
++            {!page.items.length &&
++              (page.next_offset !== null ? (
++                <p>本批内容已被过滤，请在记忆库继续翻页。</p>
++              ) : (
++                <>
++                  <p>当前项目尚无可显示的记忆。</p>
++                  <FirstSharedMemory onNavigate={onNavigate} />
++                </>
++              ))}
+           </>
+         ) : (
+           <p role="status">正在读取记忆…</p>
+@@ -403,7 +501,12 @@ function HubHome({ project }: { project: HubProject }) {
+               ))}
+             </ul>
+             {!summary.sources.length && (
+-              <p>此项目还没有注册来源，请按安装文档配对设备。</p>
++              <>
++                <p>还没有为这个项目连接设备。先为第一台 Mac 准备配对文件。</p>
++                <R6Button onClick={() => onNavigate("connections")}>
++                  连接第一台设备
++                </R6Button>
++              </>
+             )}
+             <nav aria-label="设备来源分页">
+               <R6Button
+@@ -430,3 +533,91 @@ function HubHome({ project }: { project: HubProject }) {
+     </div>
+   );
+ }
++
++// FR-01/02/05/12: navigation guidance, never a claim that setup or sharing passed.
++function GettingStarted({
++  hasProjects,
++  onNavigate,
++}: {
++  hasProjects: boolean;
++  onNavigate(view: View): void;
++}) {
++  return (
++    <section aria-label="开始使用" className="hub-getting-started">
++      <h2>从这里开始</h2>
++      <ol className="hub-start-steps">
++        <li>
++          <strong>选定一个项目</strong>
++          <p>
++            {hasProjects
++              ? "在上方选择已有项目。只有另一件事情需要独立记忆时，才创建新项目。"
++              : "先创建一个项目，两台设备都使用这个项目。"}
++          </p>
++          <R6Button
++            variant={hasProjects ? "quiet" : "primary"}
++            onClick={() => onNavigate("connections")}
++          >
++            {hasProjects ? "创建另一个项目" : "创建第一个项目"}
++          </R6Button>
++        </li>
++        <li>
++          <strong>配置整理记忆的模型</strong>
++          <p>
++            填写模型服务的地址和密钥，让它把上传的内容整理成长期记忆。原文和任务交接也可以先使用。
++          </p>
++          <R6Button variant="quiet" onClick={() => onNavigate("settings")}>
++            设置记忆整理模型
++          </R6Button>
++        </li>
++        <li>
++          <strong>连接第一台设备</strong>
++          <p>
++            为每台 Mac 下载各自的配对文件，再按指引安装连接组件并连接你的 AI
++            应用。
++          </p>
++        </li>
++        <li>
++          <strong>验证第一次共享</strong>
++          <p>
++            让已连接的 AI
++            应用保存一句测试内容，在“历史原文”看到它，再用另一台设备读回。
++          </p>
++        </li>
++      </ol>
++    </section>
++  );
++}
++function FirstSharedMemory({ onNavigate }: { onNavigate(view: View): void }) {
++  return (
++    <aside className="hub-first-memory" aria-label="第一次共享怎么验证">
++      <h3>第一次共享怎么验证？</h3>
++      <ol>
++        <li>先连接你的 AI 应用，再把下面这句话发给它：</li>
++      </ol>
++      <blockquote>
++        请用 Cloud Memory Hub 记住：这是我的第一次共享测试。
++      </blockquote>
++      <ol start={2}>
++        <li>在本项目的“历史原文”中找到这句话，确认 NAS 已收到。</li>
++        <li>
++          在另一台已连接同一项目的设备上，让 AI 应用从 Cloud Memory Hub
++          读取刚保存的测试内容。
++        </li>
++      </ol>
++      <p>
++        收到原文后，还需要模型整理才会出现在长期记忆中。记忆库暂时为空，不等于连接失败；读取失败时请先按错误提示处理。
++      </p>
++      <div className="hub-help-actions">
++        <R6Button variant="quiet" onClick={() => onNavigate("history")}>
++          查看历史原文
++        </R6Button>
++        <R6Button variant="quiet" onClick={() => onNavigate("connections")}>
++          查看设备连接
++        </R6Button>
++        <R6Button variant="quiet" onClick={() => onNavigate("settings")}>
++          设置记忆整理模型
++        </R6Button>
++      </div>
++    </aside>
++  );
++}
+diff --git a/memhub/apps/web/src/HubQuestion.tsx b/memhub/apps/web/src/HubQuestion.tsx
+index 4bbbe05..4b28569 100644
+--- a/memhub/apps/web/src/HubQuestion.tsx
++++ b/memhub/apps/web/src/HubQuestion.tsx
+@@ -124,7 +124,9 @@ export function HubQuestion({
+   return (
+     <section className="hub-card">
+       <h2>问当前项目的记忆</h2>
+-      <p>仅使用当前项目的可见记忆回答；提问会调用已配置的模型。</p>
++      <p>
++        只查找当前项目的记忆。已启用模型时由模型回答；未启用时直接展示相关记忆。
++      </p>
+       {!enabled ? (
+         <p role="status">
+           当前服务尚未接通网页问答，可先在记忆库查看内容。升级后请刷新页面。
+@@ -150,7 +152,7 @@ export function HubQuestion({
+               提问
+             </R6Button>
+           </form>
+-          {busy && <p role="status">正在检索当前项目并生成回答…</p>}
++          {busy && <p role="status">正在查找当前项目的记忆…</p>}
+           {error && <p role="alert">{error}</p>}
+           {answer && (
+             <div className="hub-answer">
+diff --git a/memhub/apps/web/src/ModelSettings.test.tsx b/memhub/apps/web/src/ModelSettings.test.tsx
+index d19212f..e062aad 100644
+--- a/memhub/apps/web/src/ModelSettings.test.tsx
++++ b/memhub/apps/web/src/ModelSettings.test.tsx
+@@ -122,15 +122,17 @@ describe("ModelSettings", () => {
+     act(() => {
+       expect(controls.current?.edit(profile.profile_id)).toBe(true);
+     });
+-    expect((screen.getByLabelText("配置名称") as HTMLInputElement).value).toBe(
+-      profile.name,
+-    );
++    expect(
++      (screen.getByLabelText("配置名称（方便自己辨认）") as HTMLInputElement)
++        .value,
++    ).toBe(profile.name);
+     act(() => {
+       expect(controls.current?.add()).toBe(true);
+     });
+-    expect((screen.getByLabelText("配置名称") as HTMLInputElement).value).toBe(
+-      "",
+-    );
++    expect(
++      (screen.getByLabelText("配置名称（方便自己辨认）") as HTMLInputElement)
++        .value,
++    ).toBe("");
+     await act(async () => {
+       await controls.current?.test(profile.profile_id);
+     });
+@@ -159,6 +161,39 @@ describe("ModelSettings", () => {
+     });
+   });
+
++  it("guides first setup through service credentials before choosing a model", () => {
++    render(<ModelSettings />);
++    expect(
++      screen.getByRole("heading", { name: "1. 连接模型服务" }),
++    ).toBeTruthy();
++    expect(screen.getByRole("heading", { name: "2. 选择模型" })).toBeTruthy();
++    const order = [
++      screen.getByLabelText("服务商预设"),
++      screen.getByLabelText("接口类型"),
++      screen.getByLabelText("服务地址（Base URL）"),
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      screen.getByRole("button", { name: "获取模型列表" }),
++      screen.getByLabelText("生成模型名"),
++      screen.getByLabelText("配置名称（方便自己辨认）"),
++    ];
++    for (let index = 1; index < order.length; index += 1) {
++      expect(
++        order[index - 1].compareDocumentPosition(order[index]) &
++          Node.DOCUMENT_POSITION_FOLLOWING,
++      ).toBeTruthy();
++    }
++    expect(
++      screen.getByText(/不是登录 Cloud Memory Hub 的管理员凭证/),
++    ).toBeTruthy();
++    expect(screen.getByText(/列表不可用时.*完整模型名/)).toBeTruthy();
++    expect(screen.getByLabelText("配置名称（方便自己辨认）")).toHaveProperty(
++      "required",
++      false,
++    );
++    expect(catalog).not.toHaveBeenCalled();
++    expect(create).not.toHaveBeenCalled();
++  });
++
+   it("automatically fetches once on completed input blur and keeps the model editable", async () => {
+     catalog.mockResolvedValue({
+       code: "ok",
+@@ -168,11 +203,14 @@ describe("ModelSettings", () => {
+     const user = userEvent.setup();
+     render(<ModelSettings />);
+     await user.type(screen.getByLabelText("生成模型名"), "manual-model");
+-    await user.type(screen.getByLabelText(/^API Key/), "synthetic-key");
++    await user.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "synthetic-key",
++    );
+     expect(catalog).not.toHaveBeenCalled();
+-    fireEvent.blur(screen.getByLabelText(/^API Key/));
++    fireEvent.blur(screen.getByLabelText(/^服务商密钥（API Key）/));
+     const picker = await screen.findByLabelText("从模型列表选择");
+-    fireEvent.blur(screen.getByLabelText(/^API Key/));
++    fireEvent.blur(screen.getByLabelText(/^服务商密钥（API Key）/));
+     expect(catalog).toHaveBeenCalledTimes(1);
+     expect(screen.getByLabelText("生成模型名")).toHaveProperty(
+       "value",
+@@ -207,19 +245,19 @@ describe("ModelSettings", () => {
+       expected_profile_revision: profile.revision,
+     });
+     await screen.findByText(/这个服务暂不提供模型列表/);
+-    fireEvent.change(screen.getByLabelText("Base URL"), {
++    fireEvent.change(screen.getByLabelText("服务地址（Base URL）"), {
+       target: { value: "https://other.example.invalid" },
+     });
+     expect(screen.getByRole("button", { name: "获取模型列表" })).toHaveProperty(
+       "disabled",
+       true,
+     );
+-    fireEvent.blur(screen.getByLabelText("Base URL"));
++    fireEvent.blur(screen.getByLabelText("服务地址（Base URL）"));
+     expect(catalog).toHaveBeenCalledTimes(1);
+-    fireEvent.change(screen.getByLabelText(/^API Key/), {
++    fireEvent.change(screen.getByLabelText(/^服务商密钥（API Key）/), {
+       target: { value: "new-synthetic-key" },
+     });
+-    fireEvent.blur(screen.getByLabelText(/^API Key/));
++    fireEvent.blur(screen.getByLabelText(/^服务商密钥（API Key）/));
+     await waitFor(() => expect(catalog).toHaveBeenCalledTimes(2));
+     expect(catalog.mock.calls[1][0]).toEqual({
+       provider_kind: profile.provider_kind,
+@@ -259,7 +297,10 @@ describe("ModelSettings", () => {
+       const user = userEvent.setup();
+       render(<ModelSettings />);
+       await user.type(screen.getByLabelText("生成模型名"), "synthetic-model");
+-      await user.type(screen.getByLabelText(/^API Key/), "synthetic-key");
++      await user.type(
++        screen.getByLabelText(/^服务商密钥（API Key）/),
++        "synthetic-key",
++      );
+       await user.click(screen.getByRole("button", { name: "保存并测试启用" }));
+       await waitFor(() => expect(probeProfile).toHaveBeenCalled());
+       if (mode === "invalid-response") {
+@@ -279,16 +320,23 @@ describe("ModelSettings", () => {
+     const user = userEvent.setup();
+     render(<ModelSettings />);
+
+-    expect((screen.getByLabelText(/^API Key/) as HTMLInputElement).type).toBe(
+-      "password",
+-    );
++    expect(
++      (screen.getByLabelText(/^服务商密钥（API Key）/) as HTMLInputElement)
++        .type,
++    ).toBe("password");
+     // 默认视图里不该有 embedding。它是内置的、用户改不了的实现细节，
+     // 摆一个只读输入框在这儿，读者只会以为自己漏配了什么。
+     expect(screen.queryByLabelText("Embedding")).toBeNull();
+     expect(screen.queryByText(/已内置 bge-small-zh-v1.5/)).toBeNull();
+-    await user.type(screen.getByLabelText("配置名称"), "My provider");
++    await user.type(
++      screen.getByLabelText("配置名称（方便自己辨认）"),
++      "My provider",
++    );
+     await user.type(screen.getByLabelText("生成模型名"), "model-v1");
+-    await user.type(screen.getByLabelText(/^API Key/), "secret-value");
++    await user.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "secret-value",
++    );
+     await user.click(screen.getByRole("button", { name: "保存配置" }));
+
+     expect(create).toHaveBeenCalledWith(
+@@ -311,15 +359,18 @@ describe("ModelSettings", () => {
+       "value",
+       profile.model,
+     );
+-    expect(screen.getByLabelText("Base URL")).toHaveProperty(
++    expect(screen.getByLabelText("服务地址（Base URL）")).toHaveProperty(
+       "value",
+       profile.base_url,
+     );
+-    expect(screen.getByLabelText("配置名称")).toHaveProperty(
++    expect(screen.getByLabelText("配置名称（方便自己辨认）")).toHaveProperty(
+       "value",
+       profile.name,
+     );
+-    expect(screen.getByLabelText(/^API Key/)).toHaveProperty("value", "");
++    expect(screen.getByLabelText(/^服务商密钥（API Key）/)).toHaveProperty(
++      "value",
++      "",
++    );
+     expect(screen.getByText(/留空保留已保存密钥/)).toBeTruthy();
+     await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+     expect(update).toHaveBeenCalledExactlyOnceWith(profile.profile_id, {
+@@ -358,7 +409,7 @@ describe("ModelSettings", () => {
+       "自定义兼容服务",
+     ]);
+     await user.click(screen.getByRole("option", { name: "Kimi（月之暗面）" }));
+-    expect(screen.getByLabelText("Base URL")).toHaveProperty(
++    expect(screen.getByLabelText("服务地址（Base URL）")).toHaveProperty(
+       "value",
+       "https://api.moonshot.cn/v1",
+     );
+@@ -366,14 +417,14 @@ describe("ModelSettings", () => {
+       "value",
+       "kimi-k3",
+     );
+-    expect(screen.getByLabelText("配置名称")).toHaveProperty(
++    expect(screen.getByLabelText("配置名称（方便自己辨认）")).toHaveProperty(
+       "value",
+       "Kimi（月之暗面）",
+     );
+     expect(screen.getByText(/不会带到新地址/)).toBeTruthy();
+     await user.click(screen.getByRole("button", { name: "保存修改" }));
+     expect(update).not.toHaveBeenCalled();
+-    await user.type(screen.getByLabelText(/^API Key/), "new-key");
++    await user.type(screen.getByLabelText(/^服务商密钥（API Key）/), "new-key");
+     await user.click(screen.getByRole("button", { name: "保存修改" }));
+     expect(update).toHaveBeenCalledExactlyOnceWith(profile.profile_id, {
+       expected_revision: 1,
+@@ -429,7 +480,7 @@ describe("ModelSettings", () => {
+     await userEvent.clear(screen.getByLabelText("生成模型名"));
+     await userEvent.type(screen.getByLabelText("生成模型名"), "changed");
+     await userEvent.type(
+-      screen.getByLabelText(/^API Key/),
++      screen.getByLabelText(/^服务商密钥（API Key）/),
+       "synthetic-replacement",
+     );
+     await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
+@@ -437,7 +488,7 @@ describe("ModelSettings", () => {
+       "value",
+       "changed",
+     );
+-    expect(screen.getByLabelText(/^API Key/)).toHaveProperty(
++    expect(screen.getByLabelText(/^服务商密钥（API Key）/)).toHaveProperty(
+       "value",
+       "synthetic-replacement",
+     );
+@@ -505,7 +556,10 @@ describe("ModelSettings", () => {
+     render(<ModelSettings />);
+     const user = userEvent.setup();
+     await user.type(screen.getByLabelText("生成模型名"), "model-v1");
+-    await user.type(screen.getByLabelText(/^API Key/), "synthetic-key");
++    await user.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "synthetic-key",
++    );
+     const disclosure = screen.getByRole("button", {
+       name: "高级：自行配置向量模型",
+     });
+@@ -532,7 +586,10 @@ describe("ModelSettings", () => {
+   it("does not turn opening advanced fields into an embedding mode change", async () => {
+     render(<ModelSettings />);
+     await userEvent.type(screen.getByLabelText("生成模型名"), "model-v1");
+-    await userEvent.type(screen.getByLabelText(/^API Key/), "synthetic-key");
++    await userEvent.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "synthetic-key",
++    );
+     await userEvent.click(
+       screen.getByRole("button", { name: "高级：自行配置向量模型" }),
+     );
+@@ -592,7 +649,10 @@ describe("ModelSettings", () => {
+   it("reopens invalid custom fields instead of saving builtin after collapse", async () => {
+     render(<ModelSettings />);
+     await userEvent.type(screen.getByLabelText("生成模型名"), "model-v1");
+-    await userEvent.type(screen.getByLabelText(/^API Key/), "synthetic-key");
++    await userEvent.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "synthetic-key",
++    );
+     const disclosure = screen.getByRole("button", {
+       name: "高级：自行配置向量模型",
+     });
+@@ -729,7 +789,10 @@ describe("ModelSettings", () => {
+     const user = userEvent.setup();
+     render(<ModelSettings />);
+     await user.type(screen.getByLabelText("生成模型名"), "memory-model");
+-    await user.type(screen.getByLabelText(/^API Key/), "test-only-key");
++    await user.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "test-only-key",
++    );
+     await user.click(screen.getByRole("button", { name: "保存配置" }));
+     const card = screen.getByRole("article", { name: "已保存的模型配置" });
+     expect(card.textContent).toContain("已保存，待测试");
+@@ -739,7 +802,10 @@ describe("ModelSettings", () => {
+     expect(probeProfile).not.toHaveBeenCalled();
+     expect(activate).not.toHaveBeenCalled();
+     await user.click(screen.getByRole("button", { name: "新增配置" }));
+-    expect(screen.getByLabelText(/^API Key/)).toHaveProperty("value", "");
++    expect(screen.getByLabelText(/^服务商密钥（API Key）/)).toHaveProperty(
++      "value",
++      "",
++    );
+     expect(create).toHaveBeenCalledTimes(1);
+   });
+
+@@ -747,20 +813,23 @@ describe("ModelSettings", () => {
+     const user = userEvent.setup();
+     render(<ModelSettings />);
+     await user.type(screen.getByLabelText("生成模型名"), "model-v1");
+-    expect(screen.getByLabelText("配置名称")).toHaveProperty(
++    expect(screen.getByLabelText("配置名称（方便自己辨认）")).toHaveProperty(
+       "value",
+       "OpenAI-compatible · model-v1",
+     );
+-    await user.clear(screen.getByLabelText("配置名称"));
+-    await user.type(screen.getByLabelText("配置名称"), "My choice");
++    await user.clear(screen.getByLabelText("配置名称（方便自己辨认）"));
++    await user.type(
++      screen.getByLabelText("配置名称（方便自己辨认）"),
++      "My choice",
++    );
+     await user.type(screen.getByLabelText("生成模型名"), "-v2");
+-    await user.clear(screen.getByLabelText("Base URL"));
++    await user.clear(screen.getByLabelText("服务地址（Base URL）"));
+     await user.type(
+-      screen.getByLabelText("Base URL"),
++      screen.getByLabelText("服务地址（Base URL）"),
+       "https://gateway.example/v1",
+     );
+-    await user.selectOptions(screen.getByLabelText("协议"), "ollama");
+-    expect(screen.getByLabelText("配置名称")).toHaveProperty(
++    await user.selectOptions(screen.getByLabelText("接口类型"), "ollama");
++    expect(screen.getByLabelText("配置名称（方便自己辨认）")).toHaveProperty(
+       "value",
+       "My choice",
+     );
+@@ -768,7 +837,7 @@ describe("ModelSettings", () => {
+       "value",
+       "model-v1-v2",
+     );
+-    expect(screen.getByLabelText("Base URL")).toHaveProperty(
++    expect(screen.getByLabelText("服务地址（Base URL）")).toHaveProperty(
+       "value",
+       "https://gateway.example/v1",
+     );
+@@ -797,7 +866,7 @@ describe("ModelSettings", () => {
+       const user = userEvent.setup();
+       const { container } = render(<ModelSettings />);
+       await user.type(screen.getByLabelText("生成模型名"), "model-v1");
+-      await user.type(screen.getByLabelText(/^API Key/), key);
++      await user.type(screen.getByLabelText(/^服务商密钥（API Key）/), key);
+       await user.click(screen.getByRole("button", { name: "保存配置" }));
+       expect(
+         screen.getByText(
+@@ -805,11 +874,14 @@ describe("ModelSettings", () => {
+         ),
+       ).toBeTruthy();
+       expect(container.textContent).not.toContain(key);
+-      expect(screen.getByLabelText(/^API Key/)).toHaveProperty(
++      expect(screen.getByLabelText(/^服务商密钥（API Key）/)).toHaveProperty(
+         "type",
+         "password",
+       );
+-      expect(screen.getByLabelText(/^API Key/)).toHaveProperty("value", key);
++      expect(screen.getByLabelText(/^服务商密钥（API Key）/)).toHaveProperty(
++        "value",
++        key,
++      );
+       expect(create).not.toHaveBeenCalled();
+     },
+   );
+@@ -825,7 +897,10 @@ describe("ModelSettings", () => {
+     const user = userEvent.setup();
+     render(<ModelSettings />);
+     await user.type(screen.getByLabelText("生成模型名"), "model-v1");
+-    await user.type(screen.getByLabelText(/^API Key/), "test-only-key");
++    await user.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "test-only-key",
++    );
+     const form = screen
+       .getByRole("button", { name: "保存配置" })
+       .closest("form");
+@@ -838,7 +913,7 @@ describe("ModelSettings", () => {
+       "value",
+       "model-v1",
+     );
+-    expect(screen.getByLabelText(/^API Key/)).toHaveProperty(
++    expect(screen.getByLabelText(/^服务商密钥（API Key）/)).toHaveProperty(
+       "value",
+       "test-only-key",
+     );
+@@ -850,14 +925,20 @@ describe("ModelSettings", () => {
+     const user = userEvent.setup();
+     render(<ModelSettings />);
+     await user.type(screen.getByLabelText("生成模型名"), "model-v1");
+-    await user.type(screen.getByLabelText(/^API Key/), "test-only-key");
+-    await user.clear(screen.getByLabelText("Base URL"));
+-    await user.type(screen.getByLabelText("Base URL"), "not-an-endpoint");
++    await user.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "test-only-key",
++    );
++    await user.clear(screen.getByLabelText("服务地址（Base URL）"));
++    await user.type(
++      screen.getByLabelText("服务地址（Base URL）"),
++      "not-an-endpoint",
++    );
+     await user.click(screen.getByRole("button", { name: "保存配置" }));
+     expect(
+       screen.getByText("请填写完整的 http:// 或 https:// 接口地址。"),
+     ).toBeTruthy();
+-    expect(screen.getByLabelText("Base URL")).toHaveProperty(
++    expect(screen.getByLabelText("服务地址（Base URL）")).toHaveProperty(
+       "value",
+       "not-an-endpoint",
+     );
+@@ -875,7 +956,7 @@ describe("ModelSettings", () => {
+     );
+     await user.selectOptions(screen.getByLabelText("向量配置模式"), "custom");
+     await user.type(
+-      screen.getByLabelText("配置名称"),
++      screen.getByLabelText("配置名称（方便自己辨认）"),
+       "Remote with local embedding",
+     );
+     await user.type(screen.getByLabelText("生成模型名"), "remote-model");
+@@ -885,7 +966,10 @@ describe("ModelSettings", () => {
+       screen.getByLabelText("向量模型 Base URL"),
+       "http://127.0.0.1:11434",
+     );
+-    await user.type(screen.getByLabelText(/^API Key/), "secret-value");
++    await user.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "secret-value",
++    );
+     await user.click(screen.getByRole("button", { name: "保存配置" }));
+
+     expect(create).toHaveBeenCalledWith(
+@@ -899,7 +983,9 @@ describe("ModelSettings", () => {
+   it("后端激活不了的协议根本不出现在下拉里", () => {
+     render(<ModelSettings />);
+
+-    const providerSelect = screen.getByLabelText("协议") as HTMLSelectElement;
++    const providerSelect = screen.getByLabelText(
++      "接口类型",
++    ) as HTMLSelectElement;
+     const labels = Array.from(providerSelect.options).map(
+       (option) => option.textContent ?? "",
+     );
+@@ -917,15 +1003,21 @@ describe("ModelSettings", () => {
+   it("saves an Anthropic endpoint with built-in embedding without activating it", async () => {
+     const user = userEvent.setup();
+     render(<ModelSettings />);
+-    await user.selectOptions(screen.getByLabelText("协议"), "anthropic");
+-    await user.type(screen.getByLabelText("配置名称"), "Messages provider");
++    await user.selectOptions(screen.getByLabelText("接口类型"), "anthropic");
++    await user.type(
++      screen.getByLabelText("配置名称（方便自己辨认）"),
++      "Messages provider",
++    );
+     await user.type(screen.getByLabelText("生成模型名"), "synthetic-haiku");
+-    await user.clear(screen.getByLabelText("Base URL"));
++    await user.clear(screen.getByLabelText("服务地址（Base URL）"));
+     await user.type(
+-      screen.getByLabelText("Base URL"),
++      screen.getByLabelText("服务地址（Base URL）"),
+       "https://messages.example.invalid",
+     );
+-    await user.type(screen.getByLabelText(/^API Key/), "synthetic-secret");
++    await user.type(
++      screen.getByLabelText(/^服务商密钥（API Key）/),
++      "synthetic-secret",
++    );
+     await user.click(screen.getByRole("button", { name: "保存配置" }));
+     expect(create).toHaveBeenCalledWith(
+       expect.objectContaining({
+@@ -970,7 +1062,7 @@ describe("ModelSettings", () => {
+
+     expect(screen.getByRole("region", { name: "预配置模型服务" })).toBeTruthy();
+     // 贴一个 key 就能用的时候，没理由让人先面对协议、Base URL 和超时。
+-    expect(screen.queryByLabelText("协议")).toBeNull();
++    expect(screen.queryByLabelText("接口类型")).toBeNull();
+     expect(screen.getByRole("button", { name: "自定义一个模型" })).toBeTruthy();
+   });
+
+@@ -978,7 +1070,7 @@ describe("ModelSettings", () => {
+     profiles = [];
+     render(<ModelSettings />);
+
+-    expect(screen.getByLabelText("协议")).toBeTruthy();
++    expect(screen.getByLabelText("接口类型")).toBeTruthy();
+   });
+
+   it("no longer promises an HY default model that will not arrive", () => {
+@@ -1065,7 +1157,7 @@ describe("ModelSettings", () => {
+       // 但收起不是顺序依赖：一次点开，不用先动预置分毫。
+       await user.click(screen.getByRole("button", { name: "自定义一个模型" }));
+
+-      expect(screen.getByLabelText("配置名称")).toBeTruthy();
++      expect(screen.getByLabelText("配置名称（方便自己辨认）")).toBeTruthy();
+       expect(screen.getByRole("button", { name: "保存配置" })).toHaveProperty(
+         "disabled",
+         false,
+@@ -1111,7 +1203,7 @@ describe("ModelSettings", () => {
+       expect(controls.current?.editProfile(profile)).toBe(false);
+     });
+     const nameField = () =>
+-      screen.getByLabelText("配置名称") as HTMLInputElement;
++      screen.getByLabelText("配置名称（方便自己辨认）") as HTMLInputElement;
+     expect(nameField().disabled).toBe(true);
+
+     await user.click(screen.getByRole("button", { name: "核对测试结果" }));
+@@ -1272,21 +1364,24 @@ it("keeps the form open and explains a 401 under the key input instead of collap
+     },
+   });
+   render(<ModelSettings />);
+-  await user.type(screen.getByLabelText("配置名称"), "DeepSeek");
++  await user.type(
++    screen.getByLabelText("配置名称（方便自己辨认）"),
++    "DeepSeek",
++  );
+   await user.type(screen.getByLabelText("生成模型名"), "deepseek-flash");
+-  await user.type(screen.getByLabelText(/^API Key/), "wrong-key");
++  await user.type(screen.getByLabelText(/^服务商密钥（API Key）/), "wrong-key");
+   await user.click(screen.getByRole("button", { name: "保存并测试启用" }));
+   await act(async () => {});
+   await act(async () => {});
+-  expect(await screen.findByLabelText(/^API Key/)).toBeTruthy();
++  expect(await screen.findByLabelText(/^服务商密钥（API Key）/)).toBeTruthy();
+   expect(
+     screen.getByText(
+       "服务商拒绝了这个 API Key（401）。请确认密钥属于当前填写的服务地址。",
+     ),
+   ).toBeTruthy();
+-  expect((screen.getByLabelText(/^API Key/) as HTMLInputElement).value).toBe(
+-    "wrong-key",
+-  );
++  expect(
++    (screen.getByLabelText(/^服务商密钥（API Key）/) as HTMLInputElement).value,
++  ).toBe("wrong-key");
+   expect(screen.queryByText("已保存，连接通过")).toBeNull();
+   expect(screen.queryByText("已保存，测试未通过")).toBeNull();
+ });
+diff --git a/memhub/apps/web/src/ModelSettings.tsx b/memhub/apps/web/src/ModelSettings.tsx
+index 2679626..ad9b26e 100644
+--- a/memhub/apps/web/src/ModelSettings.tsx
++++ b/memhub/apps/web/src/ModelSettings.tsx
+@@ -961,6 +961,15 @@ export function ModelSettings({
+               刷新配置列表
+             </button>
+           )}
++          <div className="model-advanced model-form-step">
++            <h3>1. 连接模型服务</h3>
++            <p>
++              模型负责把 NAS
++              收到的内容整理成长期记忆，外部服务可能产生调用费用。
++              聊天继续在原来的 AI
++              应用中进行；暂不配置模型也能共享原文和任务交接。
++            </p>
++          </div>
+           <div className="model-form-field">
+             服务商预设
+             <OptionMenu
+@@ -995,15 +1004,14 @@ export function ModelSettings({
+               }}
+             />
+             <small id="model-preset-help">
+-              只是帮你填好接口地址和一个模型名，不代表这个模型当前可用。
+-              请对照服务商的模型列表核对后再保存。
++              选你正在使用的模型服务。预设会填写常用地址，接下来再获取模型列表并测试。
+             </small>
+           </div>
+           <label>
+-            协议
++            接口类型
+             <select
+               name="provider"
+-              aria-label="协议"
++              aria-label="接口类型"
+               aria-describedby="model-provider-help"
+               value={provider}
+               disabled={formLocked}
+@@ -1022,26 +1030,92 @@ export function ModelSettings({
+               ))}
+             </select>
+             <small id="model-provider-help">
+-              与模型服务提供的接口协议保持一致。
++              预设会自动选择；自定义服务请按服务商说明选择，不确定时先核对其接口类型。
+             </small>
+           </label>
+           <label>
+-            配置名称
++            服务地址（Base URL）
+             <input
+-              name="name"
+-              aria-label="配置名称"
+-              aria-describedby="model-name-help"
++              name="base-url"
++              aria-label="服务地址（Base URL）"
++              aria-describedby={`model-url-help${fields["base-url"] ? " model-url-error" : ""}`}
++              aria-invalid={!!fields["base-url"]}
++              type="url"
++              inputMode="url"
+               autoComplete="off"
+-              maxLength={128}
+-              value={name}
+-              disabled={formLocked}
++              required={provider !== "hy_default"}
++              disabled={formLocked || provider === "hy_default"}
++              value={baseUrl}
+               onChange={(event) => {
+-                setNameEdited(true);
+-                setName(event.target.value);
++                setBaseUrl(event.target.value);
++                setProviderPreset("custom");
+               }}
++              onBlur={() => catalogActions.current?.loadIfNeeded()}
+             />
+-            <small id="model-name-help">用于区分配置，不影响模型请求。</small>
++            <small id="model-url-help">
++              从服务商的 API 设置或接入说明中复制接口地址，不要填聊天网页地址。
++            </small>
++            {fields["base-url"] && (
++              <small id="model-url-error" className="model-field-error">
++                {fields["base-url"]}
++              </small>
++            )}
+           </label>
++          <label>
++            服务商密钥（API Key）{keyRequired ? "" : "（可选）"}
++            <input
++              name="api-key"
++              aria-label={`服务商密钥（API Key）${keyRequired ? "" : "（可选）"}`}
++              aria-describedby={`model-key-origin model-key-help${fields["api-key"] ? " model-key-error" : ""}`}
++              aria-invalid={!!fields["api-key"]}
++              type="password"
++              autoComplete="off"
++              required={keyRequired}
++              value={apiKey}
++              disabled={formLocked}
++              onChange={(event) => setApiKey(event.target.value)}
++              onBlur={() => catalogActions.current?.loadIfNeeded()}
++              placeholder="保存后不会再次显示…"
++            />
++            <small id="model-key-origin">
++              从模型服务商后台创建或复制，不是登录 Cloud Memory Hub
++              的管理员凭证。
++            </small>
++            <small id="model-key-help">
++              {editing && !endpointMoved
++                ? "留空保留已保存密钥；填写新密钥后需重新测试和启用。"
++                : editing && keyRequired
++                  ? "换了服务商后需要填写新的 API Key，已保存的密钥不会带到新地址。"
++                  : "保存在系统安全存储中，不随安装包分发。"}
++            </small>
++            {fields["api-key"] && (
++              <small id="model-key-error" className="model-field-error">
++                {fields["api-key"]}
++              </small>
++            )}
++          </label>
++          <div className="model-advanced model-form-step">
++            <h3>2. 选择模型</h3>
++            <p>
++              地址和密钥填好后会自动获取列表；选好模型，再点击下方按钮测试。
++            </p>
++          </div>
++          <ModelCatalogPicker
++            provider={provider}
++            baseUrl={baseUrl}
++            apiKey={apiKey}
++            savedProfile={catalogSavedProfile}
++            endpointReady={validEndpoint(baseUrl)}
++            disabled={formLocked || editChanged}
++            controlsRef={catalogActions}
++            selectedModel={model}
++            onSelect={(value) => {
++              setModel(value);
++              setProviderPreset("custom");
++              setFields((previous) => ({ ...previous, model: undefined }));
++              if (!nameEdited) setName(suggestedName(value));
++            }}
++          />
+           <label>
+             生成模型名
+             <input
+@@ -1062,7 +1136,7 @@ export function ModelSettings({
+               placeholder="例如：gpt-4o-mini…"
+             />
+             <small id="model-identifier-help">
+-              填写服务方提供的完整模型标识。
++              从上面的列表选择后会自动填入；列表不可用时，可在这里填写服务商提供的完整模型名。
+             </small>
+             {fields.model && (
+               <small id="model-field-error" className="model-field-error">
+@@ -1070,6 +1144,25 @@ export function ModelSettings({
+               </small>
+             )}
+           </label>
++          <label>
++            配置名称（方便自己辨认）
++            <input
++              name="name"
++              aria-label="配置名称（方便自己辨认）"
++              aria-describedby="model-name-help"
++              autoComplete="off"
++              maxLength={128}
++              value={name}
++              disabled={formLocked}
++              onChange={(event) => {
++                setNameEdited(true);
++                setName(event.target.value);
++              }}
++            />
++            <small id="model-name-help">
++              会根据模型名自动填写，你也可以改成容易辨认的名字。
++            </small>
++          </label>
+           {/* Disclosure only changes visibility; mode determines what is saved. */}
+           <div className="model-advanced">
+             <button
+@@ -1209,79 +1302,6 @@ export function ModelSettings({
+               </p>
+             ) : null}
+           </div>
+-          <label>
+-            Base URL
+-            <input
+-              name="base-url"
+-              aria-label="Base URL"
+-              aria-describedby={`model-url-help${fields["base-url"] ? " model-url-error" : ""}`}
+-              aria-invalid={!!fields["base-url"]}
+-              type="url"
+-              inputMode="url"
+-              autoComplete="off"
+-              required={provider !== "hy_default"}
+-              disabled={formLocked || provider === "hy_default"}
+-              value={baseUrl}
+-              onChange={(event) => {
+-                setBaseUrl(event.target.value);
+-                setProviderPreset("custom");
+-              }}
+-              onBlur={() => catalogActions.current?.loadIfNeeded()}
+-            />
+-            <small id="model-url-help">
+-              填写服务接口地址，不是聊天网页地址。
+-            </small>
+-            {fields["base-url"] && (
+-              <small id="model-url-error" className="model-field-error">
+-                {fields["base-url"]}
+-              </small>
+-            )}
+-          </label>
+-          <label>
+-            API Key{keyRequired ? "" : "（可选）"}
+-            <input
+-              name="api-key"
+-              aria-label={`API Key${keyRequired ? "" : "（可选）"}`}
+-              aria-describedby={`model-key-help${fields["api-key"] ? " model-key-error" : ""}`}
+-              aria-invalid={!!fields["api-key"]}
+-              type="password"
+-              autoComplete="off"
+-              required={keyRequired}
+-              value={apiKey}
+-              disabled={formLocked}
+-              onChange={(event) => setApiKey(event.target.value)}
+-              onBlur={() => catalogActions.current?.loadIfNeeded()}
+-              placeholder="保存后不会再次显示…"
+-            />
+-            <small id="model-key-help">
+-              {editing && !endpointMoved
+-                ? "留空保留已保存密钥；填写新密钥后需重新测试和启用。"
+-                : editing && keyRequired
+-                  ? "换了服务商后需要填写新的 API Key，已保存的密钥不会带到新地址。"
+-                  : "保存在系统安全存储中，不随安装包分发。"}
+-            </small>
+-            {fields["api-key"] && (
+-              <small id="model-key-error" className="model-field-error">
+-                {fields["api-key"]}
+-              </small>
+-            )}
+-          </label>
+-          <ModelCatalogPicker
+-            provider={provider}
+-            baseUrl={baseUrl}
+-            apiKey={apiKey}
+-            savedProfile={catalogSavedProfile}
+-            endpointReady={validEndpoint(baseUrl)}
+-            disabled={formLocked || editChanged}
+-            controlsRef={catalogActions}
+-            selectedModel={model}
+-            onSelect={(value) => {
+-              setModel(value);
+-              setProviderPreset("custom");
+-              setFields((previous) => ({ ...previous, model: undefined }));
+-              if (!nameEdited) setName(suggestedName(value));
+-            }}
+-          />
+           <label>
+             <input
+               name="disable-thinking"
+diff --git a/memhub/apps/web/src/R6Settings.test.tsx b/memhub/apps/web/src/R6Settings.test.tsx
+index 173131e..201797a 100644
+--- a/memhub/apps/web/src/R6Settings.test.tsx
++++ b/memhub/apps/web/src/R6Settings.test.tsx
+@@ -104,6 +104,19 @@ it("shows NAS build metadata without desktop-only controls in Hub mode", async (
+   ).toBeNull();
+   expect(screen.queryByRole("button", { name: "导出日志" })).toBeNull();
+   expect(screen.queryByText("development")).toBeNull();
++  expect(
++    screen
++      .getByRole("link", { name: "安装 Mac 连接组件并导入配对文件" })
++      .getAttribute("href"),
++  ).toBe(
++    "https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/client-installation.md#安装与配对",
++  );
++  expect(
++    screen.getByRole("link", { name: "连接你的 AI 应用" }).getAttribute("href"),
++  ).toContain("#连接-agent");
++  expect(
++    screen.getByRole("link", { name: "验证第一次共享" }).getAttribute("href"),
++  ).toContain("#两台设备验证");
+ });
+
+ it("keeps backup management out of the upstream desktop settings", () => {
+diff --git a/memhub/apps/web/src/R6Settings.tsx b/memhub/apps/web/src/R6Settings.tsx
+index ec762c8..71755db 100644
+--- a/memhub/apps/web/src/R6Settings.tsx
++++ b/memhub/apps/web/src/R6Settings.tsx
+@@ -467,9 +467,50 @@ export function R6Settings({
+                   <div>
+                     <h3>Cloud Memory Hub</h3>
+                     <p>
+-                      记忆保存在 NAS。设备连接请按安装文档配置 MCP 或
+-                      Skill，已打开的 Agent 需要重连或新会话。
++                      记忆保存在 NAS。按下面的顺序连接你的 Mac 和 AI
++                      应用，再验证一次实际共享。
+                     </p>
++                    <ol>
++                      <li>
++                        <a
++                          href="https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/client-installation.md#安装与配对"
++                          target="_blank"
++                          rel="noreferrer"
++                        >
++                          安装 Mac 连接组件并导入配对文件
++                        </a>
++                      </li>
++                      <li>
++                        <a
++                          href="https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/client-installation.md#连接-agent"
++                          target="_blank"
++                          rel="noreferrer"
++                        >
++                          连接你的 AI 应用
++                        </a>
++                      </li>
++                      <li>
++                        <a
++                          href="https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/client-installation.md#两台设备验证"
++                          target="_blank"
++                          rel="noreferrer"
++                        >
++                          验证第一次共享
++                        </a>
++                      </li>
++                    </ol>
++                    <p>
++                      添加连接后，已经打开的 AI
++                      应用通常需要重新连接或开始新会话。先在“历史原文”确认收到测试内容，再检查另一台设备能否读回。
++                    </p>
++                    <details>
++                      <summary>需要了解 MCP 或 Skill 时</summary>
++                      <p>
++                        MCP 提供读取和保存记忆的工具，Skill 告诉 AI
++                        应用何时使用它们。安装指南会说明不同应用的配置方式；仅安装
++                        Skill 不等于已经同步成功。
++                      </p>
++                    </details>
+                   </div>
+                 </div>
+               )}
+diff --git a/memhub/apps/web/src/SdkMemoryLibrary.test.tsx b/memhub/apps/web/src/SdkMemoryLibrary.test.tsx
+index 7c153eb..f6f17fd 100644
+--- a/memhub/apps/web/src/SdkMemoryLibrary.test.tsx
++++ b/memhub/apps/web/src/SdkMemoryLibrary.test.tsx
+@@ -18,7 +18,11 @@ vi.mock("./api", () => ({
+   updateSdkMemory,
+ }));
+
+-import { SdkMemoryLibrary } from "./SdkMemoryLibrary";
++import {
++  type LibraryMemory,
++  type MemoryLibraryReader,
++  SdkMemoryLibrary,
++} from "./SdkMemoryLibrary";
+
+ const memory = {
+   memory_id: "memory-1",
+@@ -37,6 +41,13 @@ const memory = {
+   gmt_created: null,
+ };
+
++function readerFor(value: LibraryMemory): MemoryLibraryReader {
++  return {
++    list: vi.fn().mockResolvedValue({ memories: [value], next_offset: null }),
++    get: vi.fn().mockResolvedValue(value),
++  };
++}
++
+ describe("SDK memory library", () => {
+   beforeEach(() => {
+     vi.clearAllMocks();
+@@ -74,4 +85,109 @@ describe("SDK memory library", () => {
+     expect(screen.queryByText(/版本/)).toBeNull();
+     expect(screen.queryByRole("button", { name: "已删除" })).toBeNull();
+   });
++
++  it("describes the Hub forget action accurately without enabling SDK mutations", async () => {
++    const forget = vi.fn();
++    render(
++      <SdkMemoryLibrary
++        active
++        reader={readerFor(memory)}
++        renderActions={() => (
++          <button type="button" onClick={forget}>
++            忘记这条记忆
++          </button>
++        )}
++      />,
++    );
++    await userEvent.click(
++      await screen.findByRole("button", { name: "original" }),
++    );
++    expect(screen.getByText("事实记忆")).toBeTruthy();
++    expect(screen.queryByText("l2_fact")).toBeNull();
++    expect(screen.getByText(/选择“忘记”来停止自动使用/)).toBeTruthy();
++    expect(screen.getByText(/原始历史仍可主动查看/)).toBeTruthy();
++    expect(screen.queryByText(/修改和删除尚未接入此网页/)).toBeNull();
++    expect(screen.queryByRole("textbox", { name: "记忆内容" })).toBeNull();
++    expect(screen.queryByRole("button", { name: "保存修改" })).toBeNull();
++    expect(screen.queryByRole("button", { name: "删除记忆" })).toBeNull();
++    await userEvent.click(screen.getByRole("button", { name: "忘记这条记忆" }));
++    expect(forget).toHaveBeenCalledOnce();
++    expect(updateSdkMemory).not.toHaveBeenCalled();
++    expect(deleteSdkMemory).not.toHaveBeenCalled();
++  });
++
++  it("keeps a reader without actions read-only and preserves an unknown layer", async () => {
++    render(
++      <SdkMemoryLibrary
++        active
++        reader={readerFor({ ...memory, layer: "future_custom_layer" })}
++      />,
++    );
++    await userEvent.click(
++      await screen.findByRole("button", { name: "original" }),
++    );
++    expect(screen.getByText("future_custom_layer")).toBeTruthy();
++    expect(
++      screen.getByText(/此处仅供查看，不提供修改、忘记或彻底删除/),
++    ).toBeTruthy();
++    expect(screen.queryByRole("button", { name: "忘记这条记忆" })).toBeNull();
++  });
++
++  it("opens only the sources returned by the selected detail and states truncation", async () => {
++    const onOpenSource = vi.fn();
++    const reader = readerFor({
++      ...memory,
++      source_raw_ids: ["cmhe:first", "cmhe:second"],
++      references_truncated: true,
++    });
++    vi.mocked(reader.list).mockResolvedValue({
++      memories: [{ ...memory, source_raw_ids: ["cmhe:list-preview"] }],
++      next_offset: null,
++    });
++    render(
++      <SdkMemoryLibrary active reader={reader} onOpenSource={onOpenSource} />,
++    );
++    await userEvent.click(
++      await screen.findByRole("button", { name: "original" }),
++    );
++    await userEvent.click(
++      screen.getByRole("button", { name: "查看来源原文 1" }),
++    );
++    await userEvent.click(
++      screen.getByRole("button", { name: "查看来源原文 2" }),
++    );
++    expect(onOpenSource.mock.calls).toEqual([["cmhe:first"], ["cmhe:second"]]);
++    expect(screen.getByText(/来源列表尚未完整返回/)).toBeTruthy();
++    expect(getSdkMemory).not.toHaveBeenCalled();
++  });
++
++  it("does not offer a source action when no source was returned", async () => {
++    const onOpenSource = vi.fn();
++    render(
++      <SdkMemoryLibrary
++        active
++        reader={readerFor({ ...memory, source_raw_ids: [] })}
++        onOpenSource={onOpenSource}
++      />,
++    );
++    await userEvent.click(
++      await screen.findByRole("button", { name: "original" }),
++    );
++    expect(screen.queryByRole("button", { name: /查看来源原文/ })).toBeNull();
++    expect(onOpenSource).not.toHaveBeenCalled();
++  });
++
++  it("leaves ordinary SDK source actions absent without a configured opener", async () => {
++    getSdkMemory.mockResolvedValue({
++      ...memory,
++      source_raw_ids: ["sdk-source"],
++    });
++    render(<SdkMemoryLibrary active />);
++    await userEvent.click(
++      await screen.findByRole("button", { name: "original" }),
++    );
++    expect(screen.queryByRole("button", { name: /查看来源原文/ })).toBeNull();
++    expect(screen.getByRole("button", { name: "保存修改" })).toBeTruthy();
++    expect(screen.getByRole("button", { name: "删除记忆" })).toBeTruthy();
++  });
+ });
+diff --git a/memhub/apps/web/src/SdkMemoryLibrary.tsx b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+index 1ca846c..67c83a6 100644
+--- a/memhub/apps/web/src/SdkMemoryLibrary.tsx
++++ b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+@@ -19,6 +19,8 @@ export type LibraryMemory = Pick<
+   "memory_id" | "content" | "layer" | "status"
+ > & {
+   next_content_offset?: number | null;
++  source_raw_ids?: string[];
++  references_truncated?: boolean;
+ };
+ export interface MemoryLibraryReader {
+   list(
+@@ -32,6 +34,18 @@ export interface MemoryLibraryReader {
+   errorMessage?(reason: unknown): string;
+ }
+
++// Reuse the fixed SDK MemoryLayer names; this is presentation, not a migration.
++const memoryLayerLabels = new Map([
++  ["l0_basic_info", "基本信息"],
++  ["l1_raw", "原始对话"],
++  ["l2_fact", "事实记忆"],
++  ["l3_summary", "会话摘要"],
++  ["l4_identity", "个人画像"],
++  ["l5_knowledge", "关联知识"],
++  ["l6_schema", "经验模式"],
++  ["l7_intention", "计划与意图"],
++]);
++
+ export function SdkMemoryLibrary({
+   active,
+   onChanged,
+@@ -39,6 +53,7 @@ export function SdkMemoryLibrary({
+   reader,
+   detailOnly = false,
+   renderActions,
++  onOpenSource,
+ }: {
+   active: boolean;
+   onChanged?(): void;
+@@ -47,6 +62,7 @@ export function SdkMemoryLibrary({
+   reader?: MemoryLibraryReader;
+   detailOnly?: boolean;
+   renderActions?(memory: LibraryMemory): ReactNode;
++  onOpenSource?(sourceId: string): void;
+ }) {
+   const [status, setStatus] = useState<SdkMemoryStatus>("active");
+   const [offset, setOffset] = useState(0);
+@@ -192,6 +208,9 @@ export function SdkMemoryLibrary({
+     }
+   }
+
++  const sourceIds =
++    selected?.source_raw_ids?.filter((id) => id.length > 0) ?? [];
++
+   return (
+     <section className="sdk-memory-library" aria-label="SDK 记忆库">
+       {!reader && !detailOnly && (
+@@ -220,7 +239,9 @@ export function SdkMemoryLibrary({
+       )}
+       {reader && (
+         <p>
+-          当前项目的可用记忆。修改和删除尚未接入此网页，请使用已授权的管理流程。
++          {renderActions
++            ? "当前项目的可用记忆。打开记忆可查看详情，也可选择“忘记”来停止自动使用。原始历史仍可主动查看；这里暂不提供修改或彻底删除。"
++            : "当前项目的可用记忆。此处仅供查看，不提供修改、忘记或彻底删除。"}
+         </p>
+       )}
+       {!detailOnly && !busy && !error && (
+@@ -290,7 +311,10 @@ export function SdkMemoryLibrary({
+       )}
+       {selected ? (
+         <aside aria-label="SDK 记忆详情">
+-          <p>{selected.layer}</p>
++          <p>
++            {memoryLayerLabels.get(selected.layer) ??
++              (selected.layer || "未标注类型")}
++          </p>
+           {!reader && selected.status === "active" ? (
+             <>
+               <textarea
+@@ -319,6 +343,20 @@ export function SdkMemoryLibrary({
+               继续读取
+             </R6Button>
+           )}
++          {onOpenSource && sourceIds.length > 0 && (
++            <nav aria-label="记忆来源">
++              {sourceIds.map((id, index) => (
++                <R6Button key={id} onClick={() => onOpenSource(id)}>
++                  {sourceIds.length === 1
++                    ? "查看来源原文"
++                    : `查看来源原文 ${index + 1}`}
++                </R6Button>
++              ))}
++            </nav>
++          )}
++          {onOpenSource && selected.references_truncated && (
++            <p>来源列表尚未完整返回，这里只展示已取得的来源。</p>
++          )}
+           {renderActions?.(selected)}
+         </aside>
+       ) : null}
+diff --git a/memhub/apps/web/src/hub-api.test.ts b/memhub/apps/web/src/hub-api.test.ts
+index 6b85f43..ba09572 100644
+--- a/memhub/apps/web/src/hub-api.test.ts
++++ b/memhub/apps/web/src/hub-api.test.ts
+@@ -50,6 +50,7 @@ describe("Hub administrator read transport", () => {
+     { operation: "history-list" },
+     { items: [{ ...item, kind: "history" }] },
+     { returned_count: 8 },
++    { items: [{ ...item, references_truncated: "false" }] },
+   ])("rejects a mismatched envelope %j", async (change) => {
+     vi.stubGlobal(
+       "fetch",
+@@ -59,6 +60,24 @@ describe("Hub administrator read transport", () => {
+       readHub("instance", "project-a", "memory-list"),
+     ).rejects.toThrow("不一致");
+   });
++  it.each([true, false, undefined])(
++    "preserves optional source completeness %s without changing scope",
++    async (references_truncated) => {
++      const original =
++        references_truncated === undefined
++          ? item
++          : { ...item, references_truncated };
++      vi.stubGlobal(
++        "fetch",
++        vi
++          .fn()
++          .mockResolvedValue(Response.json({ ...page, items: [original] })),
++      );
++      expect(
++        (await readHub("instance", "project-a", "memory-list")).items,
++      ).toEqual([original]);
++    },
++  );
+   it("rejects a get response for another record or content block", async () => {
+     vi.stubGlobal(
+       "fetch",
+diff --git a/memhub/apps/web/src/hub-api.ts b/memhub/apps/web/src/hub-api.ts
+index c210fb6..f42ed73 100644
+--- a/memhub/apps/web/src/hub-api.ts
++++ b/memhub/apps/web/src/hub-api.ts
+@@ -44,6 +44,7 @@ export interface HubItem {
+   session_id: string | null;
+   source: string | null;
+   source_raw_ids: string[];
++  references_truncated?: boolean;
+   memory_at: number | null;
+ }
+ export type HubReadOperation =
+@@ -240,6 +241,8 @@ export async function readHub(
+       !(item.session_id === null || typeof item.session_id === "string") ||
+       !Array.isArray(item.source_raw_ids) ||
+       !item.source_raw_ids.every((v) => typeof v === "string") ||
++      ("references_truncated" in item &&
++        typeof item.references_truncated !== "boolean") ||
+       !cursor(item.memory_at)
+     )
+       invalid();
+diff --git a/memhub/apps/web/src/hub-console.css b/memhub/apps/web/src/hub-console.css
+index 5f3640f..02c002c 100644
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -183,3 +183,37 @@
+   border-radius: 8px;
+   font-size: 12px;
+ }
++
++/* First-use guidance stays within the existing Hub layout. */
++.hub-getting-started,
++.hub-pairing-next,
++.hub-first-memory {
++  margin-block: 24px;
++}
++.hub-start-steps,
++.hub-pairing-next ol,
++.hub-first-memory ol {
++  padding-left: 24px;
++}
++.hub-start-steps li,
++.hub-pairing-next li {
++  margin-block: 18px;
++}
++.hub-help-actions {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 8px;
++}
++.hub-first-memory blockquote {
++  margin: 12px 0;
++  padding: 14px 16px;
++  border-left: 3px solid var(--text-muted, #62665c);
++  background: var(--surface, #fff);
++  overflow-wrap: anywhere;
++}
++.hub-content .model-form-step h3 {
++  margin: 0 0 6px;
++}
++.hub-content .model-form-step p {
++  margin: 0 0 6px;
++}

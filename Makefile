@@ -108,7 +108,11 @@ probe-derived-lifecycle: prepare-upstream
 
 check-upstream: prepare-upstream
 	uv run --locked python .local/upstream/hy-memory/memhub/scripts/fetch_embedding_model.py
-	cd .local/upstream/hy-memory/memhub && uv tool run --from uv==0.12.5 uv run --no-project -- bash scripts/run-tests-isolated.sh core-pr -q
+	@set -eu; sdk_path=$$(mktemp -d "$${TMPDIR:-/tmp}/cmh-core-sdk.XXXXXX"); \
+	trap 'rm -rf -- "$$sdk_path"' EXIT; \
+	ln -s "$(CURDIR)/.local/upstream/hy-memory/hy_memory" "$$sdk_path/hy_memory"; \
+	cd .local/upstream/hy-memory/memhub; \
+	PYTHONPATH="$$sdk_path:$(CURDIR)/scripts" uv tool run --from uv==0.12.5 uv run --no-project -- bash scripts/run-tests-isolated.sh core-pr -q -p verify_core_sdk_source
 
 check-container:
 	docker build --platform linux/amd64 --tag cloud-memory-hub:development .

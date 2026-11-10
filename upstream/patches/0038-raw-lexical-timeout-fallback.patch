@@ -1,0 +1,233 @@
+diff --git a/memhub/apps/core/src/one_memory/context_routes.py b/memhub/apps/core/src/one_memory/context_routes.py
+--- a/memhub/apps/core/src/one_memory/context_routes.py
++++ b/memhub/apps/core/src/one_memory/context_routes.py
+@@ -4,6 +4,7 @@
+ import sqlite3
+ import time
+ from collections.abc import Sequence
++from concurrent.futures import Future
+ from datetime import UTC, datetime
+ from typing import cast
+ from uuid import uuid4
+@@ -43,7 +44,8 @@
+ from one_memory.diagnostic_log import diagnostic_event, diagnostic_exception
+ from one_memory.external_memory_access import external_access
+ from one_memory.imports.storage import EvidenceStore
+-from one_memory.retrieval.raw_lane import read_raw_indexed_context
++from one_memory.retrieval.raw_candidates import RawCandidateBatch
++from one_memory.retrieval.raw_lane import fuse_raw_lane, read_raw_indexed_context
+ from one_memory.semantic_deadline import hy_wait_budget, search_within
+
+ CALL_EVENT_RESPONSE_BUDGET_MS = 250
+@@ -89,6 +91,29 @@
+
+         async def raw(end: float) -> ContextLaneResult:
+             lane_end = min(end, time.monotonic() + RAW_LANE_BUDGET_SECONDS)
++            lexical_ready: Future[ContextLaneResult] = Future()
++
++            def keep_lexical(result: ContextLaneResult) -> None:
++                # One worker publishes a frozen snapshot; it never touches the loop.
++                if time.monotonic() < lane_end:
++                    lexical_ready.set_result(result)
++
++            def timed_out_result() -> ContextLaneResult:
++                if lexical_ready.done():
++                    # Candidates still pass the normal final authority/revision check.
++                    return fuse_raw_lane(
++                        lexical_ready.result(),
++                        RawCandidateBatch(reason="deadline"),
++                        unpublished_authorized=True,
++                    )
++                return ContextLaneResult(
++                    status="degraded",
++                    reason="timeout_budget",
++                    searched_channels=("lexical", "semantic"),
++                    timed_out=True,
++                    truncated_by=("timeout_budget",),
++                )
++
+             read = asyncio.create_task(
+                 in_read_pool(
+                     raw_read_pool(),
+@@ -98,6 +123,7 @@
+                     source_ids=authority.raw_sources,
+                     deadline=lane_end,
+                     index=getattr(request.app.state, "retrieval_runtime", None),
++                    on_lexical=keep_lexical,
+                 )
+             )
+             done, _ = await asyncio.wait({read}, timeout=max(0, lane_end - time.monotonic()))
+@@ -106,15 +132,12 @@
+                 read.add_done_callback(
+                     lambda task: task.exception() if not task.cancelled() else None
+                 )
+-                result = ContextLaneResult(
+-                    status="degraded",
+-                    reason="timeout_budget",
+-                    searched_channels=("lexical", "semantic"),
+-                    timed_out=True,
+-                    truncated_by=("timeout_budget",),
+-                )
++                result = timed_out_result()
+             else:
+-                result = read.result()
++                try:
++                    result = read.result()
++                except TimeoutError:
++                    result = timed_out_result()
+             lane_observations["raw"] = result
+             return result
+
+diff --git a/memhub/apps/core/src/one_memory/retrieval/raw_lane.py b/memhub/apps/core/src/one_memory/retrieval/raw_lane.py
+--- a/memhub/apps/core/src/one_memory/retrieval/raw_lane.py
++++ b/memhub/apps/core/src/one_memory/retrieval/raw_lane.py
+@@ -155,8 +155,11 @@
+     deadline: float,
+     index: RawIndexLookup | None = None,
+     load_semantic_items: Callable[..., tuple[RawContextItem, ...]] | None = None,
++    on_lexical: Callable[[ContextLaneResult], None] | None = None,
+ ) -> ContextLaneResult:
+     lexical = read_raw_context(database_path, request, source_ids=source_ids, deadline=deadline)
++    if on_lexical is not None:
++        on_lexical(lexical)
+     if index is None:
+         return lexical
+     try:
+diff --git a/memhub/apps/core/tests/test_context_search_both_paths.py b/memhub/apps/core/tests/test_context_search_both_paths.py
+--- a/memhub/apps/core/tests/test_context_search_both_paths.py
++++ b/memhub/apps/core/tests/test_context_search_both_paths.py
+@@ -9,8 +9,11 @@
+
+ from __future__ import annotations
+
++import asyncio
+ import sqlite3
++import threading
+ import uuid
++from types import SimpleNamespace
+
+ import pytest
+ from httpx import ASGITransport, AsyncClient
+@@ -159,3 +162,122 @@
+     assert document["paths"]["raw"]["status"] == "not_requested", "raw must not run"
+     contents = [item["content"] for item in document["items"]]
+     assert memory in contents, "memory path must return the governed memory"
++
++
++@pytest.mark.parametrize(
++    "case", ["lexical", "semantic_only", "changed", "lexical_pending", "semantic_timeout"]
++)
++def test_raw_timeout_preserves_only_ready_and_finally_validated_lexical_hits(
++    tmp_path, monkeypatch, case
++):
++    from one_memory import context_routes
++    from one_memory.background_work import (
++        raw_read_pool,
++        wait_for_interactive_reads,
++        warm_reader,
++    )
++    from one_memory.retrieval import raw_lane
++    from one_memory.retrieval.index_store import PublishedChunk
++    from one_memory.retrieval.raw_candidates import RawCandidateBatch, RawSemanticCandidate
++
++    entered, release = threading.Event(), threading.Event()
++    lexical_reads, finalized, fallback_metadata = [], [], []
++    read = raw_lane.read_raw_context
++    revalidate = context_routes.revalidate_raw_context
++    fuse = context_routes.fuse_raw_lane
++
++    def block():
++        entered.set()
++        assert release.wait(5), "the test must release its worker"
++
++    def observed_read(*args, **kwargs):
++        lexical_reads.append(1)
++        if case == "lexical_pending":
++            block()
++        return read(*args, **kwargs)
++
++    def slow_semantic(*args, **kwargs):
++        if case == "semantic_timeout":
++            entered.set()
++            chunk = PublishedChunk(
++                chunk_id="synthetic-chunk",
++                build_id="synthetic-build",
++                evidence_id="synthetic-candidate",
++                revision=1,
++                start_cp=0,
++                end_cp=1,
++                ordinal=0,
++                source_id="codex",
++                event_time=None,
++            )
++            return RawCandidateBatch(hits=(RawSemanticCandidate(chunk, 0.1),)), False
++        block()
++        return RawCandidateBatch(complete=True, reason="no_eligible_chunks"), False
++
++    def semantic_load_timeout(*args, **kwargs):
++        raise TimeoutError("synthetic semantic hydration deadline")
++
++    def observed_fallback(*args, **kwargs):
++        result = fuse(*args, **kwargs)
++        fallback_metadata.append((result.semantic_status, result.index_complete))
++        return result
++
++    def observed_finalizer(database, items, **kwargs):
++        finalized.append(len(items))
++        return revalidate(database, items, **kwargs)
++
++    async def scenario():
++        app, data_dir, client = _client(tmp_path)
++        async with app.router.lifespan_context(app), client:
++            verbatim, _ = _seed(data_dir)
++            await warm_reader(raw_read_pool())
++            with monkeypatch.context() as patch:
++                patch.setattr(raw_lane, "read_raw_context", observed_read)
++                patch.setattr(context_routes, "revalidate_raw_context", observed_finalizer)
++                patch.setattr(context_routes, "fuse_raw_lane", observed_fallback)
++                if case == "semantic_timeout":
++                    patch.setattr(raw_lane, "load_raw_items_from_candidates", semantic_load_timeout)
++                patch.setattr(
++                    app.state,
++                    "retrieval_runtime",
++                    SimpleNamespace(lookup_raw=slow_semantic),
++                    raising=False,
++                )
++                query = "unmatched-synthetic-query" if case == "semantic_only" else verbatim
++                pending = asyncio.create_task(
++                    client.post("/api/v1/context/search", json={"query": query, "kinds": ["raw"]})
++                )
++                try:
++                    assert await asyncio.to_thread(entered.wait, 2)
++                    if case == "changed":
++                        with sqlite3.connect(data_dir / "one-memory.sqlite3") as db:
++                            db.execute("UPDATE evidence SET revision=revision+1")
++                    # The response must finish while optional native work is blocked.
++                    response = await asyncio.wait_for(pending, 2)
++                    assert not release.is_set()
++                finally:
++                    release.set()
++                    if not pending.done():
++                        pending.cancel()
++                        await asyncio.gather(pending, return_exceptions=True)
++                    await asyncio.wait_for(wait_for_interactive_reads(), 5)
++            response.raise_for_status()
++            body = response.json()
++            texts = [message["text"] for item in body["items"] for message in item["messages"]]
++            assert len(lexical_reads) == 1, "timeout fallback must not repeat the lexical scan"
++            assert fallback_metadata == (
++                [] if case == "lexical_pending" else [("timed_out", False)]
++            )
++            if case in {"lexical", "semantic_timeout"}:
++                assert verbatim in texts
++                assert finalized == [1]
++                assert body["paths"]["raw"]["reason"] == "lexical_only"
++            else:
++                assert texts == []
++                assert finalized == ([1] if case == "changed" else [0])
++                if case == "lexical_pending":
++                    assert body["paths"]["raw"]["reason"] == "timeout_budget"
++                if case == "changed":
++                    assert body["paths"]["raw"]["reason"] == "evidence_changed"
++
++    asyncio.run(scenario())

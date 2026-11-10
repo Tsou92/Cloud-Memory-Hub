@@ -1,7 +1,9 @@
 """Composition only: persistence, memory processing and UI remain upstream."""
 
 import secrets
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+
+from starlette.routing import Route
 
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.diagnostics import initialize_diagnostics
@@ -29,6 +31,7 @@ def create_hub(config: HubConfig):
     from cloud_memory_hub.privacy import CredentialFilter
     from cloud_memory_hub.remote_api import create_remote_api
     from cloud_memory_hub.remote_ingest import RemoteIngest
+    from cloud_memory_hub.remote_mcp import MCP_PATH, RemoteMCP
     from cloud_memory_hub.remote_read import RemoteRead
     from cloud_memory_hub.sdk_admission import SdkAdmission
     from cloud_memory_hub.sdk_generation import SdkGeneration
@@ -146,8 +149,19 @@ def create_hub(config: HubConfig):
     @asynccontextmanager
     async def governed_lifespan(app):
         async with core_lifespan(app) as state:
-            await executor.resume()
-            yield state
+            async with AsyncExitStack() as resources:
+                mcp_lifespan = remote_mcp.session_manager.run()
+                await mcp_lifespan.__aenter__()
+                # Close transport resources without injecting Hub startup/body
+                # errors into the SDK task group and changing their exception type.
+                # Transport cleanup failures still propagate, with the Hub error
+                # retained as context; no exception group is flattened or ignored.
+                resources.push_async_callback(mcp_lifespan.__aexit__, None, None, None)
+                # MCP startup yields to Core's maintenance task. Finish the
+                # serialized recovery after all transport startup awaits so
+                # serving starts with the same readiness guarantee as before.
+                await executor.resume()
+                yield state
 
     core.router.lifespan_context = governed_lifespan
     console = ConsoleRead(
@@ -158,8 +172,16 @@ def create_hub(config: HubConfig):
     )
     core.state.cmh_console = console
     remote_api = create_remote_api(
-        devices, ingest, reads, previews, executor, admission=sdk_admission
+        devices,
+        ingest,
+        reads,
+        previews,
+        executor,
+        admission=sdk_admission,
+        public_origin=config.public_origin,
     )
+    remote_mcp = RemoteMCP(config, ingest, remote_api)
+    remote_api.routes.append(Route(MCP_PATH, remote_mcp))
     remote_api.routes.extend(console_routes(console))
     remote_api.routes.extend(backup_routes(config))
     questions = ConsoleQuestions(core, console)
