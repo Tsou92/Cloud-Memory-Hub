@@ -2,9 +2,11 @@
 
 这套入口面向跨设备共享记忆和任务交接：Agent 通过同一组 MCP 工具或 CLI 读写 NAS 上的 Hub，Skill 约定何时调用。它复用现有私有连接文件、项目授权、凭证过滤、LocalOutbox、上传和授权读取接口，不新增记忆存储。
 
-本页对应 FR-01、FR-02、FR-03、FR-05、FR-07、FR-12。可安装的 Skill 位于 [cloud-memory-hub/SKILL.md](../packages/agent-skill/cloud-memory-hub/SKILL.md)。当前处于 G2：MCP／CLI／Skill 已实现，MacBook 与 Mac mini 已通过 NAS 的 Tailscale HTTPS 入口完成真实两机 MCP 验收 **7/7**；此前同镜像本地和 NAS 安装探针各 6/6。两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装并通过配置保留核验；真实 Claude 模型读写、同会话更新及原生 Skill 读取已有新证据，详见[自动共享记录](reviews/2026-11-10-visible-turn-mvp.md)。Codex 桌面原生调用仍未验证，前序范围见[两机记录](reviews/2026-11-10-two-host-mvp.md)与[安装记录](reviews/2026-11-10-agent-access-mvp.md)。
+本页对应 FR-01、FR-02、FR-03、FR-05、FR-07、FR-12。可安装的 Skill 位于 [cloud-memory-hub/SKILL.md](../packages/agent-skill/cloud-memory-hub/SKILL.md)。当前处于 G2：MCP／CLI／Skill 已实现，MacBook 与 Mac mini 已通过 NAS 的 Tailscale HTTPS 入口完成真实两机 MCP 验收 **7/7**；此前同镜像本地和 NAS 安装探针各 6/6。两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装并通过配置保留核验；真实 Claude 模型读写、同会话更新及原生 Skill 读取已有新证据，详见[自动共享记录](reviews/2026-11-10-visible-turn-mvp.md)。本轮 MacBook 的 Codex 桌面对话还实际完成原生 MCP 读写，但不代表每轮自动触发；前序范围见[两机记录](reviews/2026-11-10-two-host-mvp.md)与[安装记录](reviews/2026-11-10-agent-access-mvp.md)。
 
 ## Mac 客户端安装
+
+新安装包、网页配对和后台补传入口见 [Mac 自助接入](client-installation.md)。以下保留开发者源码安装方式；不需要让普通用户依赖开发工作树。
 
 这部分安装连接 NAS 的本机 MCP／CLI，不需要在 Mac 启动 Docker 服务。先安装 Git 和 **Python 3.12**，将本仓库放在之后保持不变的目录；网络须可访问上游 GitHub 仓库和锁定的 Python 依赖。以下命令在仓库根目录执行，首次安装任一步失败都先处理错误，不跳过上游校验。
 

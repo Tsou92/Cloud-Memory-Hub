@@ -2,6 +2,13 @@
 
 本索引记录新增发布修复的相关测试，不代替全套测试收集或真实客户端验收。
 
+## ADR-0060：自助配对与客户端安装
+
+- 需求：FR-01、FR-02、FR-03、FR-06、FR-07、FR-12、ENG-01；设计见 [ADR-0060](../../../docs/adr/0060-self-service-pairing.md)。
+- `test_client_setup.py`：下载文件合同／私有权限、拒绝链接与超限文件、真实会话及来源校验、项目和实例不符、撤销、重导入保留队列、失败无半成品、空队列显式连接检查、JSON／Codex TOML 无凭证输出。
+- `test_client_service.py`：独立 LaunchAgent 管理、未知服务拒绝、显式永久错误停止、卸载保留数据、控制器失败、受损队列仍可停服；真实 macOS 用例必须显式启用，使用隔离身份与本地合成服务，不代表 NAS 或登录重启验收。
+- 仓库 `tests/test_client_distribution.py`：发行清单、篡改／路径／架构拒绝、私有全新目标、失败清理、锁定依赖与非 editable wheel。模拟构建验证不代替发行包的实际新环境安装。
+
 ## ADR-0056：忘记后的自动历史召回
 
 - 需求：FR-03、FR-05、FR-10、FR-11；设计见 [ADR-0056](../../../docs/adr/0056-forgotten-history-recall.md)。
