@@ -29,7 +29,12 @@ from one_memory.hy_runtime_config import HY_MEMORY_NAMESPACE, HY_MEMORY_VERSION
 from cloud_memory_hub.config import HubConfig, read_private_file
 from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.governance_journal import Checkpoint
-from cloud_memory_hub.storage_lease import LOCK_NAME, StorageLease, StorageLeaseError
+from cloud_memory_hub.storage_lease import (
+    LOCK_NAME,
+    StorageLease,
+    StorageLeaseError,
+    require_restore_complete,
+)
 from cloud_memory_hub.write_admissions import WriteAdmissions
 
 KIND = "cloud-memory-hub-backup"
@@ -381,6 +386,7 @@ def create_backup(config: HubConfig, backup_root: Path, *, revision: str) -> dic
             _reject("backup_roots_overlap")
         root = _root(root, create=True)
         with StorageLease(*roots):
+            require_restore_complete(*roots[:3])
             # Check all sources before probing SDK configuration or copying bytes.
             for path in roots[:3]:
                 _plain_path(path, directory=True, private=True)
@@ -425,6 +431,8 @@ def create_backup(config: HubConfig, backup_root: Path, *, revision: str) -> dic
             stage = published = None
             return manifest
     except StorageLeaseError as error:
+        if error.args == ("restore_incomplete",):
+            raise BackupError("backup_restore_incomplete") from None
         raise BackupError(
             "backup_storage_in_use"
             if error.args == ("storage_in_use",)

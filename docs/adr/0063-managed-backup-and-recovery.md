@@ -64,3 +64,40 @@ import/rollback
 相关 pytest、上游快照回归和 `make check` 必须执行；最后使用镜像内安装代码与非空独立 NAS 卷验证两个自动版本、导出导入、历史回滚及故障恢复。定义和模拟测试不能算真机通过。
 
 资料核对：[Docker 卷备份与恢复](https://docs.docker.com/engine/storage/volumes/)；[Debian cron 合同](https://manpages.debian.org/trixie/cron/crontab.5.en.html)。容器内协调是基于当前三卷写者和目标 NAS 权限的工程选择，并非 Docker 文档提供的应用一致性保证。
+
+## 管理页面的有限备份 API
+
+以下四个接口仅使用管理员身份，复用 Hub `require_admin`、有界 JSON 请求解析及既有
+Origin／CSRF 边界。设备凭证不能调用。备份目录来自服务端 `CMH_BACKUP_DIR`，默认
+`/backups`；请求不接受路径、命令、文件下载或恢复操作，不新增无鉴权访问能力。
+
+| 方法与路径 | 请求 | 响应与语义 |
+| --- | --- | --- |
+| `GET /hub/v1/backups/status` | 无查询参数 | 200：复用 runtime.status 的计划、执行状态、下次时间与待处理请求 ID；`supervisor_running=not_checked` 不表示调度器在线 |
+| `GET /hub/v1/backups/versions` | 无查询参数 | 200：`{"versions":[...]}`；有界读取清单摘要，仅返回版本 ID、`state=unverified`、创建时间、构建版本、声明文件数和声明总字节数；不表示当前文件完整或可恢复 |
+| `PUT /hub/v1/backups/schedule` | 严格对象：`enabled` 为 bool，`interval_minutes` 为整数 1–525600，`keep` 为整数 1–365；拒绝额外字段 | 200：已保存计划；复用 runtime.configure，不立即触发备份 |
+| `POST /hub/v1/backups/request` | 严格空对象 `{}` | 202：`status=queued`、请求 ID 与请求时间；仅调用 runtime.request_backup，不代表已启动或备份成功 |
+
+所有同步控制文件、计划和清单摘要读取操作通过 `asyncio.to_thread` 执行，不阻塞 HTTP
+事件循环。版本租约被占用时返回 503 `backup_storage_in_use`；已有未处理请求时返回 409
+`backup_request_pending`，不覆盖该请求。非法请求沿用 422 `invalid_request`（请求体超限
+为 413）；控制目录只读、磁盘故障或控制文件损坏返回 503 `backup_control_unavailable`，
+其他版本读取故障返回 503 `backup_versions_unavailable`。响应不得带文件清单、源正文、
+凭证、路径或原始异常。发生网络或落盘结果未知时客户端应重新读取状态核对，不能把
+失败响应当作请求未写入的证明。
+
+### 网页目录摘要的预算与校验边界
+
+独立审查指出，在线程中执行全量文件摘要不能随 HTTP 取消而终止，可能持有备份租约超过
+停服等待窗口。网页版本接口因此改为独立目录摘要，不调用 `store.list_backups` 全量校验。
+继续复用原私有路径检查、清单格式及同一 `StorageLease`，最多读取 365 个候选版本、合计
+64 MiB 清单，每份不超过既有 `MAX_MANIFEST_BYTES`；每个目录项和每 1 MiB 读取都检查
+三秒协作预算，解析每份有大小上限的 JSON 前后也检查预算。单次系统调用和单次 JSON
+解析不能硬中断，不将此预算描述为操作系统级绝对截止时间。错误或预算到限及时释放租约。
+
+仅严格验证并投影 ID、带时区 UTC 时间、构建标识、非负数量和大小等清单元数据，不遍历
+数据文件、不计算其摘要、不做 SQLite 或治理链验证。未知格式、重复键、损坏或变动清单
+拒绝整次读取；预算到限、时间到限、非法清单分别返回 503 `backup_catalog_limit`、
+`backup_catalog_timeout`、`backup_catalog_invalid`，不返回虚构空列表或逐项假定损坏。
+网页显示“已生成，恢复前完整校验”，并注明列表未经重新校验。生成完成状态与当前文件
+验证分开；CLI inspect、备份保留清理和恢复前的完整校验全部保持，不降低恢复安全边界。
