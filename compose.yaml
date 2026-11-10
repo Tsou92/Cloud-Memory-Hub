@@ -39,6 +39,7 @@ services:
       - hub_data:/data
       - hub_config:/config
       - hub_governance:/governance
+      - ${CMH_BACKUP_PATH:-hub_backups}:/backups
     read_only: true
     tmpfs: ["/tmp"]
     cap_drop: ["ALL"]
@@ -56,3 +57,4 @@ volumes:
   hub_data:
   hub_config:
   hub_governance:
+  hub_backups:

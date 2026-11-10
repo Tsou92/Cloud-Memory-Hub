@@ -42,7 +42,7 @@ docker compose exec hub cat /config/admin-token
 - `hub_data` 保存 Core 数据、接纳的处理任务及索引；`hub_config` 保存管理员凭证、加密密钥、加密的模型凭证数据库，以及设备身份／项目授权、来源、事件回执及完整已过滤原文库。配置卷现在也包含长期历史正文，必须纳入与数据卷一致的私有备份和治理范围。设备权限协议见 [ADR-0004](adr/0004-remote-device-access.md)，上传及回滚语义见 [ADR-0006](adr/0006-remote-ingest.md)。
 - `hub_governance` 保存不含正文的治理意图、执行记录及独立 SDK 准入日志，独立挂载至 `/governance`；普通业务快照恢复不能覆盖或删除它。自定义 `CMH_GOVERNANCE_DIR` 时，目录不能位于 data/config 内，也不能包含它们。机制与限制见 [ADR-0011](adr/0011-governance-authority-and-offline-sync.md) 和 [ADR-0038](adr/0038-durable-sdk-admission.md)。
 - 普通停止使用 `docker compose down`；不加 `--volumes`。保留卷后再次启动会复用配置和数据。
-- 配置密钥丢失会导致加密凭证无法读取；当前还没有密钥轮换、灾难恢复或完整备份功能，不应依赖此实验版本承载唯一数据。
+- 配置密钥丢失会导致加密凭证无法读取。候选 Compose 增加独立 `hub_backups` 卷与容器内调度，默认关闭；配置方法见[备份与恢复](backup-and-recovery.md)。新镜像默认 `supervise`，显式 `serve` 仍可用但不执行定时备份。已有自定义 Compose 需要增加 `/backups` 可写私有挂载。完整导入／历史回滚和灾难恢复仍未完成验收，不应依赖此实验版本承载唯一数据。
 - 初始化中断后不要直接删除既有凭证重试；先检查配置卷并保留副本，避免覆盖已经使用的密钥。
 
 ## 已有实验实例的治理迁移
