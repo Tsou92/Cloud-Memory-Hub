@@ -138,8 +138,8 @@ make check-container
 
 ## GitHub 与发行状态
 
-目前为本地 Git 仓库，尚未创建远程仓库、配置远程分支保护或发布产品。
-仓库提供 GitHub Actions 工作流、Issue / PR 模板和依赖更新配置；上传后才能验证远程执行。
+公开源码仓库为 [Tsou92/Cloud-Memory-Hub](https://github.com/Tsou92/Cloud-Memory-Hub)。当前仍为发行候选，正式版本标签、可下载的 GitHub Release 及远程必需检查正在验收。
+仓库提供质量检查、手动触发的版本制品流水线、Issue / PR 模板和依赖更新配置；实际远程运行结果另行记录，工作流文件不等于 CI 已通过。制品流程见[发行说明](docs/release-artifacts.md)。
 
 项目自有源码采用 Apache-2.0，见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 和[许可决策](docs/adr/0061-project-license.md)。发行时保留第三方原始许可与来源清单。
 上游代码引入时保留原始许可证、NOTICE、来源提交和修改记录；当前尚未复制上游业务源码。
