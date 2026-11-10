@@ -26,12 +26,25 @@ STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg"})
 LOGIN_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>登录 Cloud Memory Hub</title>
-<style>body{font:16px system-ui;background:#f5f7fa;color:#162b38;margin:0}
-main{max-width:380px;margin:15vh auto;padding:32px;background:white;border-radius:16px}
-input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:12px;font:inherit}
-button{background:#126b65;color:white;border:0;border-radius:8px}p{line-height:1.7}
-[role=alert]{color:#9b2424}</style>
-<main><h1>Cloud Memory Hub</h1><p>输入初始化时生成的管理员凭证，进入记忆管理。</p>
+<style>:root{color-scheme:dark}*{box-sizing:border-box}
+body{font:15px system-ui,-apple-system,'PingFang SC',sans-serif;color:#f3f4fc;margin:0;
+min-height:100svh;display:grid;place-items:center;padding:32px 16px;background:
+radial-gradient(ellipse at 62% 30%,#3b326444,transparent 54%),
+radial-gradient(ellipse at 23% 78%,#23345655,transparent 50%),#0c1020}
+main{width:min(100%,420px);padding:38px 34px;background:linear-gradient(145deg,#222840e8,#161a2de8);
+border:1px solid #a0a6dc30;border-radius:22px;box-shadow:0 30px 100px #03061088}
+.brand{display:block;color:#c5b1ff;font-size:60px;line-height:1;margin-bottom:20px;
+text-shadow:0 0 30px #9880ff66}h1{font-size:25px;letter-spacing:-.025em;margin:0 0 12px}
+input,button{width:100%;padding:13px 15px;margin-top:12px;font:inherit;border-radius:10px}
+input{background:#0e1426;border:1px solid #a0a6dc44;color:#f3f4fc}
+button{background:linear-gradient(110deg,#7775dc,#a18be6);color:white;border:1px solid #c7baff66;
+font-weight:600;cursor:pointer;margin-top:22px;box-shadow:0 4px 22px #8670df33}
+button:hover{filter:brightness(1.1)}input:focus-visible,button:focus-visible
+{outline:2px solid #c5afff;outline-offset:3px}p{line-height:1.75;color:#b4b8d0;margin-bottom:26px}
+label{font-weight:600}[role=alert]{color:#ffb0bd;background:#f28f9f12;border:1px solid #f28f9f40;
+padding:12px;border-radius:10px}@media(max-width:420px){main{padding:30px 24px}}</style>
+<main><span class="brand" aria-hidden="true">∞</span><h1>Cloud Memory Hub</h1>
+<p>欢迎回来。输入初始化时生成的管理员凭证，进入你的共享记忆中枢。</p>
 {{error}}
 <form method="post" action="/hub/login"><label for="credential">管理员凭证</label>
 <input id="credential" name="credential" type="password" autocomplete="current-password"

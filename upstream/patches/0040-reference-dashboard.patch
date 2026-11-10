@@ -1,0 +1,3894 @@
+diff --git a/memhub/apps/web/src/HubConsole.test.tsx b/memhub/apps/web/src/HubConsole.test.tsx
+index b186121..60e827d 100644
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -66,6 +66,8 @@ function page(scope: string, operation: string, extra = {}) {
+ function handler(url: string, init?: RequestInit): Promise<Response> {
+   if (url.includes("bootstrap"))
+     return Promise.resolve(Response.json(bootstrap));
++  if (url.endsWith("/devices"))
++    return Promise.resolve(Response.json({ devices: [] }));
+   const body = JSON.parse(String(init?.body));
+   if (url.endsWith("summary"))
+     return Promise.resolve(
+@@ -426,6 +428,9 @@ it("refreshes the same project library only after a confirmed forget result", as
+   });
+   render(<HubConsole />);
+   await select();
++  const initialActivityReads = fetcher.mock.calls.filter(([url]) =>
++    String(url).endsWith("history-list"),
++  ).length;
+   await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
+   await userEvent.click(
+     await screen.findByRole("button", { name: "project-a 的合成内容" }),
+@@ -464,7 +469,7 @@ it("refreshes the same project library only after a confirmed forget result", as
+   );
+   expect(
+     fetcher.mock.calls.filter(([url]) => String(url).endsWith("history-list")),
+-  ).toHaveLength(0);
++  ).toHaveLength(initialActivityReads);
+   await select("project-b");
+   expect(
+     screen.queryByRole("button", { name: "查看保留的来源原文" }),
+@@ -768,3 +773,25 @@ it("reports an unavailable source without treating its reference as absent", asy
+   expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+   expect(screen.getByRole("button", { name: "查看来源原文" })).toBeTruthy();
+ });
++
++it("makes the collapsed mobile sidebar inert and restores the menu focus on Escape", async () => {
++  vi.stubGlobal(
++    "matchMedia",
++    vi.fn(() => ({
++      matches: true,
++      addEventListener: vi.fn(),
++      removeEventListener: vi.fn(),
++    })),
++  );
++  render(<HubConsole />);
++  await screen.findByText("选择要查看的项目");
++  const sidebar = document.getElementById("hub-sidebar");
++  expect(sidebar?.hasAttribute("inert")).toBe(true);
++  await userEvent.click(screen.getByRole("button", { name: "展开导航" }));
++  expect(sidebar?.hasAttribute("inert")).toBe(false);
++  await userEvent.keyboard("{Escape}");
++  expect(sidebar?.hasAttribute("inert")).toBe(true);
++  expect(document.activeElement).toBe(
++    screen.getByRole("button", { name: "展开导航" }),
++  );
++});
+diff --git a/memhub/apps/web/src/HubConsole.tsx b/memhub/apps/web/src/HubConsole.tsx
+index 1bb64e5..e978281 100644
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -1,14 +1,29 @@
+-import { useEffect, useMemo, useState } from "react";
++import {
++  ArrowUpRight,
++  Bot,
++  ChevronDown,
++  Database,
++  Infinity as InfinityIcon,
++  LayoutDashboard,
++  LogOut,
++  Menu,
++  MessagesSquare,
++  RefreshCw,
++  Server,
++  Settings2,
++  ShieldCheck,
++  Sparkles,
++  X,
++} from "lucide-react";
++import { useEffect, useMemo, useRef, useState } from "react";
+ import { HubConnections } from "./HubConnections";
+ import { HubProvider, useHub } from "./HubContext";
++import { HubDashboard } from "./HubDashboard";
+ import { HubGovernance } from "./HubGovernance";
+ import { HubQuestion } from "./HubQuestion";
+ import {
+-  getHubSummary,
+   type HubItem,
+-  type HubPage,
+   type HubProject,
+-  type HubSummary,
+   hubErrorMessage,
+   readHub,
+ } from "./hub-api";
+@@ -68,123 +83,279 @@ function Console() {
+     error,
+   } = useHub();
+   const [view, setView] = useState<View>("home");
++  const [menuOpen, setMenuOpen] = useState(false);
++  const [compact, setCompact] = useState(
++    () => window.matchMedia?.("(max-width: 760px)").matches ?? false,
++  );
++  const sidebar = useRef<HTMLElement>(null);
++  const menuToggle = useRef<HTMLButtonElement>(null);
++  useEffect(() => {
++    const media = window.matchMedia?.("(max-width: 760px)");
++    if (!media) return;
++    const update = () => {
++      setCompact(media.matches);
++      if (!media.matches) setMenuOpen(false);
++    };
++    media.addEventListener("change", update);
++    return () => media.removeEventListener("change", update);
++  }, []);
++  useEffect(() => {
++    if (!menuOpen || !compact) return;
++    sidebar.current
++      ?.querySelector<HTMLButtonElement>('button[aria-current="page"]')
++      ?.focus();
++    function closeOnEscape(event: KeyboardEvent) {
++      if (event.key === "Escape") {
++        setMenuOpen(false);
++        menuToggle.current?.focus();
++      }
++    }
++    document.addEventListener("keydown", closeOnEscape);
++    return () => document.removeEventListener("keydown", closeOnEscape);
++  }, [menuOpen, compact]);
++  const icons = {
++    home: LayoutDashboard,
++    library: Database,
++    history: MessagesSquare,
++    ask: Sparkles,
++    connections: Bot,
++    settings: Settings2,
++  };
+   useEffect(() => {
+     document.title = "Cloud Memory Hub";
+   }, []);
++  function navigate(next: View) {
++    setView(next);
++    setMenuOpen(false);
++  }
+   return (
+-    <div className="hub-console">
++    <div className={`hub-console${menuOpen ? " hub-console--menu-open" : ""}`}>
+       <a className="skip-link" href="#main-content">
+         跳到主要内容
+       </a>
+-      <header className="hub-header">
+-        <div>
+-          <strong>Cloud Memory Hub</strong>
+-          <p>NAS 上的共享记忆</p>
+-        </div>
+-        <a
+-          href="/api/v1/ui/session/logout"
+-          onClick={(event) => {
+-            event.preventDefault();
+-            void fetch("/api/v1/ui/session/logout", {
+-              method: "POST",
+-              credentials: "same-origin",
+-            }).then((response) => {
+-              if (response.ok) window.location.assign("/hub/login");
+-            });
+-          }}
++      {menuOpen ? (
++        <button
++          className="hub-sidebar-scrim"
++          type="button"
++          aria-label="关闭导航"
++          onClick={() => setMenuOpen(false)}
++        />
++      ) : null}
++      <aside
++        id="hub-sidebar"
++        ref={sidebar}
++        className="hub-sidebar"
++        aria-label="Cloud Memory Hub 导航"
++        inert={compact && !menuOpen}
++      >
++        <button
++          className="hub-brand"
++          type="button"
++          onClick={() => navigate("home")}
++          aria-label="Cloud Memory Hub 首页"
+         >
+-          退出登录
+-        </a>
+-      </header>
+-      <div className="hub-project-select">
+-        <label>
+-          当前项目{" "}
+-          <select
+-            aria-label="当前项目"
+-            value={project?.scope_id ?? ""}
+-            onChange={(event) => select(event.target.value)}
++          <InfinityIcon size={48} strokeWidth={2.4} />
++          <span>
++            <strong>MemoryHub</strong>
++            <small>多 Agent 记忆协同平台</small>
++          </span>
++        </button>
++        <nav className="hub-navigation" aria-label="主要导航">
++          {views.map(([id, label]) => {
++            const Icon = icons[id];
++            return (
++              <button
++                key={id}
++                className={`hub-nav-item${view === id ? " is-active" : ""}`}
++                type="button"
++                aria-current={view === id ? "page" : undefined}
++                aria-label={label}
++                onClick={() => navigate(id)}
++              >
++                <Icon size={22} strokeWidth={1.6} />
++                <span>{id === "home" ? "总览" : label}</span>
++              </button>
++            );
++          })}
++        </nav>
++        <div className="hub-sidebar-bottom">
++          <section className="hub-nas-card" aria-label="当前记忆服务">
++            <div className="hub-nas-title">
++              <Server size={39} strokeWidth={1.2} />
++              <div>
++                <strong>NAS 记忆中枢</strong>
++                <span>
++                  <i className="hub-status-dot" /> 管理服务已连接
++                </span>
++              </div>
++            </div>
++            <dl>
++              <div>
++                <dt>当前范围</dt>
++                <dd>{project?.display_name ?? "尚未选择项目"}</dd>
++              </div>
++              <div>
++                <dt>服务版本</dt>
++                <dd>{bootstrap.version ?? "尚未提供"}</dd>
++              </div>
++              <div>
++                <dt>存储方式</dt>
++                <dd>你的私有 NAS</dd>
++              </div>
++            </dl>
++          </section>
++          <a
++            className="hub-sidebar-help"
++            href="https://github.com/Tsou92/Cloud-Memory-Hub#readme"
++            target="_blank"
++            rel="noreferrer"
+           >
+-            <option value="">请选择一个项目</option>
+-            {bootstrap.projects.map((row) => (
+-              <option key={row.scope_id} value={row.scope_id}>
+-                {row.display_name}
+-              </option>
+-            ))}
+-            <option value="global">全局偏好（独立范围）</option>
+-          </select>
+-        </label>
+-        <R6Button variant="quiet" disabled={loading} onClick={refresh}>
+-          刷新项目
+-        </R6Button>
+-        {bootstrap.next_offset !== null && (
+-          <R6Button disabled={loading} onClick={moreProjects}>
+-            更多项目
+-          </R6Button>
+-        )}
+-        {error && <p role="alert">{error}</p>}
+-      </div>
+-      <nav className="hub-navigation" aria-label="主要导航">
+-        {views.map(([id, label]) => (
+-          <R6Button
+-            key={id}
+-            variant={view === id ? "primary" : "quiet"}
+-            aria-current={view === id ? "page" : undefined}
+-            onClick={() => setView(id)}
++            使用文档 <ArrowUpRight size={15} />
++          </a>
++        </div>
++      </aside>
++      <div className="hub-workspace">
++        <header className="hub-topbar">
++          <button
++            ref={menuToggle}
++            aria-controls="hub-sidebar"
++            className="hub-menu-toggle"
++            type="button"
++            aria-label={menuOpen ? "收起导航" : "展开导航"}
++            aria-expanded={menuOpen}
++            onClick={() => setMenuOpen(!menuOpen)}
+           >
+-            {label}
+-          </R6Button>
+-        ))}
+-      </nav>
+-      <main id="main-content" className="hub-content">
+-        {view === "connections" ? (
+-          <HubConnections
+-            key={bootstrap.instance_id}
+-            instance={bootstrap.instance_id}
+-            project={project}
+-            onCreated={addProject}
+-            onRefreshProjects={refresh}
+-          />
+-        ) : view === "settings" ? (
+-          <R6Settings
+-            onDiagnostics={() => {}}
+-            hub={{
+-              version: bootstrap.version,
+-              revision: bootstrap.build_revision,
+-            }}
+-          />
+-        ) : project ? (
+-          <ProjectContent
+-            key={`${bootstrap.instance_id}:${project.scope_id}:${view}`}
+-            view={view}
+-            project={project}
+-            onNavigate={setView}
+-          />
+-        ) : (
+-          <section className="hub-card">
+-            <h1>
+-              {bootstrap.projects.length ? "选择要查看的项目" : "还没有项目"}
+-            </h1>
+-            <p>
+-              项目是一件工作共用的记忆空间，例如“工作计划”或“学习笔记”。不同设备选择同一个项目，就能共享其中的内容。
++            {menuOpen ? <X size={22} /> : <Menu size={22} />}
++          </button>
++          <div className="hub-topbar-status">
++            <span className="hub-status-pill">
++              <i className="hub-status-dot" /> 服务已连接
++            </span>
++            <span className="hub-version-pill">
++              NAS · {bootstrap.version ?? "Cloud Memory Hub"}
++            </span>
++          </div>
++          <div className="hub-topbar-actions">
++            <label className="hub-project-select">
++              <span className="hub-sr-only">当前项目</span>
++              <select
++                aria-label="当前项目"
++                value={project?.scope_id ?? ""}
++                onChange={(event) => select(event.target.value)}
++              >
++                <option value="">请选择一个项目</option>
++                {bootstrap.projects.map((row) => (
++                  <option key={row.scope_id} value={row.scope_id}>
++                    {row.display_name}
++                  </option>
++                ))}
++                <option value="global">全局偏好（独立范围）</option>
++              </select>
++              <ChevronDown size={14} aria-hidden="true" />
++            </label>
++            <button
++              className="hub-icon-button"
++              type="button"
++              aria-label="刷新项目"
++              title="刷新项目"
++              disabled={loading}
++              onClick={refresh}
++            >
++              <RefreshCw size={18} />
++            </button>
++            <span className="hub-topbar-divider" />
++            <span className="hub-admin">
++              <span className="hub-avatar">
++                <Sparkles size={17} />
++              </span>
++              <span>管理员</span>
++            </span>
++            <a
++              className="hub-icon-button"
++              aria-label="退出登录"
++              title="退出登录"
++              href="/api/v1/ui/session/logout"
++              onClick={(event) => {
++                event.preventDefault();
++                void fetch("/api/v1/ui/session/logout", {
++                  method: "POST",
++                  credentials: "same-origin",
++                }).then((response) => {
++                  if (response.ok) window.location.assign("/hub/login");
++                });
++              }}
++            >
++              <LogOut size={18} />
++            </a>
++          </div>
++        </header>
++        <main id="main-content" className="hub-content">
++          {error ? (
++            <p role="alert" className="hub-shell-error">
++              {error}
+             </p>
+-            {bootstrap.projects.length > 0 ? (
+-              <p>你已经有项目了。请在上方“当前项目”中选择它，无需重新创建。</p>
+-            ) : (
+-              <p>先给要共享的事情起个名字，再按下面的步骤连接设备。</p>
+-            )}
+-            <GettingStarted
+-              hasProjects={bootstrap.projects.length > 0}
+-              onNavigate={setView}
++          ) : null}
++          {bootstrap.next_offset !== null ? (
++            <R6Button disabled={loading} onClick={moreProjects}>
++              更多项目
++            </R6Button>
++          ) : null}
++          {view === "connections" ? (
++            <HubConnections
++              key={bootstrap.instance_id}
++              instance={bootstrap.instance_id}
++              project={project}
++              onCreated={addProject}
++              onRefreshProjects={refresh}
++            />
++          ) : view === "settings" ? (
++            <R6Settings
++              onDiagnostics={() => {}}
++              hub={{
++                version: bootstrap.version,
++                revision: bootstrap.build_revision,
++              }}
+             />
+-            <details>
+-              <summary>“全局偏好”是什么？</summary>
++          ) : project ? (
++            <ProjectContent
++              key={`${bootstrap.instance_id}:${project.scope_id}:${view}`}
++              view={view}
++              project={project}
++              onNavigate={navigate}
++            />
++          ) : (
++            <section className="hub-card hub-welcome">
++              <div className="hub-welcome-icon">
++                <ShieldCheck size={34} />
++              </div>
++              <span className="hub-eyebrow">你的共享记忆，从这里开始</span>
++              <h1>
++                {bootstrap.projects.length ? "选择要查看的项目" : "还没有项目"}
++              </h1>
+               <p>
+-                用于不属于单个项目的通用偏好；它不会合并或展示所有项目的内容。
++                项目是一件工作共用的记忆空间，例如“工作计划”或“学习笔记”。不同设备选择同一个项目，就能共享其中的内容。
+               </p>
+-            </details>
+-          </section>
+-        )}
+-      </main>
++              {bootstrap.projects.length > 0 ? (
++                <p>
++                  你已经有项目了。请在上方“当前项目”中选择它，无需重新创建。
++                </p>
++              ) : (
++                <p>先给要共享的事情起个名字，再按下面的步骤连接设备。</p>
++              )}
++              <GettingStarted
++                hasProjects={bootstrap.projects.length > 0}
++                onNavigate={navigate}
++              />
++              <details>
++                <summary>“全局偏好”是什么？</summary>
++                <p>
++                  用于不属于单个项目的通用偏好；它不会合并或展示所有项目的内容。
++                </p>
++              </details>
++            </section>
++          )}
++        </main>
++      </div>
+     </div>
+   );
+ }
+@@ -288,7 +459,7 @@ function ProjectContent({
+   );
+   return (
+     <>
+-      <h1>{project.display_name}</h1>
++      {view !== "home" ? <h1>{project.display_name}</h1> : null}
+       {notice && <p role="status">{notice}</p>}
+       {retainedSources.length > 0 && (
+         <aside aria-label="忘记后保留的来源" className="hub-first-memory">
+@@ -310,10 +481,11 @@ function ProjectContent({
+         </aside>
+       )}
+       {view === "home" && (
+-        <HubHome
++        <HubDashboard
+           key={refreshVersion}
+           project={project}
+           onNavigate={onNavigate}
++          firstMemoryGuide={<FirstSharedMemory onNavigate={onNavigate} />}
+         />
+       )}
+       {view === "library" && (
+@@ -393,150 +565,6 @@ function ProjectContent({
+     </>
+   );
+ }
+-function HubHome({
+-  project,
+-  onNavigate,
+-}: {
+-  project: HubProject;
+-  onNavigate(view: View): void;
+-}) {
+-  const { bootstrap } = useHub();
+-  const [summary, setSummary] = useState<HubSummary | null>(null);
+-  const [page, setPage] = useState<HubPage | null>(null);
+-  const [error, setError] = useState("");
+-  const [memoryError, setMemoryError] = useState("");
+-  const [offset, setOffset] = useState(0);
+-  const [revision, setRevision] = useState(0);
+-  useEffect(() => {
+-    void revision; // Explicit refresh reloads both project panels.
+-    const controller = new AbortController();
+-    setSummary(null);
+-    setPage(null);
+-    setError("");
+-    setMemoryError("");
+-    void getHubSummary(
+-      bootstrap.instance_id,
+-      project.scope_id,
+-      offset,
+-      controller.signal,
+-    ).then(
+-      (value) => {
+-        if (!controller.signal.aborted) setSummary(value);
+-      },
+-      (reason) => {
+-        if (!controller.signal.aborted) setError(hubErrorMessage(reason));
+-      },
+-    );
+-    void readHub(
+-      bootstrap.instance_id,
+-      project.scope_id,
+-      "memory-list",
+-      { limit: 3, offset: 0 },
+-      controller.signal,
+-    ).then(
+-      (value) => {
+-        if (!controller.signal.aborted) setPage(value);
+-      },
+-      (reason) => {
+-        if (!controller.signal.aborted) setMemoryError(hubErrorMessage(reason));
+-      },
+-    );
+-    return () => controller.abort();
+-  }, [bootstrap.instance_id, project, offset, revision]);
+-  return (
+-    <div className="hub-overview">
+-      <section className="hub-card">
+-        <h2>项目记忆</h2>
+-        {memoryError ? (
+-          <p role="alert">{memoryError}</p>
+-        ) : page ? (
+-          <>
+-            <p>已加载 {page.items.length} 条记忆预览 · 总数尚未统计</p>
+-            <ul>
+-              {page.items.map((item) => (
+-                <li key={item.record_id}>{item.content}</li>
+-              ))}
+-            </ul>
+-            {!page.items.length &&
+-              (page.next_offset !== null ? (
+-                <p>本批内容已被过滤，请在记忆库继续翻页。</p>
+-              ) : (
+-                <>
+-                  <p>当前项目尚无可显示的记忆。</p>
+-                  <FirstSharedMemory onNavigate={onNavigate} />
+-                </>
+-              ))}
+-          </>
+-        ) : (
+-          <p role="status">正在读取记忆…</p>
+-        )}
+-      </section>
+-      <section className="hub-card">
+-        <h2>此项目的设备与来源</h2>
+-        <p>
+-          这里只显示来源登记状态，不表示设备在线或本地队列已同步。访问权限可在项目与设备接入中核对。
+-        </p>
+-        {error ? (
+-          <p role="alert">{error}</p>
+-        ) : summary ? (
+-          <>
+-            <p>
+-              本页 {summary.sources.length} 个来源 · 共 {summary.sources_total}{" "}
+-              个
+-            </p>
+-            <ul>
+-              {summary.sources.map((source) => (
+-                <li key={source.source_id}>
+-                  <strong>{source.device_display_name}</strong> ·{" "}
+-                  {source.display_name} · {source.adapter_id}
+-                  <span>
+-                    {" "}
+-                    ·{" "}
+-                    {source.status === "active" &&
+-                    source.device_status === "active"
+-                      ? "已登记（访问权限见项目与设备接入）"
+-                      : "已停用"}
+-                  </span>
+-                </li>
+-              ))}
+-            </ul>
+-            {!summary.sources.length && (
+-              <>
+-                <p>
+-                  还没有为这个项目连接设备。先为第一台设备生成一次性链接，再按页面指引连接
+-                  Agent。
+-                </p>
+-                <R6Button onClick={() => onNavigate("connections")}>
+-                  连接第一台设备
+-                </R6Button>
+-              </>
+-            )}
+-            <nav aria-label="设备来源分页">
+-              <R6Button
+-                disabled={offset === 0}
+-                onClick={() => setOffset(Math.max(0, offset - 10))}
+-              >
+-                上一页
+-              </R6Button>
+-              <R6Button
+-                disabled={summary.next_offset === null}
+-                onClick={() => setOffset(summary.next_offset ?? offset)}
+-              >
+-                下一页
+-              </R6Button>
+-            </nav>
+-          </>
+-        ) : (
+-          <p role="status">正在读取设备…</p>
+-        )}
+-      </section>
+-      <R6Button variant="quiet" onClick={() => setRevision((v) => v + 1)}>
+-        刷新当前项目
+-      </R6Button>
+-    </div>
+-  );
+-}
+-
+ // FR-01/02/05/12: navigation guidance, never a claim that setup or sharing passed.
+ function GettingStarted({
+   hasProjects,
+diff --git a/memhub/apps/web/src/HubDashboard.test.tsx b/memhub/apps/web/src/HubDashboard.test.tsx
+new file mode 100644
+index 0000000..732b50d
+--- /dev/null
++++ b/memhub/apps/web/src/HubDashboard.test.tsx
+@@ -0,0 +1,170 @@
++// @vitest-environment jsdom
++import {
++  cleanup,
++  render,
++  screen,
++  waitFor,
++  within,
++} from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { HubDashboard } from "./HubDashboard";
++import { getHubDashboard, HubError, readHub } from "./hub-api";
++import { BackupControlError, getBackupStatus } from "./hub-backups";
++import { getAllHubSources } from "./hub-dashboard";
++import { getDevices } from "./hub-pairing";
++
++vi.mock("./HubContext", () => ({
++  useHub: () => ({
++    bootstrap: {
++      instance_id: "instance",
++      version: "0.1.2",
++      features: ["scoped_console_reads"],
++    },
++  }),
++}));
++vi.mock("./hub-api", async (original) => ({
++  ...(await original<typeof import("./hub-api")>()),
++  getHubDashboard: vi.fn(),
++  readHub: vi.fn(),
++}));
++vi.mock("./hub-dashboard", async (original) => ({
++  ...(await original<typeof import("./hub-dashboard")>()),
++  getAllHubSources: vi.fn(),
++}));
++vi.mock("./hub-pairing", () => ({ getDevices: vi.fn() }));
++vi.mock("./hub-backups", async (original) => ({
++  ...(await original<typeof import("./hub-backups")>()),
++  getBackupStatus: vi.fn(),
++}));
++const data = {
++  schema_version: 1 as const,
++  instance_id: "instance",
++  scope_id: "scope",
++  generated_at: "2026-11-10T00:00:00Z",
++  statistics: {
++    device_connections: 2,
++    agent_connections: 3,
++    shared_records: 120,
++    handoffs: 4,
++  },
++  record_types: [
++    { kind: "conversation" as const, label: "对话", count: 116 },
++    { kind: "remember" as const, label: "记忆", count: 0 },
++    { kind: "handoff" as const, label: "交接", count: 4 },
++    { kind: "other" as const, label: "其他", count: 0 },
++  ],
++  daily_activity: Array.from({ length: 7 }, (_, index) => ({
++    date: `2026-11-${String(index + 4).padStart(2, "0")}`,
++    count: index,
++  })),
++  activity_timezone: "UTC" as const,
++  activity_state: "ready" as const,
++  missing_timestamps: 0,
++};
++beforeEach(() => {
++  vi.mocked(getHubDashboard).mockResolvedValue(data);
++  vi.mocked(getAllHubSources).mockResolvedValue([]);
++  vi.mocked(getDevices).mockResolvedValue([]);
++  vi.mocked(readHub).mockResolvedValue({
++    items: [],
++    next_offset: null,
++    candidate_limit_reached: false,
++  });
++  vi.mocked(getBackupStatus).mockRejectedValue(new Error("unavailable"));
++});
++afterEach(() => {
++  cleanup();
++  vi.resetAllMocks();
++});
++const show = () =>
++  render(
++    <HubDashboard
++      project={{ scope_id: "scope", display_name: "合成项目" }}
++      onNavigate={vi.fn()}
++      firstMemoryGuide={<p>真实空项目引导</p>}
++    />,
++  );
++it("displays confirmed metrics and retains them with an explicit refresh failure", async () => {
++  show();
++  await within(screen.getByRole("region", { name: "共享记录" })).findByText(
++    "120",
++  );
++  expect(
++    within(screen.getByRole("region", { name: "Agent 连接" })).getByText("3"),
++  ).toBeTruthy();
++  expect(
++    screen.getByRole("figure", { name: "Agent 协作网络：0 个有效连接" }),
++  ).toBeTruthy();
++  vi.mocked(getHubDashboard).mockRejectedValueOnce(
++    new HubError("统计服务暂时不可用"),
++  );
++  await userEvent.click(screen.getByRole("button", { name: "刷新总览" }));
++  await screen.findByText(/正在显示上次确认的数据/);
++  expect(
++    within(screen.getByRole("region", { name: "共享记录" })).getByText("120"),
++  ).toBeTruthy();
++});
++it("uses unavailable states rather than zero metrics on an initial failure", async () => {
++  vi.mocked(getHubDashboard).mockRejectedValue(
++    new HubError("统计服务暂时不可用"),
++  );
++  show();
++  await screen.findByText(/统计暂时不可用/);
++  expect(
++    within(screen.getByRole("region", { name: "共享记录" })).getByText("—"),
++  ).toBeTruthy();
++  expect(screen.queryByRole("img", { name: /最近七天共享记录/ })).toBeNull();
++});
++it("does not mistake a filtered empty page for an empty project", async () => {
++  vi.mocked(readHub).mockResolvedValue({
++    items: [],
++    next_offset: 10,
++    candidate_limit_reached: true,
++  });
++  show();
++  await screen.findByText("当前页没有可显示的活动");
++  expect(screen.queryByText("还没有共享记录")).toBeNull();
++  expect(screen.queryByText("真实空项目引导")).toBeNull();
++});
++it("aborts all requests when the selected project is removed", async () => {
++  const view = show();
++  await waitFor(() => expect(getHubDashboard).toHaveBeenCalled());
++  const signal = vi.mocked(getHubDashboard).mock.calls[0][2];
++  expect(signal?.aborted).toBe(false);
++  view.unmount();
++  expect(signal?.aborted).toBe(true);
++  expect(vi.mocked(getAllHubSources).mock.calls[0][2]).toBe(signal);
++  expect(vi.mocked(getDevices).mock.calls[0][0]).toBe(signal);
++  expect(vi.mocked(readHub).mock.calls[0][4]).toBe(signal);
++});
++
++it.each(["unavailable", "unauthorized"])(
++  "labels a completed backup as stale after a %s refresh failure",
++  async (code) => {
++    vi.mocked(getBackupStatus).mockResolvedValueOnce({
++      schedule: { schema_version: 1, enabled: false },
++      execution: { schema_version: 1, state: "completed" },
++      next_due_at: null,
++      pending_request: null,
++      supervisor_running: "not_checked",
++    });
++    show();
++    const completed = await screen.findByText("已完成");
++    expect(completed.classList.contains("is-confirmed")).toBe(true);
++    vi.mocked(getBackupStatus).mockRejectedValueOnce(
++      new BackupControlError(code),
++    );
++    await userEvent.click(screen.getByRole("button", { name: "刷新总览" }));
++    const stale = await screen.findByText("上次确认：已完成");
++    expect(stale.classList.contains("is-confirmed")).toBe(false);
++    expect(screen.queryByText("已完成")).toBeNull();
++    expect(
++      await screen.findByText(
++        code === "unauthorized"
++          ? "管理员登录已失效，请重新登录。"
++          : /暂时无法确认服务状态/,
++      ),
++    ).toBeTruthy();
++  },
++);
+diff --git a/memhub/apps/web/src/HubDashboard.tsx b/memhub/apps/web/src/HubDashboard.tsx
+new file mode 100644
+index 0000000..e2205c9
+--- /dev/null
++++ b/memhub/apps/web/src/HubDashboard.tsx
+@@ -0,0 +1,666 @@
++import {
++  ArrowRight,
++  ArrowUpRight,
++  Bot,
++  Check,
++  ChevronRight,
++  Clock3,
++  Database,
++  FileText,
++  HardDrive,
++  Infinity as InfinityIcon,
++  Layers3,
++  MessagesSquare,
++  Monitor,
++  Plus,
++  RefreshCw,
++  Server,
++  ShieldCheck,
++  Sparkles,
++} from "lucide-react";
++import { type ReactNode, useEffect, useId, useState } from "react";
++import { useHub } from "./HubContext";
++import { HubNetwork } from "./HubNetwork";
++import { historyDisplay } from "./history-display";
++import {
++  getHubDashboard,
++  type HubDashboardData,
++  type HubItem,
++  type HubPage,
++  type HubProject,
++  type HubSource,
++  hubErrorMessage,
++  readHub,
++} from "./hub-api";
++import {
++  type BackupStatus,
++  backupErrorMessage,
++  getBackupStatus,
++} from "./hub-backups";
++import { effectiveHubSources, getAllHubSources } from "./hub-dashboard";
++import { getDevices } from "./hub-pairing";
++
++type Navigate =
++  | "home"
++  | "library"
++  | "history"
++  | "ask"
++  | "settings"
++  | "connections";
++type Resource<T> = { data: T | null; error: string; loading: boolean };
++const empty = <T,>(): Resource<T> => ({ data: null, error: "", loading: true });
++const number = (value: number) => value.toLocaleString("zh-CN");
++
++export function HubDashboard({
++  project,
++  onNavigate,
++  firstMemoryGuide,
++}: {
++  project: HubProject;
++  onNavigate(view: Navigate): void;
++  firstMemoryGuide: ReactNode;
++}) {
++  const { bootstrap } = useHub();
++  const [revision, setRevision] = useState(0);
++  const [dashboard, setDashboard] = useState<Resource<HubDashboardData>>(empty);
++  const [sources, setSources] = useState<Resource<HubSource[]>>(empty);
++  const [activity, setActivity] = useState<Resource<HubPage>>(empty);
++  const [memories, setMemories] = useState<Resource<HubPage>>(empty);
++  const [backups, setBackups] = useState<Resource<BackupStatus>>(empty);
++  const instance = bootstrap.instance_id;
++  const scope = project.scope_id;
++  useEffect(() => {
++    void revision;
++    const controller = new AbortController();
++    const signal = controller.signal;
++    function load<T>(
++      promise: Promise<T>,
++      update: React.Dispatch<React.SetStateAction<Resource<T>>>,
++      errorMessage: (reason: unknown) => string = hubErrorMessage,
++    ) {
++      update((old) => ({ ...old, loading: true, error: "" }));
++      void promise.then(
++        (data) => {
++          if (!signal.aborted) update({ data, error: "", loading: false });
++        },
++        (reason) => {
++          if (!signal.aborted)
++            update((old) => ({
++              ...old,
++              error: errorMessage(reason),
++              loading: false,
++            }));
++        },
++      );
++    }
++    load(getHubDashboard(instance, scope, signal), setDashboard);
++    load(
++      Promise.all([
++        getAllHubSources(instance, scope, signal),
++        getDevices(signal),
++      ]).then(([rows, devices]) => effectiveHubSources(rows, devices, scope)),
++      setSources,
++    );
++    load(
++      readHub(instance, scope, "history-list", { limit: 5, offset: 0 }, signal),
++      setActivity,
++    );
++    load(
++      readHub(instance, scope, "memory-list", { limit: 3, offset: 0 }, signal),
++      setMemories,
++    );
++    load(getBackupStatus(signal), setBackups, backupErrorMessage);
++    return () => controller.abort();
++  }, [instance, scope, revision]);
++  const stats = dashboard.data?.statistics;
++  const backupState = backups.data
++    ? {
++        not_run: "尚未执行",
++        running: "执行中",
++        completed: "已完成",
++        failed: "失败",
++        interrupted: "已中断",
++      }[backups.data.execution.state]
++    : null;
++  const emptyMemories =
++    memories.data?.items.length === 0 &&
++    memories.data.next_offset === null &&
++    !memories.data.candidate_limit_reached &&
++    !memories.error;
++  const devices = new Map<string, { name: string; count: number }>();
++  for (const source of sources.data ?? []) {
++    const previous = devices.get(source.device_id);
++    devices.set(source.device_id, {
++      name: source.device_display_name,
++      count: (previous?.count ?? 0) + 1,
++    });
++  }
++  const metrics = [
++    {
++      title: "设备连接",
++      value: stats?.device_connections,
++      Icon: Monitor,
++      foot: "拥有当前范围有效来源的设备",
++      color: "violet",
++    },
++    {
++      title: "Agent 连接",
++      value: stats?.agent_connections,
++      Icon: Bot,
++      foot: "当前项目有效授权的来源",
++      color: "blue",
++    },
++    {
++      title: "共享记录",
++      value: stats?.shared_records,
++      Icon: Database,
++      foot: "当前范围可见的接纳记录",
++      color: "lilac",
++    },
++    {
++      title: "任务交接",
++      value: stats?.handoffs,
++      Icon: MessagesSquare,
++      foot: "跨设备接续的交接记录",
++      color: "pink",
++    },
++  ];
++  return (
++    <div className="hub-dashboard">
++      <div className="hub-dashboard-heading">
++        <div>
++          <h1>多设备 · 多 Agent · 共享记忆 · 接续会话</h1>
++          <p>在 NAS 上构建你的个人 AI 记忆中枢</p>
++        </div>
++        <button
++          type="button"
++          className="hub-icon-button"
++          title="刷新总览"
++          aria-label="刷新总览"
++          onClick={() => setRevision((value) => value + 1)}
++          disabled={dashboard.loading}
++        >
++          <RefreshCw size={18} />
++        </button>
++      </div>
++      {dashboard.error ? (
++        <p className="hub-data-notice" role="status">
++          {dashboard.error}
++          {dashboard.data ? " 正在显示上次确认的数据。" : " 统计暂时不可用。"}
++        </p>
++      ) : null}
++      <div className="hub-metrics">
++        {metrics.map(({ title, value, Icon, foot, color }) => (
++          <section
++            className={`hub-metric hub-metric--${color}`}
++            key={title}
++            aria-label={title}
++          >
++            <span className="hub-metric-icon">
++              <Icon size={32} strokeWidth={1.5} />
++            </span>
++            <div>
++              <p>{title}</p>
++              <strong>{value === undefined ? "—" : number(value)}</strong>
++              <small>{foot}</small>
++            </div>
++          </section>
++        ))}
++      </div>
++      <div className="hub-dashboard-middle">
++        <section className="hub-card hub-device-card">
++          <CardHeading
++            title="设备概览"
++            onClick={() => onNavigate("connections")}
++          />
++          <div className="hub-device-list">
++            {sources.data ? (
++              [...devices].map(([id, device]) => (
++                <div className="hub-device" key={id}>
++                  <span className="hub-device-icon">
++                    <Monitor size={31} strokeWidth={1.4} />
++                  </span>
++                  <div className="hub-device-copy">
++                    <strong>{device.name}</strong>
++                    <span>{device.count} 个有效 Agent 来源</span>
++                  </div>
++                  <span className="hub-device-state">
++                    <i className="hub-status-dot" />
++                    已授权
++                  </span>
++                </div>
++              ))
++            ) : (
++              <p className="hub-empty-copy">
++                {sources.loading ? "正在核对设备授权…" : "设备连接暂时无法确认"}
++              </p>
++            )}
++            {sources.data?.length === 0 ? (
++              <p className="hub-empty-copy">
++                先为第一台设备生成一次性链接，建立当前项目的有效连接。
++              </p>
++            ) : null}
++          </div>
++          <button
++            className="hub-add-device"
++            type="button"
++            onClick={() => onNavigate("connections")}
++          >
++            <Plus size={17} />
++            {sources.data?.length ? "添加设备" : "连接第一台设备"}
++          </button>
++          <small className="hub-card-footnote">
++            已登记（访问权限见项目与设备接入）；不代表实时在线。
++          </small>
++        </section>
++        <section className="hub-card hub-network-card">
++          <CardHeading
++            title="Agent 协作网络"
++            badge={sources.data ? `${sources.data.length} 个连接` : undefined}
++          />
++          {sources.error ? (
++            <p className="hub-data-notice" role="status">
++              连接暂时无法确认。
++              {sources.data ? "显示上次确认的连接。" : "请刷新重试。"}
++            </p>
++          ) : null}
++          {sources.data ? (
++            <HubNetwork sources={sources.data} />
++          ) : (
++            <div className="hub-network-loading">
++              <InfinityIcon size={72} />
++              <p>
++                {sources.loading
++                  ? "正在加载当前项目的全部连接…"
++                  : "协作网络暂时不可用"}
++              </p>
++            </div>
++          )}
++        </section>
++        <section className="hub-card hub-activity-card">
++          <CardHeading
++            title="近期活动"
++            action="查看全部"
++            onClick={() => onNavigate("history")}
++          />
++          <div className="hub-activity-list">
++            {activity.data?.items.map((item) => (
++              <Activity
++                key={item.record_id}
++                item={item}
++                onClick={() => onNavigate("history")}
++              />
++            ))}
++            {!activity.data?.items.length ? (
++              <div className="hub-empty-state">
++                <Clock3 size={28} />
++                <p>
++                  {activity.loading
++                    ? "正在读取最近记录…"
++                    : activity.error
++                      ? "近期活动暂时不可用"
++                      : activity.data?.next_offset !== null ||
++                          activity.data?.candidate_limit_reached
++                        ? "当前页没有可显示的活动"
++                        : "还没有共享记录"}
++                </p>
++                <span>设备接入后，新的记录会出现在这里</span>
++              </div>
++            ) : null}
++          </div>
++          {activity.error && activity.data ? (
++            <small className="hub-data-notice">
++              近期活动未能刷新，显示上次确认的记录。
++            </small>
++          ) : null}
++        </section>
++      </div>
++      <div className="hub-dashboard-bottom">
++        <section className="hub-card hub-composition-card">
++          <CardHeading title="记录组成" badge="当前项目" />
++          <div className="hub-composition">
++            <div className="hub-memory-art" aria-hidden="true">
++              <span />
++              <span />
++              <span>
++                <InfinityIcon size={43} strokeWidth={1.4} />
++              </span>
++            </div>
++            <div className="hub-record-types">
++              {stats ? (
++                <p className="hub-composition-total">
++                  <strong>{number(stats.shared_records)}</strong>
++                  <span>条共享记录</span>
++                </p>
++              ) : null}
++              {dashboard.data?.record_types.map((row, index) => (
++                <div className="hub-record-type" key={row.kind}>
++                  <span>
++                    <i className={`hub-type-dot hub-type-dot--${index}`} />
++                    {row.label}
++                  </span>
++                  <strong>{number(row.count)}</strong>
++                </div>
++              )) ?? (
++                <p className="hub-empty-copy">
++                  {dashboard.loading ? "正在读取…" : "记录组成暂时不可用"}
++                </p>
++              )}
++            </div>
++          </div>
++          <div className="hub-composition-bar" aria-hidden="true">
++            {dashboard.data?.record_types.map((row, index) => (
++              <span
++                key={row.kind}
++                className={`hub-type-dot--${index}`}
++                style={{ flexGrow: row.count }}
++              />
++            ))}
++          </div>
++          <button
++            className="hub-card-link"
++            type="button"
++            onClick={() => onNavigate("history")}
++          >
++            查看共享记录 <ArrowRight size={15} />
++          </button>
++        </section>
++        <section className="hub-card hub-trend-card">
++          <CardHeading title="共享记录趋势" badge="最近 7 天 · UTC" />
++          {dashboard.data?.activity_state === "ready" ? (
++            <ActivityChart data={dashboard.data.daily_activity} />
++          ) : (
++            <div className="hub-empty-state">
++              <Layers3 size={28} />
++              <p>
++                {dashboard.loading
++                  ? "正在读取活动统计…"
++                  : "活动时间暂时无法确认"}
++              </p>
++              <span>
++                {dashboard.data?.missing_timestamps
++                  ? `${number(dashboard.data.missing_timestamps)} 条记录尚无可确认的接纳时间`
++                  : "暂不展示未经确认的趋势"}
++              </span>
++            </div>
++          )}
++          <small className="hub-card-footnote">
++            按记录实际接纳时间统计，不代表设备在线状态。
++          </small>
++        </section>
++        <section className="hub-card hub-service-card">
++          <CardHeading title="服务状态" />
++          <div className="hub-service-list">
++            <Service
++              Icon={Server}
++              title="Hub 管理服务"
++              value={`已连接 · ${bootstrap.version ?? "版本未提供"}`}
++              ready
++            />
++            <Service
++              Icon={ShieldCheck}
++              title="项目范围读取"
++              value={
++                bootstrap.features.includes("scoped_console_reads")
++                  ? "已启用"
++                  : "尚未提供"
++              }
++              ready={bootstrap.features.includes("scoped_console_reads")}
++            />
++            <Service
++              Icon={Database}
++              title="记录统计"
++              value={
++                dashboard.loading
++                  ? "读取中"
++                  : dashboard.error
++                    ? "暂时不可用"
++                    : "已确认"
++              }
++              ready={!!dashboard.data && !dashboard.loading && !dashboard.error}
++            />
++            <Service
++              Icon={HardDrive}
++              title="最近备份"
++              value={
++                backups.loading
++                  ? "读取中"
++                  : backups.error
++                    ? backupState
++                      ? `上次确认：${backupState}`
++                      : "暂时无法确认"
++                    : (backupState ?? "暂时无法确认")
++              }
++              ready={
++                !backups.loading &&
++                !backups.error &&
++                backups.data?.execution.state === "completed"
++              }
++            />
++          </div>
++          {backups.error ? (
++            <p className="hub-card-footnote" role="status">
++              {backups.error}
++            </p>
++          ) : null}
++          <button
++            className="hub-card-link"
++            type="button"
++            onClick={() => onNavigate("settings")}
++          >
++            管理模型与备份 <ArrowUpRight size={15} />
++          </button>
++        </section>
++      </div>
++      <details
++        className="hub-card hub-memory-peek"
++        open={emptyMemories ? true : undefined}
++      >
++        <summary>
++          <Database size={17} />
++          最新记忆预览 <ChevronRight size={16} />
++        </summary>
++        <p className="hub-card-footnote">
++          记忆库的 SDK
++          提炼条目总数尚未统计；上方共享记录为当前范围可见的接纳记录。
++        </p>
++        {memories.error ? <p role="alert">{memories.error}</p> : null}
++        {memories.data?.items.map((item) => (
++          <p key={item.record_id}>{item.content}</p>
++        ))}
++        {memories.data?.candidate_limit_reached ? (
++          <p>还有候选内容尚未检查，请到记忆库继续查看。</p>
++        ) : null}
++        {!memories.loading && emptyMemories ? (
++          <p>当前项目尚无可显示的记忆。</p>
++        ) : null}
++        <button
++          type="button"
++          className="hub-card-link"
++          onClick={() => onNavigate("library")}
++        >
++          打开记忆库 <ArrowRight size={15} />
++        </button>
++        {emptyMemories ? firstMemoryGuide : null}
++      </details>
++    </div>
++  );
++}
++function CardHeading({
++  title,
++  action,
++  badge,
++  onClick,
++}: {
++  title: string;
++  action?: string;
++  badge?: string;
++  onClick?: () => void;
++}) {
++  return (
++    <div className="hub-card-heading">
++      <h2>{title}</h2>
++      {onClick ? (
++        <button
++          type="button"
++          className="hub-card-action"
++          aria-label={action ? `${action}${title}` : `管理${title}`}
++          onClick={onClick}
++        >
++          {action}
++          <ChevronRight size={16} />
++        </button>
++      ) : badge ? (
++        <span className="hub-card-badge">{badge}</span>
++      ) : null}
++    </div>
++  );
++}
++function Activity({ item, onClick }: { item: HubItem; onClick(): void }) {
++  const display = historyDisplay({
++    raw_id: item.record_id,
++    content: item.content,
++    truncated: item.next_content_offset !== null,
++  });
++  const title =
++    display?.kind === "remember"
++      ? "保存共享记忆"
++      : display?.kind === "handoff"
++        ? "创建任务交接"
++        : display?.kind === "conversation"
++          ? "同步对话记录"
++          : "接纳共享记录";
++  const excerpt =
++    display?.kind === "remember"
++      ? display.text
++      : display?.kind === "handoff"
++        ? display.handoff.goal
++        : display?.kind === "conversation"
++          ? display.messages.at(-1)?.text
++          : (item.source ?? "查看原始记录");
++  const date =
++    item.memory_at === null
++      ? null
++      : new Date(
++          item.memory_at < 1e12 ? item.memory_at * 1000 : item.memory_at,
++        );
++  return (
++    <button className="hub-activity" type="button" onClick={onClick}>
++      <span
++        className={`hub-activity-icon hub-activity-icon--${display?.kind ?? "other"}`}
++      >
++        {display?.kind === "handoff" ? (
++          <MessagesSquare size={18} />
++        ) : display?.kind === "remember" ? (
++          <Sparkles size={18} />
++        ) : (
++          <FileText size={18} />
++        )}
++      </span>
++      <span className="hub-activity-copy">
++        <strong>{title}</strong>
++        <span>{excerpt}</span>
++      </span>
++      <small>
++        {date && Number.isFinite(date.getTime())
++          ? date.toLocaleDateString("zh-CN", {
++              month: "numeric",
++              day: "numeric",
++            })
++          : "时间未提供"}
++      </small>
++    </button>
++  );
++}
++function Service({
++  Icon,
++  title,
++  value,
++  ready,
++}: {
++  Icon: typeof Server;
++  title: string;
++  value: string;
++  ready: boolean;
++}) {
++  return (
++    <div className="hub-service">
++      <Icon size={19} strokeWidth={1.5} />
++      <span>{title}</span>
++      <strong className={ready ? "is-confirmed" : ""}>
++        {ready ? <Check size={13} /> : null}
++        {value}
++      </strong>
++    </div>
++  );
++}
++function ActivityChart({ data }: { data: HubDashboardData["daily_activity"] }) {
++  const id = useId().replace(/:/g, "");
++  const max = Math.max(2, ...data.map((day) => day.count));
++  const points = data.map((day, index) => [
++    42 + index * 57,
++    145 - (day.count / max) * 115,
++  ]);
++  const line = points
++    .map(([x, y], index) => `${index ? "L" : "M"} ${x} ${y}`)
++    .join(" ");
++  return (
++    <div className="hub-activity-chart">
++      <svg
++        viewBox="0 0 420 178"
++        role="img"
++        aria-label={`最近七天共享记录：${data.map((day) => `${day.date} ${day.count} 条`).join("，")}`}
++      >
++        <defs>
++          <linearGradient id={`${id}-fill`} x1="0" y1="0" x2="0" y2="1">
++            <stop stopColor="#a68df8" stopOpacity=".32" />
++            <stop offset="1" stopColor="#a68df8" stopOpacity="0" />
++          </linearGradient>
++        </defs>
++        {[0, 0.5, 1].map((ratio) => (
++          <g key={ratio}>
++            <line
++              x1="42"
++              x2="384"
++              y1={145 - ratio * 115}
++              y2={145 - ratio * 115}
++              stroke="#b5b4dd"
++              strokeOpacity=".1"
++              strokeDasharray="3 5"
++            />
++            <text x="30" y={149 - ratio * 115} textAnchor="end">
++              {Math.ceil(max * ratio)}
++            </text>
++          </g>
++        ))}
++        <path d={`${line} L 384 145 L 42 145 Z`} fill={`url(#${id}-fill)`} />
++        <path
++          d={line}
++          fill="none"
++          stroke="#b4a2ff"
++          strokeWidth="2.8"
++          strokeLinejoin="round"
++        />
++        {points.map(([x, y], index) => (
++          <g key={data[index].date}>
++            <circle
++              cx={x}
++              cy={y}
++              r="3.6"
++              fill="#d0bbff"
++              stroke="#8470c8"
++              strokeWidth="2"
++            >
++              <title>
++                {data[index].date}：{data[index].count} 条
++              </title>
++            </circle>
++            <text x={x} y="170" textAnchor="middle">
++              {data[index].date.slice(5).replace("-", "/")}
++            </text>
++          </g>
++        ))}
++      </svg>
++    </div>
++  );
++}
+diff --git a/memhub/apps/web/src/HubNetwork.test.tsx b/memhub/apps/web/src/HubNetwork.test.tsx
+new file mode 100644
+index 0000000..466a6a0
+--- /dev/null
++++ b/memhub/apps/web/src/HubNetwork.test.tsx
+@@ -0,0 +1,49 @@
++// @vitest-environment jsdom
++import { cleanup, render, screen } from "@testing-library/react";
++import { afterEach, expect, it } from "vitest";
++import { HubNetwork } from "./HubNetwork";
++import type { HubSource } from "./hub-api";
++
++const source = (index: number): HubSource => ({
++  source_id: `source-${index}`,
++  device_id: `device-${index}`,
++  scope_id: "scope",
++  display_name: `真实 Agent ${index}`,
++  adapter_id: "cloud-memory-hub.agent",
++  status: "active",
++  device_status: "active",
++  device_display_name: `合成设备 ${index}`,
++});
++afterEach(cleanup);
++it.each([0, 1, 4, 8, 30])(
++  "renders exactly %i real source nodes with an accessible complete inventory",
++  (count) => {
++    const sources = Array.from({ length: count }, (_, index) => source(index));
++    const { container } = render(<HubNetwork sources={sources} />);
++    expect(container.querySelectorAll("[data-source-id]")).toHaveLength(count);
++    expect(container.querySelectorAll("animateMotion")).toHaveLength(count);
++    expect(
++      screen.getByRole("figure", {
++        name: `Agent 协作网络：${count} 个有效连接`,
++      }),
++    ).toBeTruthy();
++    for (const entry of sources)
++      expect(
++        screen.getByText(
++          `${entry.device_display_name} · ${entry.display_name}`,
++          { selector: "li" },
++        ),
++      ).toBeTruthy();
++    if (count === 0) expect(screen.getByText(/连接第一个 Agent/)).toBeTruthy();
++  },
++);
++it("does not invent a brand from the generic adapter or duplicate a source", () => {
++  const { container } = render(<HubNetwork sources={[source(0), source(0)]} />);
++  expect(container.querySelectorAll("[data-source-id]")).toHaveLength(1);
++  expect(screen.queryByText("Claude Code")).toBeNull();
++  const duration = container
++    .querySelector("animateMotion")
++    ?.getAttribute("dur");
++  expect(Number.parseFloat(duration ?? "0")).toBeGreaterThanOrEqual(3);
++  expect(Number.parseFloat(duration ?? "0")).toBeLessThanOrEqual(5);
++});
+diff --git a/memhub/apps/web/src/HubNetwork.tsx b/memhub/apps/web/src/HubNetwork.tsx
+new file mode 100644
+index 0000000..819b31f
+--- /dev/null
++++ b/memhub/apps/web/src/HubNetwork.tsx
+@@ -0,0 +1,215 @@
++import { Bot, Infinity as InfinityIcon, Network } from "lucide-react";
++import { useId } from "react";
++import type { HubSource } from "./hub-api";
++
++export function HubNetwork({ sources }: { sources: HubSource[] }) {
++  const id = useId().replace(/:/g, "");
++  const nodes = [
++    ...new Map(sources.map((source) => [source.source_id, source])).values(),
++  ];
++  const rows = Math.ceil(nodes.length / 2);
++  const height = Math.max(320, rows * 108 + 48);
++  const center = { x: 380, y: height / 2 };
++  return (
++    <figure
++      className="hub-network"
++      aria-label={`Agent 协作网络：${nodes.length} 个有效连接`}
++    >
++      <div className="hub-network__canvas">
++        <svg
++          viewBox={`0 0 760 ${height}`}
++          role="img"
++          aria-label="当前项目的真实 Agent 连接与共享中枢"
++        >
++          <defs>
++            <radialGradient id={`${id}-orb`} cx="32%" cy="26%" r="78%">
++              <stop offset="0%" stopColor="#809dff" stopOpacity=".7" />
++              <stop offset="44%" stopColor="#3c3d91" stopOpacity=".66" />
++              <stop offset="80%" stopColor="#373361" stopOpacity=".8" />
++              <stop offset="100%" stopColor="#ba87ff" stopOpacity=".95" />
++            </radialGradient>
++            <linearGradient id={`${id}-edge`} x1="0" x2="1">
++              <stop stopColor="#78bdff" stopOpacity=".9" />
++              <stop offset=".5" stopColor="#887cf8" stopOpacity=".22" />
++              <stop offset="1" stopColor="#c498ff" stopOpacity=".9" />
++            </linearGradient>
++            <filter
++              id={`${id}-glow`}
++              x="-75%"
++              y="-75%"
++              width="250%"
++              height="250%"
++            >
++              <feGaussianBlur stdDeviation="8" />
++            </filter>
++          </defs>
++          {nodes.map((source, index) => {
++            const side = index % 2 === 0 ? -1 : 1;
++            const row = Math.floor(index / 2);
++            const x = center.x + side * 218;
++            const y =
++              nodes.length <= 2
++                ? center.y - 28
++                : 58 + row * ((height - 158) / Math.max(1, rows - 1));
++            const path = `M ${x} ${y + 4} C ${center.x + side * 94} ${y - 12}, ${center.x + side * 115} ${center.y}, ${center.x + side * 64} ${center.y}`;
++            return (
++              <g
++                key={source.source_id}
++                data-source-id={source.source_id}
++                className="hub-network__node"
++              >
++                <title>{`${source.device_display_name} · ${source.display_name}`}</title>
++                <path
++                  id={`${id}-link-${index}`}
++                  d={path}
++                  fill="none"
++                  stroke={`url(#${id}-edge)`}
++                  strokeWidth="1.8"
++                />
++                <circle
++                  r="3.5"
++                  fill={side < 0 ? "#b399ff" : "#84bfff"}
++                  className="hub-network__motion"
++                >
++                  <animateMotion
++                    dur={`${3.2 + (index % 5) * 0.34}s`}
++                    begin={`${-(index % 4)}s`}
++                    repeatCount="indefinite"
++                  >
++                    <mpath href={`#${id}-link-${index}`} />
++                  </animateMotion>
++                </circle>
++                <circle
++                  cx={x}
++                  cy={y}
++                  r="33"
++                  fill="#7771e5"
++                  opacity=".23"
++                  filter={`url(#${id}-glow)`}
++                />
++                <circle
++                  cx={x}
++                  cy={y}
++                  r="29"
++                  fill="#383958"
++                  stroke="#7477b7"
++                  strokeWidth="1.4"
++                />
++                <Bot
++                  x={x - 16}
++                  y={y - 16}
++                  width="32"
++                  height="32"
++                  stroke="#e3e2ff"
++                  strokeWidth="1.5"
++                />
++                <rect
++                  x={x - 83}
++                  y={y + 35}
++                  width="166"
++                  height="55"
++                  rx="15"
++                  fill="#22273d"
++                  stroke="#383c5b"
++                />
++                <text
++                  x={x}
++                  y={y + 57}
++                  textAnchor="middle"
++                  className="hub-network__label"
++                >
++                  {source.display_name.length > 17
++                    ? `${source.display_name.slice(0, 16)}…`
++                    : source.display_name}
++                </text>
++                <text
++                  x={x}
++                  y={y + 77}
++                  textAnchor="middle"
++                  className="hub-network__device"
++                >
++                  {source.device_display_name.length > 19
++                    ? `${source.device_display_name.slice(0, 18)}…`
++                    : source.device_display_name}
++                </text>
++              </g>
++            );
++          })}
++          <circle
++            cx={center.x}
++            cy={center.y}
++            r="83"
++            fill="#8978ff"
++            opacity=".38"
++            filter={`url(#${id}-glow)`}
++          />
++          <circle
++            cx={center.x}
++            cy={center.y}
++            r="76"
++            fill={`url(#${id}-orb)`}
++            stroke={`url(#${id}-edge)`}
++            strokeWidth="4"
++          />
++          <ellipse
++            cx={center.x}
++            cy={center.y}
++            rx="56"
++            ry="76"
++            fill="none"
++            stroke="#b4b1ff"
++            opacity=".15"
++            transform={`rotate(-35 ${center.x} ${center.y})`}
++          />
++          <ellipse
++            cx={center.x}
++            cy={center.y}
++            rx="76"
++            ry="30"
++            fill="none"
++            stroke="#b4b1ff"
++            opacity=".12"
++            transform={`rotate(40 ${center.x} ${center.y})`}
++          />
++          <image
++            href="/hub/assets/hub-orb-v1.png"
++            x={center.x - 100}
++            y={center.y - 100}
++            width="200"
++            height="200"
++            onError={(event) => {
++              event.currentTarget.style.display = "none";
++            }}
++          />
++          <InfinityIcon
++            x={center.x - 35}
++            y={center.y - 35}
++            width="70"
++            height="70"
++            stroke="#f0eaff"
++            strokeWidth="2.1"
++          />
++        </svg>
++      </div>
++      {nodes.length === 0 ? (
++        <p className="hub-network__empty">
++          <Network size={16} />
++          连接第一个 Agent，建立你的共享记忆网络
++        </p>
++      ) : null}
++      <figcaption>共享链路示意 · {nodes.length} 个有效来源连接</figcaption>
++      {nodes.length > 0 ? (
++        <details className="hub-network__inventory">
++          <summary>查看全部连接名称</summary>
++          <ul>
++            {nodes.map((source) => (
++              <li key={source.source_id}>
++                {source.device_display_name} · {source.display_name}
++              </li>
++            ))}
++          </ul>
++        </details>
++      ) : null}
++    </figure>
++  );
++}
+diff --git a/memhub/apps/web/src/hub-api.ts b/memhub/apps/web/src/hub-api.ts
+index f42ed73..eced177 100644
+--- a/memhub/apps/web/src/hub-api.ts
++++ b/memhub/apps/web/src/hub-api.ts
+@@ -33,6 +33,27 @@ export interface HubSummary {
+   visible_memory_total: number | null;
+   visible_history_total: number | null;
+ }
++export interface HubDashboardData {
++  schema_version: 1;
++  instance_id: string;
++  scope_id: string;
++  generated_at: string;
++  statistics: {
++    device_connections: number;
++    agent_connections: number;
++    shared_records: number;
++    handoffs: number;
++  };
++  record_types: {
++    kind: "conversation" | "remember" | "handoff" | "other";
++    label: string;
++    count: number;
++  }[];
++  daily_activity: { date: string; count: number }[];
++  activity_timezone: "UTC";
++  activity_state: "ready" | "unavailable";
++  missing_timestamps: number;
++}
+ export interface HubItem {
+   record_id: string;
+   kind: "memory" | "history";
+@@ -197,6 +218,76 @@ export async function getHubSummary(
+   }
+   return value as unknown as HubSummary;
+ }
++export async function getHubDashboard(
++  instance: string,
++  scope: string,
++  signal?: AbortSignal,
++): Promise<HubDashboardData> {
++  const value = object(await request("dashboard", { scope_id: scope }, signal));
++  const statistics = object(value.statistics);
++  const count = (number: unknown) =>
++    Number.isSafeInteger(number) && Number(number) >= 0;
++  const recordKinds = new Set(["conversation", "remember", "handoff", "other"]);
++  if (
++    value.schema_version !== 1 ||
++    value.instance_id !== instance ||
++    value.scope_id !== scope ||
++    typeof value.generated_at !== "string" ||
++    !/(?:Z|\+00:00)$/.test(value.generated_at) ||
++    !Number.isFinite(Date.parse(value.generated_at)) ||
++    ![
++      "device_connections",
++      "agent_connections",
++      "shared_records",
++      "handoffs",
++    ].every((key) => count(statistics[key])) ||
++    !Array.isArray(value.record_types) ||
++    value.record_types.length !== 4 ||
++    !Array.isArray(value.daily_activity) ||
++    value.activity_timezone !== "UTC" ||
++    !["ready", "unavailable"].includes(String(value.activity_state)) ||
++    !count(value.missing_timestamps)
++  )
++    invalid();
++  for (const entry of value.record_types) {
++    const row = object(entry);
++    if (
++      typeof row.kind !== "string" ||
++      !recordKinds.delete(row.kind) ||
++      typeof row.label !== "string" ||
++      !count(row.count)
++    )
++      invalid();
++  }
++  if (
++    value.activity_state === "ready"
++      ? value.daily_activity.length !== 7 || value.missing_timestamps !== 0
++      : value.daily_activity.length !== 0 || value.missing_timestamps === 0
++  )
++    invalid();
++  let previous = "";
++  for (const entry of value.daily_activity) {
++    const row = object(entry);
++    if (
++      typeof row.date !== "string" ||
++      !/^\d{4}-\d{2}-\d{2}$/.test(row.date) ||
++      !Number.isFinite(Date.parse(row.date)) ||
++      (previous !== "" &&
++        Date.parse(row.date) - Date.parse(previous) !== 86400000) ||
++      new Date(row.date).toISOString().slice(0, 10) !== row.date ||
++      !count(row.count)
++    )
++      invalid();
++    previous = row.date;
++  }
++  if (
++    value.activity_state === "ready" &&
++    previous !== value.generated_at.slice(0, 10)
++  )
++    invalid();
++  return value as unknown as HubDashboardData;
++}
++
+ export async function readHub(
+   instance: string,
+   scope: string,
+diff --git a/memhub/apps/web/src/hub-console.css b/memhub/apps/web/src/hub-console.css
+index 02c002c..382f69d 100644
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -1,166 +1,1014 @@
++/* Hub uses an independent palette; the upstream desktop keeps its own theme. */
+ .hub-console,
+ .hub-start {
+-  color: var(--text-primary, #252722);
+-  max-width: 1120px;
+-  margin: 0 auto;
+-  padding: 28px;
++  --hub-bg: #0c1020;
++  --hub-sidebar: #0d1121;
++  --hub-card: #1a2035;
++  --hub-border: rgba(160, 166, 220, 0.15);
++  --hub-text: #f3f4fc;
++  --hub-muted: #b4b8d0;
++  --hub-weak: #8e95b3;
++  --hub-accent: #a78bfa;
++  --bg: #0c1020;
++  --card: #1a2035;
++  --panel: #1a2035;
++  --hover: #262c45;
++  --surface: #1a2035;
++  --surface-hover: #262c45;
++  --text: #f3f4fc;
++  --text-primary: #f3f4fc;
++  --muted: #b4b8d0;
++  --text-muted: #b4b8d0;
++  --line: #373d58;
++  --border: #373d58;
++  --tx: #f3f4fc;
++  --tx2: #b4b8d0;
++  --tx3: #8e95b3;
++  --bd: #373d58;
++  --bd2: #454b68;
++  --ac: #a78bfa;
++  --ac-rgb: 167, 139, 250;
++  --ac-strong: #c2adff;
++  --ac-bg: #353052;
++  --ac-bd: #736394;
++  --r6-text: #f3f4fc;
++  --r6-muted: #b4b8d0;
++  --r6-action: #a78bfa;
++  --r6-action-hover: #c2adff;
++  --r6-control-edge: #454b68;
++  --r6-field-fill: #141a2d;
++  --r6-selected: #363253;
++  --r6-focus: #b4a2ff;
++  color: var(--hub-text);
++  font-family:
++    Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", system-ui,
++    sans-serif;
++  font-size: 14px;
++  color-scheme: dark;
++}
++.hub-console {
++  min-height: 100vh;
++  background:
++    radial-gradient(ellipse at 65% 0, rgba(91, 74, 150, 0.1), transparent 55%),
++    var(--hub-bg);
++}
++.hub-console *,
++.hub-start * {
++  box-sizing: border-box;
++}
++.hub-console button,
++.hub-console input,
++.hub-console select,
++.hub-console textarea {
++  font: inherit;
++}
++.hub-console button {
++  cursor: pointer;
++}
++.hub-console button:disabled {
++  cursor: wait;
++  opacity: 0.55;
+ }
+-.hub-header {
++.hub-console a {
++  color: #c0afff;
++}
++.hub-console :focus-visible,
++.hub-start :focus-visible {
++  outline: 2px solid #c8b5ff;
++  outline-offset: 4px;
++}
++.hub-start {
++  min-height: 100vh;
++  padding: 12vh max(24px, calc((100vw - 740px) / 2));
++  background: var(--hub-bg);
++}
++.hub-sr-only {
++  position: absolute;
++  width: 1px;
++  height: 1px;
++  padding: 0;
++  overflow: hidden;
++  clip: rect(0, 0, 0, 0);
++  white-space: nowrap;
++  border: 0;
++}
++.hub-sidebar {
++  width: 268px;
++  position: fixed;
++  inset: 0 auto 0 0;
++  z-index: 30;
++  display: flex;
++  flex-direction: column;
++  background: linear-gradient(180deg, #101426, #0d1121 70%);
++  border-right: 1px solid rgba(135, 143, 192, 0.14);
++}
++.hub-brand {
+   display: flex;
+   align-items: center;
+-  justify-content: space-between;
+-  gap: 16px;
++  gap: 12px;
++  padding: 29px 27px 31px;
++  border: 0;
++  color: #c6b5ff;
++  background: transparent;
++  text-align: left;
++}
++.hub-brand > svg {
++  flex-shrink: 0;
++  filter: drop-shadow(0 0 9px #8e6df350);
+ }
+-.hub-header strong {
++.hub-brand strong {
++  color: #f4f3ff;
++  display: block;
+   font-size: 24px;
+-  letter-spacing: -0.5px;
++  font-weight: 650;
++  letter-spacing: -0.7px;
+ }
+-.hub-header p {
+-  margin: 6px 0 0;
+-  color: var(--text-muted, #62665c);
++.hub-brand small {
++  display: block;
++  color: #a0a5c0;
++  font-size: 11px;
++  letter-spacing: 0.3px;
++  margin-top: 5px;
++  white-space: nowrap;
+ }
+-.hub-project-select {
++.hub-navigation {
+   display: flex;
+-  flex-wrap: wrap;
+-  align-items: center;
++  flex-direction: column;
+   gap: 10px;
+-  margin: 28px 0 18px;
++  padding: 10px 20px;
++}
++.hub-console .hub-nav-item {
++  display: flex;
++  align-items: center;
++  gap: 18px;
++  min-height: 53px;
++  padding: 0 19px;
++  background: transparent;
++  border: 1px solid transparent;
++  border-radius: 10px;
++  color: #bbc0d9;
++  text-align: left;
++  font-size: 15px;
++}
++.hub-console .hub-nav-item:hover {
++  background: #1c2239;
++  color: #efedff;
++}
++.hub-console .hub-nav-item.is-active {
++  color: #fff;
++  background: linear-gradient(105deg, #444068, #2c2b48);
++  border-color: #756b9d65;
++  box-shadow:
++    0 4px 15px #0002,
++    inset 0 1px #d6caff0c;
++}
++.hub-console .hub-nav-item.is-active svg {
++  color: #cfc1ff;
++}
++.hub-sidebar-bottom {
++  margin-top: auto;
++  padding: 28px 20px 24px;
++}
++.hub-nas-card {
++  padding: 17px 15px 12px;
++  background: linear-gradient(135deg, #20263d, #181e31);
++  border: 1px solid var(--hub-border);
++  border-radius: 13px;
++}
++.hub-nas-title {
++  display: flex;
++  align-items: center;
++  gap: 11px;
++}
++.hub-nas-title > svg {
++  color: #a6a1ce;
++}
++.hub-nas-title strong {
++  display: block;
++  font-size: 14px;
++  font-weight: 550;
++}
++.hub-nas-title span {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  color: #b1b9c7;
++  font-size: 10px;
++  margin-top: 7px;
++}
++.hub-status-dot {
++  display: inline-block;
++  width: 6px;
++  height: 6px;
++  flex: 0 0 6px;
++  border-radius: 50%;
++  background: #69e4a3;
++  box-shadow: 0 0 7px #69e4a32b;
++}
++.hub-nas-card dl {
++  margin: 14px 0 0;
++  padding-top: 10px;
++  border-top: 1px solid #afb1d014;
++  font-size: 10px;
++}
++.hub-nas-card dl > div {
++  display: flex;
++  justify-content: space-between;
++  gap: 9px;
++  margin: 6px 0;
++}
++.hub-nas-card dt {
++  color: #979fb9;
++  flex-shrink: 0;
++}
++.hub-nas-card dd {
++  margin: 0;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++  color: #c4c8dc;
++}
++.hub-console .hub-sidebar-help {
++  display: flex;
++  justify-content: center;
++  align-items: center;
++  gap: 6px;
++  margin-top: 20px;
++  font-size: 12px;
++  text-decoration: none;
++  color: #8e95b3;
++}
++.hub-workspace {
++  margin-left: 268px;
++  min-width: 0;
++}
++.hub-topbar {
++  display: flex;
++  height: 80px;
++  align-items: center;
++  justify-content: space-between;
++  gap: 12px;
++  padding: 0 29px;
++  border-bottom: 1px solid #9da6db12;
++  background: #0e1221a1;
++}
++.hub-topbar-status,
++.hub-topbar-actions {
++  display: flex;
++  align-items: center;
++  gap: 14px;
++  min-width: 0;
++}
++.hub-status-pill,
++.hub-version-pill {
++  display: inline-flex;
++  align-items: center;
++  gap: 8px;
++  border: 1px solid #7c89be26;
++  background: #1a2032;
++  border-radius: 20px;
++  color: #c2c7dd;
++  padding: 7px 12px;
++  font-size: 11px;
++  white-space: nowrap;
++}
++.hub-version-pill {
++  border-color: #a795d42b;
++  background: #29253b;
++  color: #d1c4f3;
++}
++.hub-project-select {
++  position: relative;
++  min-width: 0;
+ }
+ .hub-project-select select {
+-  margin-left: 8px;
+-  min-width: 220px;
+-  padding: 9px;
+-  border: 1px solid #d8dbd2;
++  appearance: none;
++  max-width: 200px;
++  width: 180px;
++  border: 0;
++  background: transparent;
++  color: #bec4db;
++  padding: 10px 22px 10px 8px;
++  font-size: 12px;
++  overflow: hidden;
++  text-overflow: ellipsis;
++}
++.hub-project-select > svg {
++  position: absolute;
++  right: 5px;
++  top: 50%;
++  pointer-events: none;
++  transform: translateY(-50%);
++  color: #9ca3c0;
++}
++.hub-console .hub-icon-button {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  border: 0;
++  background: transparent;
++  color: #a3abc6;
++  padding: 8px;
+   border-radius: 8px;
+-  background: var(--surface, #fff);
+-  color: inherit;
++  text-decoration: none;
+ }
+-.hub-navigation {
++.hub-console .hub-icon-button:hover {
++  background: #292d46;
++  color: #e6ddff;
++}
++.hub-topbar-divider {
++  width: 1px;
++  height: 22px;
++  background: #67719430;
++}
++.hub-admin {
+   display: flex;
+-  flex-wrap: wrap;
+-  gap: 8px;
+-  padding-bottom: 20px;
+-  border-bottom: 1px solid #d8dbd2;
++  align-items: center;
++  gap: 9px;
++  font-size: 12px;
++  color: #bdc4dc;
++}
++.hub-avatar {
++  background: linear-gradient(145deg, #a5abce, #5c6388);
++  border: 2px solid #c5c6e33a;
++  color: #f0e9ff;
++  display: grid;
++  place-items: center;
++  width: 32px;
++  height: 32px;
++  border-radius: 50%;
++}
++.hub-menu-toggle {
++  display: none;
++  border: 0;
++  padding: 5px;
++  color: #d1c5f6;
++  background: transparent;
+ }
+ .hub-content {
+-  padding: 20px 0;
++  max-width: 1720px;
++  margin: 0 auto;
++  padding: 24px 24px 36px;
+ }
+ .hub-content h1 {
+-  font-size: 24px;
+-  margin-bottom: 24px;
++  font-size: 25px;
++  margin: 0 0 24px;
++  font-weight: 600;
++  letter-spacing: 0.2px;
+ }
+ .hub-content h2 {
+-  font-size: 19px;
++  font-size: 16px;
++  font-weight: 550;
++  margin: 0;
++}
++.hub-content p {
++  line-height: 1.65;
+ }
+-.hub-overview {
++.hub-content [role="alert"],
++.hub-start [role="alert"] {
++  color: #f2abab;
++}
++.hub-shell-error,
++.hub-data-notice {
++  font-size: 12px;
++  color: #dfc8ac;
++  padding: 8px 11px;
++  border-radius: 7px;
++  background: #7a5a281c;
++  line-height: 1.6;
++}
++.hub-dashboard-heading {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 15px;
++  min-height: 62px;
++  margin: 1px 0 24px;
++  padding-left: 16px;
++  position: relative;
++}
++.hub-dashboard-heading::before {
++  content: "";
++  position: absolute;
++  left: 0;
++  top: 4px;
++  bottom: 5px;
++  width: 4px;
++  border-radius: 4px;
++  background: linear-gradient(#b598ff, #9278df55);
++}
++.hub-dashboard-heading h1 {
++  font-size: clamp(20px, 1.65vw, 27px);
++  font-weight: 600;
++  letter-spacing: 0.5px;
++  margin: 0 0 10px;
++}
++.hub-dashboard-heading p {
++  margin: 0;
++  color: #9da6c2;
++  font-size: 13px;
++}
++.hub-metrics {
+   display: grid;
++  grid-template-columns: repeat(4, minmax(0, 1fr));
+   gap: 18px;
++  margin-bottom: 19px;
++}
++.hub-metric {
++  min-width: 0;
++  min-height: 101px;
++  display: flex;
++  align-items: center;
++  gap: 20px;
++  padding: 16px 22px;
++  border-radius: 17px;
++  border: 1px solid var(--hub-border);
++  background:
++    radial-gradient(ellipse at 20% 0, #776bb224, transparent 78%),
++    linear-gradient(115deg, #20263b, #1a2033);
++  box-shadow:
++    0 5px 14px #00000012,
++    inset 0 1px #ddd6ff08;
++}
++.hub-metric-icon {
++  display: grid;
++  place-items: center;
++  width: 56px;
++  height: 56px;
++  flex-shrink: 0;
++  border-radius: 14px;
++  color: #c7b5ff;
++  background: linear-gradient(135deg, #66558955, #44385833);
++  border: 1px solid #ad8bc928;
++  box-shadow: inset 0 0 15px #c4a2ff0c;
++}
++.hub-metric--blue .hub-metric-icon {
++  color: #acc9ff;
++  background: linear-gradient(135deg, #465d9455, #35435c33);
++  border-color: #8bacdf2b;
++}
++.hub-metric--pink .hub-metric-icon {
++  color: #d6b1e5;
++}
++.hub-metric p {
++  margin: 0;
++  color: #b6bcd4;
++  font-size: 12px;
++}
++.hub-metric strong {
++  display: block;
++  font-size: 31px;
++  font-weight: 600;
++  line-height: 1.3;
++  letter-spacing: 0.4px;
++}
++.hub-metric small {
++  color: #8e96b5;
++  font-size: 10px;
++  display: block;
++  margin-top: 2px;
++  line-height: 1.4;
+ }
+ .hub-card {
+-  padding: 22px;
+-  border: 1px solid #d8dbd2;
+-  border-radius: 12px;
+-  background: var(--surface, #fff);
++  padding: 20px;
++  border-radius: 18px;
++  border: 1px solid var(--hub-border);
++  background:
++    radial-gradient(ellipse at 22% 0, #655d9220, transparent 72%),
++    linear-gradient(115deg, #1e253a, #191f32);
++  box-shadow:
++    0 7px 20px #00000014,
++    inset 0 1px #ded9ff06;
++  min-width: 0;
+ }
+-.hub-card ul,
+-.hub-content .sdk-memory-library ul {
+-  padding-left: 22px;
++.hub-card-heading {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++  gap: 8px;
++  min-height: 22px;
++  margin-bottom: 16px;
+ }
+-.hub-card li {
+-  margin: 12px 0;
+-  white-space: pre-wrap;
+-  overflow-wrap: anywhere;
++.hub-console .hub-card-action {
++  display: inline-flex;
++  align-items: center;
++  gap: 3px;
++  background: transparent;
++  border: 0;
++  padding: 0;
++  color: #939dbb;
++  font-size: 11px;
+ }
+-.hub-content p {
+-  line-height: 1.65;
++.hub-console .hub-card-action:hover {
++  color: #d3c2ff;
+ }
+-.hub-content [role="alert"] {
+-  color: #a52a25;
++.hub-card-badge {
++  padding: 4px 8px;
++  background: #8a79b11b;
++  border: 1px solid #ad9ace1f;
++  border-radius: 6px;
++  color: #b6accc;
++  font-size: 10px;
++  white-space: nowrap;
+ }
+-.hub-content nav {
++.hub-dashboard-middle {
++  display: grid;
++  grid-template-columns: minmax(230px, 0.85fr) minmax(310px, 1.27fr) minmax(
++      280px,
++      1.06fr
++    );
++  gap: 18px;
++  margin-bottom: 19px;
++  align-items: stretch;
++}
++.hub-dashboard-middle > .hub-card {
++  min-height: 286px;
++}
++.hub-device-card {
+   display: flex;
+-  gap: 10px;
+-  margin: 16px 0;
++  flex-direction: column;
+ }
+-.hub-content textarea {
++.hub-device-list {
++  max-height: 205px;
++  overflow: auto;
++  flex: 1;
++  scrollbar-width: thin;
++}
++.hub-device {
++  display: flex;
++  align-items: center;
++  gap: 12px;
++  padding: 10px 0;
++  border-bottom: 1px solid #a8adcd0e;
++}
++.hub-device-icon {
++  display: grid;
++  place-items: center;
++  width: 39px;
++  flex: 0 0 39px;
++  color: #b1b4d7;
++}
++.hub-device-copy {
++  min-width: 0;
++}
++.hub-device strong {
++  display: block;
++  color: #e3e4f4;
++  font-size: 12px;
++  font-weight: 500;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.hub-device > div span {
+   display: block;
++  margin-top: 5px;
++  font-size: 10px;
++  color: #8e98b9;
++}
++.hub-device-state {
++  margin-left: auto;
++  display: flex;
++  align-items: center;
++  gap: 5px;
++  flex-shrink: 0;
++  font-size: 10px;
++  color: #a4bfae;
++}
++.hub-console .hub-add-device {
++  display: flex;
++  justify-content: center;
++  align-items: center;
++  gap: 8px;
+   width: 100%;
+-  min-height: 100px;
+-  margin: 12px 0;
+-  padding: 10px;
+-  font: inherit;
+-  border: 1px solid #d8dbd2;
+-  border-radius: 8px;
++  padding: 9px;
++  color: #c4bbde;
++  background: #aaa2d60a;
++  border: 1px dashed #9f91c04a;
++  border-radius: 7px;
++  margin-top: 13px;
++  font-size: 11px;
+ }
+-.hub-answer,
+-.hub-content aside p,
+-.hub-content [aria-label="SDK 原始对话"] li p {
+-  white-space: pre-wrap;
+-  overflow-wrap: anywhere;
++.hub-card-footnote {
++  color: #919ab5;
++  display: block;
++  font-size: 10px;
++  line-height: 1.55;
++  margin-top: 10px;
+ }
+-.hub-content .r6-settings {
+-  min-height: auto;
++.hub-network-card {
++  padding-bottom: 10px;
++  overflow: hidden;
+ }
+-@media (max-width: 640px) {
+-  .hub-console,
+-  .hub-start {
+-    padding: 16px;
+-  }
+-  .hub-project-select label,
+-  .hub-project-select select {
+-    width: 100%;
+-  }
+-  .hub-project-select select {
+-    margin: 8px 0 0;
+-  }
++.hub-network-card .hub-card-heading {
++  margin-bottom: 0;
+ }
+-
+-.hub-governance label {
++.hub-network {
++  margin: 0;
++  position: relative;
++}
++.hub-network__canvas > svg {
++  width: 100%;
+   display: block;
+-  margin: 1rem 0;
++  overflow: visible;
+ }
+-.hub-governance code {
++.hub-network__label {
++  fill: #e7e4ff;
++  font-size: 15px;
++  font-weight: 500;
++}
++.hub-network__device {
++  fill: #a1a5c0;
++  font-size: 12px;
++}
++.hub-network figcaption {
++  color: #a4a9c6;
++  text-align: center;
++  font-size: 10px;
++  margin: 0 0 6px;
++}
++.hub-network__empty {
++  display: flex;
++  gap: 5px;
++  align-items: center;
++  justify-content: center;
++  font-size: 11px;
++  color: #afb2cc;
++  margin: 0;
++}
++.hub-network__inventory {
++  font-size: 10px;
++  color: #9b9fbd;
++  text-align: center;
++}
++.hub-network__inventory summary {
++  cursor: pointer;
++  list-style: none;
++  padding: 4px;
++}
++.hub-network__inventory ul {
++  max-height: 130px;
++  overflow: auto;
++  list-style: none;
++  padding: 0;
++  margin: 7px 0;
++}
++.hub-network__inventory li {
++  margin: 5px 0;
+   overflow-wrap: anywhere;
+ }
+-.hub-impact-list li {
+-  padding: 1rem 0;
+-  border-bottom: 1px solid var(--border, #d9e2e8);
++.hub-network-loading {
++  display: grid;
++  justify-items: center;
++  align-content: center;
++  min-height: 222px;
++  color: #a99be9;
++  background: radial-gradient(circle at center, #7c68cc25, transparent 45%);
+ }
+-
+-.hub-content > .hub-card + .hub-card {
++.hub-network-loading p {
++  color: #9aa2bf;
++  font-size: 12px;
++}
++.hub-activity-list {
++  display: flex;
++  flex-direction: column;
++}
++.hub-activity {
++  display: flex;
++  align-items: flex-start;
++  width: 100%;
++  min-width: 0;
++  padding: 10px 0;
++  gap: 11px;
++  border: 0;
++  text-align: left;
++  color: inherit;
++  background: transparent;
++}
++.hub-activity + .hub-activity {
++  border-top: 1px solid #9aa2c013;
++}
++.hub-activity-icon {
++  width: 32px;
++  height: 32px;
++  flex-shrink: 0;
++  display: grid;
++  place-items: center;
++  border-radius: 8px;
++  color: #a8c2f6;
++  background: #6987ba22;
++  border: 1px solid #9db2df16;
++}
++.hub-activity-icon--remember {
++  color: #c3aff1;
++  background: #a483db1e;
++}
++.hub-activity-icon--handoff {
++  color: #a1d7ce;
++  background: #6fa99724;
++}
++.hub-activity-copy {
++  min-width: 0;
++  flex: 1;
++}
++.hub-activity-copy strong {
++  display: block;
++  font-size: 11px;
++  font-weight: 500;
++  line-height: 1.5;
++}
++.hub-activity-copy > span {
++  display: block;
++  color: #949ebd;
++  font-size: 10px;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++  margin-top: 4px;
++}
++.hub-activity > small {
++  flex-shrink: 0;
++  color: #8a95b4;
++  font-size: 9px;
++  line-height: 1.6;
++}
++.hub-dashboard-bottom {
++  display: grid;
++  grid-template-columns: 1fr 1.08fr 1.02fr;
++  gap: 18px;
++}
++.hub-dashboard-bottom > .hub-card {
++  min-height: 267px;
++}
++.hub-composition {
++  display: flex;
++  align-items: center;
++  min-height: 145px;
++  gap: 20px;
++}
++.hub-memory-art {
++  position: relative;
++  flex: 0 0 37%;
++  height: 130px;
++  filter: drop-shadow(0 8px 15px #8e78c53a);
++}
++.hub-memory-art span {
++  position: absolute;
++  left: 8%;
++  width: 82%;
++  height: 75px;
++  border: 1px solid #b0a3db77;
++  border-radius: 12px;
++  transform: rotate(-14deg) skew(12deg, 8deg);
++  background: linear-gradient(140deg, #555a8d, #33385d);
++  box-shadow: 0 10px 20px #05081733;
++  top: 43px;
++}
++.hub-memory-art span:nth-child(2) {
++  top: 29px;
++  background: linear-gradient(140deg, #7676a6, #42456d);
++}
++.hub-memory-art span:last-child {
++  top: 15px;
++  background: linear-gradient(140deg, #a5a2d0, #515777);
++  display: grid;
++  place-items: center;
++  color: #e4deff;
++}
++.hub-record-types {
++  flex: 1;
++  min-width: 0;
++}
++.hub-record-type {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 10px;
++  font-size: 11px;
++  margin: 13px 0;
++}
++.hub-record-types > div > span {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  color: #b4bcd3;
++}
++.hub-record-types strong {
++  font-weight: 500;
++  color: #e0ddf1;
++  font-size: 12px;
++}
++.hub-type-dot {
++  display: inline-block;
++  width: 6px;
++  height: 6px;
++  border-radius: 50%;
++}
++.hub-type-dot--0 {
++  background: #a9a0ed;
++}
++.hub-type-dot--1 {
++  background: #8fa9e7;
++}
++.hub-type-dot--2 {
++  background: #c6b4ed;
++}
++.hub-type-dot--3 {
++  background: #748ba8;
++}
++.hub-composition-bar {
++  height: 5px;
++  background: #10162b;
++  border-radius: 5px;
++  display: flex;
++  gap: 3px;
++  overflow: hidden;
++  margin: 5px 0 14px;
++}
++.hub-composition-bar span {
++  min-width: 0;
++}
++.hub-console .hub-card-link {
++  border: 0;
++  background: transparent;
++  color: #b8a7e9;
++  display: flex;
++  align-items: center;
++  justify-content: flex-end;
++  gap: 6px;
++  padding: 0;
++  margin-left: auto;
++  font-size: 11px;
++}
++.hub-activity-chart svg {
++  width: 100%;
++  display: block;
++  margin-top: 3px;
++}
++.hub-activity-chart text {
++  fill: #9ba5c1;
++  font-size: 10px;
++}
++.hub-trend-card .hub-card-footnote {
++  margin-top: 5px;
++}
++.hub-service-list {
++  display: flex;
++  flex-direction: column;
++  gap: 17px;
++  margin: 23px 0 25px;
++}
++.hub-service {
++  display: flex;
++  align-items: center;
++  gap: 10px;
++  color: #aeb6d2;
++  font-size: 11px;
++}
++.hub-service > svg {
++  color: #9da8c8;
++}
++.hub-service > strong {
++  display: flex;
++  align-items: center;
++  gap: 4px;
++  color: #9eabc3;
++  font-size: 10px;
++  font-weight: 400;
++  margin-left: auto;
++  text-align: right;
++}
++.hub-service > strong.is-confirmed {
++  color: #9dcdb2;
++}
++.hub-empty-copy {
++  color: #9ca6c3;
++  font-size: 12px;
++}
++.hub-empty-state {
++  min-height: 172px;
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  color: #a69bc8;
++  text-align: center;
++}
++.hub-empty-state p {
++  margin: 12px 0 4px;
++  font-size: 12px;
++  color: #b6bdd4;
++}
++.hub-empty-state > span {
++  font-size: 10px;
++  color: #8f9bb8;
++}
++.hub-memory-peek {
+   margin-top: 20px;
++  padding: 14px 20px;
+ }
+-.hub-content form:not(.model-form),
+-.hub-pairing label {
++.hub-memory-peek > summary {
+   display: flex;
+-  flex-wrap: wrap;
+   align-items: center;
++  gap: 9px;
++  cursor: pointer;
++  color: #a9b0cd;
++  font-size: 12px;
++  list-style: none;
++}
++.hub-memory-peek > summary > svg:last-child {
++  margin-left: auto;
++}
++.hub-memory-peek[open] > summary > svg:last-child {
++  transform: rotate(90deg);
++}
++.hub-memory-peek > p {
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++}
++.hub-welcome {
++  max-width: 900px;
++  margin: 25px auto;
++  padding: 35px;
++}
++.hub-welcome-icon {
++  width: 68px;
++  height: 68px;
++  border-radius: 19px;
++  display: grid;
++  place-items: center;
++  margin-bottom: 25px;
++  color: #b8a4f3;
++  background: linear-gradient(135deg, #544979, #343650);
++}
++.hub-eyebrow {
++  color: #a996db;
++  font-size: 12px;
++  display: block;
++  margin-bottom: 10px;
++}
++.hub-welcome > p {
++  color: #adb7d0;
++}
++.hub-card ul,
++.hub-content .sdk-memory-library ul {
++  padding-left: 22px;
++}
++.hub-card li {
++  margin: 12px 0;
++  overflow-wrap: anywhere;
++}
++.hub-content nav {
++  display: flex;
+   gap: 10px;
+   margin: 16px 0;
++  flex-wrap: wrap;
++}
++.hub-content textarea {
++  display: block;
++  width: 100%;
++  min-height: 100px;
++  margin: 12px 0;
++  padding: 10px;
++  border: 1px solid #454b68;
++  border-radius: 8px;
++  background: #141a2d;
++  color: #edf0fa;
+ }
+ .hub-content input:not([type="checkbox"]),
+ .hub-content select {
+   min-width: 180px;
+   max-width: 100%;
+   padding: 9px;
+-  border: 1px solid #d8dbd2;
++  border: 1px solid #454b68;
+   border-radius: 8px;
+-  font: inherit;
++  color: #edf0fa;
++  background: #141a2d;
+ }
+-.hub-pairing pre,
+-.hub-pairing code {
+-  overflow-wrap: anywhere;
+-  white-space: pre-wrap;
++.hub-content form:not(.model-form),
++.hub-pairing label {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 10px;
++  margin: 16px 0;
+ }
+-.hub-pairing details {
+-  margin: 20px 0;
++.hub-content > .hub-card + .hub-card {
++  margin-top: 20px;
+ }
+-
++.hub-answer,
++.hub-content aside p,
++.hub-content [aria-label="SDK 原始对话"] li p,
+ .hub-content .history-readable__text,
+-.hub-content .history-original pre {
++.hub-content .history-original pre,
++.hub-content .hub-pairing pre,
++.hub-pairing code {
+   white-space: pre-wrap;
+   overflow-wrap: anywhere;
+ }
++.hub-content .r6-settings {
++  min-height: auto;
++}
+ .hub-content .history-readable dt {
+   margin-top: 16px;
+   font-weight: 600;
+@@ -168,10 +1016,11 @@
+ .hub-content .history-readable dd {
+   margin: 6px 0 0;
+ }
+-.hub-content .history-original {
++.hub-content .history-original,
++.hub-pairing details {
+   margin-top: 20px;
+ }
+-.hub-content .history-original summary {
++.hub-content summary {
+   cursor: pointer;
+ }
+ .hub-content .history-original pre {
+@@ -179,12 +1028,21 @@
+   max-height: 320px;
+   overflow: auto;
+   padding: 12px;
+-  border: 1px solid #d8dbd2;
++  border: 1px solid #454b68;
+   border-radius: 8px;
+   font-size: 12px;
+ }
+-
+-/* First-use guidance stays within the existing Hub layout. */
++.hub-governance label {
++  display: block;
++  margin: 1rem 0;
++}
++.hub-governance code {
++  overflow-wrap: anywhere;
++}
++.hub-impact-list li {
++  padding: 1rem 0;
++  border-bottom: 1px solid #373d58;
++}
+ .hub-getting-started,
+ .hub-pairing-next,
+ .hub-first-memory {
+@@ -207,13 +1065,520 @@
+ .hub-first-memory blockquote {
+   margin: 12px 0;
+   padding: 14px 16px;
+-  border-left: 3px solid var(--text-muted, #62665c);
+-  background: var(--surface, #fff);
++  border-left: 3px solid #9f87d5;
++  background: #12192c;
+   overflow-wrap: anywhere;
+ }
+-.hub-content .model-form-step h3 {
+-  margin: 0 0 6px;
+-}
++.hub-content .model-form-step h3,
+ .hub-content .model-form-step p {
+   margin: 0 0 6px;
+ }
++.hub-console .r6-button {
++  border-color: #686080;
++  background-color: #302c46;
++  color: #e4dbff;
++}
++.hub-console .r6-button--quiet {
++  background: transparent;
++  border-color: #454b68;
++  color: #b7bed5;
++}
++.hub-console .r6-button:hover {
++  background: #49415f;
++}
++.hub-console .r6-settings,
++.hub-console .r6-settings__section,
++.hub-console .model-settings {
++  color: #e5e8f5;
++  background: transparent;
++}
++.hub-console .sdk-memory-library,
++.hub-console .sdk-raw-history {
++  color: #e5e8f5;
++}
++@media (min-width: 1700px) {
++  .hub-metric {
++    padding: 19px 27px;
++  }
++  .hub-dashboard-middle > .hub-card {
++    min-height: 310px;
++  }
++}
++@media (max-width: 1320px) {
++  .hub-sidebar {
++    width: 232px;
++  }
++  .hub-workspace {
++    margin-left: 232px;
++  }
++  .hub-brand {
++    padding-left: 20px;
++    gap: 8px;
++  }
++  .hub-brand strong {
++    font-size: 22px;
++  }
++  .hub-content {
++    padding: 22px 20px;
++  }
++  .hub-metric {
++    gap: 12px;
++    padding: 15px;
++  }
++  .hub-metric-icon {
++    width: 44px;
++    height: 44px;
++  }
++  .hub-metric small {
++    font-size: 9px;
++  }
++  .hub-dashboard-middle {
++    grid-template-columns: minmax(210px, 0.85fr) minmax(275px, 1.2fr);
++  }
++  .hub-activity-card {
++    grid-column: 1 / -1;
++  }
++  .hub-activity-list {
++    display: grid;
++    grid-template-columns: repeat(3, minmax(0, 1fr));
++    column-gap: 20px;
++  }
++  .hub-activity-list .hub-empty-state {
++    grid-column: 1 / -1;
++  }
++  .hub-dashboard-middle > .hub-activity-card {
++    min-height: 0;
++  }
++  .hub-dashboard-bottom {
++    grid-template-columns: 1fr 1fr;
++  }
++  .hub-service-card {
++    grid-column: 1 / -1;
++  }
++  .hub-service-list {
++    display: grid;
++    grid-template-columns: repeat(2, minmax(0, 1fr));
++    gap: 22px;
++  }
++  .hub-dashboard-bottom > .hub-service-card {
++    min-height: 0;
++  }
++}
++@media (max-width: 1020px) {
++  .hub-topbar-status .hub-version-pill {
++    display: none;
++  }
++  .hub-topbar {
++    padding: 0 20px;
++  }
++  .hub-topbar-actions {
++    gap: 5px;
++  }
++  .hub-topbar-status {
++    gap: 5px;
++  }
++  .hub-metrics {
++    grid-template-columns: repeat(2, minmax(0, 1fr));
++  }
++  .hub-dashboard-middle {
++    grid-template-columns: minmax(0, 1fr);
++  }
++  .hub-network__canvas > svg {
++    max-height: none;
++  }
++  .hub-activity-list {
++    display: flex;
++  }
++  .hub-dashboard-bottom {
++    grid-template-columns: minmax(0, 1fr);
++  }
++  .hub-service-list {
++    display: flex;
++  }
++  .hub-device-list {
++    max-height: 220px;
++  }
++}
++@media (max-width: 760px) {
++  .hub-sidebar {
++    transform: translateX(-100%);
++    transition: transform 0.2s ease;
++    width: 268px;
++  }
++  .hub-console--menu-open .hub-sidebar {
++    transform: translateX(0);
++  }
++  .hub-workspace {
++    margin-left: 0;
++  }
++  .hub-sidebar-scrim {
++    position: fixed;
++    inset: 0;
++    background: #040713a6;
++    border: 0;
++    z-index: 29;
++  }
++  .hub-menu-toggle {
++    display: inline-flex;
++  }
++  .hub-topbar {
++    height: 65px;
++    padding: 0 15px;
++    gap: 8px;
++  }
++  .hub-topbar-status {
++    margin-right: auto;
++  }
++  .hub-status-pill {
++    padding: 6px 8px;
++    font-size: 9px;
++  }
++  .hub-topbar-actions .hub-admin,
++  .hub-topbar-divider {
++    display: none;
++  }
++  .hub-project-select select {
++    width: 138px;
++    font-size: 11px;
++  }
++  .hub-content {
++    padding: 22px 15px;
++  }
++  .hub-dashboard-heading {
++    margin-bottom: 22px;
++    padding-left: 12px;
++  }
++  .hub-dashboard-heading h1 {
++    font-size: 19px;
++    line-height: 1.5;
++  }
++  .hub-dashboard-heading p {
++    font-size: 11px;
++  }
++  .hub-metrics {
++    gap: 12px;
++  }
++  .hub-metric {
++    gap: 11px;
++    padding: 14px 12px;
++    min-height: 106px;
++  }
++  .hub-metric-icon {
++    width: 37px;
++    height: 43px;
++    border-radius: 10px;
++  }
++  .hub-metric-icon > svg {
++    width: 26px;
++  }
++  .hub-metric strong {
++    font-size: 27px;
++  }
++  .hub-metric small {
++    display: none;
++  }
++  .hub-card {
++    padding: 18px;
++    border-radius: 16px;
++  }
++  .hub-dashboard-middle,
++  .hub-dashboard-bottom {
++    gap: 15px;
++  }
++  .hub-content input:not([type="checkbox"]) {
++    min-width: 0;
++  }
++  .hub-welcome {
++    padding: 25px 20px;
++  }
++}
++@media (max-width: 390px) {
++  .hub-topbar-status {
++    display: none;
++  }
++  .hub-topbar-actions {
++    margin-left: auto;
++  }
++  .hub-metric-icon {
++    width: 30px;
++  }
++  .hub-metric {
++    gap: 8px;
++  }
++  .hub-network__label {
++    font-size: 17px;
++  }
++  .hub-network__device {
++    font-size: 14px;
++  }
++}
++@media (prefers-reduced-motion: reduce) {
++  .hub-network__motion {
++    display: none;
++  }
++  .hub-sidebar {
++    transition: none;
++  }
++}
++
++.hub-network__canvas {
++  max-height: 450px;
++  overflow: auto;
++  scrollbar-width: thin;
++}
++/* Preserve the existing settings controls while giving every Hub panel the same palette. */
++.hub-console .r6-settings {
++  padding: 4px 0;
++}
++.hub-console .r6-settings .r6-settings-layout {
++  grid-template-columns: 180px minmax(0, 1fr);
++  gap: 18px;
++}
++.hub-console .r6-settings .r6-settings-layout > nav,
++.hub-console .r6-settings .r6-settings-content,
++.hub-console .r6-settings .r6-settings-confirm,
++.hub-console .r6-settings-dialog {
++  background: #1a2035;
++  border-color: #373d58;
++  box-shadow: inset 0 1px #ded9ff06;
++  color: #edf0fa;
++}
++.hub-console .r6-settings .r6-settings-layout > nav {
++  min-height: 440px;
++}
++.hub-console .r6-settings .r6-settings-layout > nav > button {
++  color: #bfc5dd;
++  font-size: 14px;
++  padding-inline: 12px;
++}
++.hub-console
++  .r6-settings
++  .r6-settings-layout
++  > nav
++  > button[aria-current="page"],
++.hub-console
++  .r6-settings
++  .r6-settings-layout
++  > nav
++  > button:hover:not(:disabled) {
++  background: #35324d;
++  color: #ece5ff;
++}
++.hub-console .r6-settings .r6-setting-row {
++  border-color: #373d58;
++}
++.hub-console .r6-settings .model-form input:not([type="checkbox"]),
++.hub-console .r6-settings .model-form select {
++  background: #12192d;
++  color: #eef0fa;
++  border-color: #454b68;
++}
++.hub-console .r6-settings .r6-setting-row p,
++.hub-console .r6-settings .r6-setting-row > span,
++.hub-console .r6-settings summary,
++.hub-console .r6-settings .r6-settings-note,
++.hub-console .r6-settings .r6-settings-read-status,
++.hub-console .r6-settings .r6-model-caption,
++.hub-console .r6-settings .r6-model-state,
++.hub-console .r6-settings .r6-model-recipient,
++.hub-console .r6-settings .r6-model-embedding,
++.hub-console .r6-settings .r6-settings-about dt,
++.hub-console .r6-settings .r6-settings-help-footer > p,
++.hub-console .r6-settings-dialog p {
++  color: #aeb7d1;
++}
++.hub-console .r6-settings .r6-settings-about dd {
++  color: #e0e4f2;
++}
++.hub-console .r6-settings .r6-settings-error {
++  color: #f2abab;
++}
++.hub-console .r6-settings .r6-model-revoke {
++  color: #a6d4ba;
++}
++.hub-console .r6-button[data-variant="quiet"] {
++  background: transparent;
++  border-color: #454b68;
++  color: #b7bed5;
++}
++@media (max-width: 950px) {
++  .hub-console .r6-settings .r6-settings-layout {
++    grid-template-columns: minmax(0, 1fr);
++  }
++  .hub-console .r6-settings .r6-settings-layout > nav {
++    min-height: 0;
++    flex-direction: row;
++    flex-wrap: wrap;
++    gap: 6px;
++  }
++  .hub-console .r6-settings .r6-settings-content {
++    padding: 22px 18px;
++  }
++}
++/* Reference proportions: compact single-line activity and layered memory cards. */
++.hub-content .hub-card-heading h2 {
++  font-size: 18px;
++}
++.hub-metric p {
++  font-size: 13px;
++}
++.hub-device strong {
++  font-size: 13px;
++}
++.hub-activity {
++  padding: 5px 0;
++  align-items: center;
++}
++.hub-activity-icon {
++  width: 30px;
++  height: 30px;
++}
++.hub-activity-copy {
++  overflow: hidden;
++  white-space: nowrap;
++  text-overflow: ellipsis;
++  line-height: 30px;
++}
++.hub-activity-copy strong {
++  display: inline;
++  font-size: 12px;
++}
++.hub-activity-copy > span {
++  display: inline;
++  margin-left: 5px;
++  font-size: 11px;
++}
++.hub-activity > small {
++  font-size: 10px;
++}
++.hub-composition {
++  flex-direction: row-reverse;
++  gap: 16px;
++}
++.hub-composition-total {
++  margin: 0 0 7px;
++  display: flex;
++  align-items: baseline;
++  gap: 6px;
++}
++.hub-composition-total strong {
++  font-size: 25px;
++  color: #f4f3ff;
++  font-weight: 600;
++}
++.hub-composition-total span {
++  font-size: 10px;
++  color: #afb6ce;
++}
++.hub-record-type {
++  margin: 10px 0;
++}
++.hub-dashboard-heading h1 {
++  line-height: 1.2;
++}
++.hub-metric {
++  min-height: 100px;
++  padding-block: 14px;
++}
++.hub-metric p {
++  line-height: 1.3;
++}
++.hub-metric strong {
++  line-height: 1.1;
++}
++.hub-content .hub-card-heading h2 {
++  line-height: 1.25;
++}
++.hub-network {
++  display: grid;
++  grid-template-columns: minmax(0, 1fr) auto;
++  align-items: center;
++}
++.hub-network__canvas,
++.hub-network__empty {
++  grid-column: 1 / -1;
++}
++.hub-network figcaption {
++  text-align: left;
++  margin: 0;
++}
++.hub-network__inventory[open] {
++  grid-column: 1 / -1;
++}
++.hub-record-type {
++  margin: 7px 0;
++  line-height: 1.3;
++}
++.hub-composition-total {
++  line-height: 1.25;
++}
++.hub-activity-chart svg {
++  height: 164px;
++}
++.hub-service-list {
++  margin-top: 18px;
++  margin-bottom: 22px;
++}
++.hub-console .hub-brand:hover {
++  background: transparent;
++  color: #d5c5ff;
++}
++.hub-console .hub-brand:active {
++  background: #a99bdb0c;
++}
++.hub-console .hub-card-action {
++  min-height: 22px;
++}
++.hub-console .hub-card-link {
++  min-height: 20px;
++}
++.hub-activity {
++  padding-block: 4px;
++}
++.hub-card-badge {
++  line-height: 1.2;
++}
++.hub-composition {
++  min-height: 143px;
++}
++.hub-brand {
++  padding: 29px 23px 24px 31px;
++  gap: 18px;
++}
++.hub-brand strong {
++  line-height: 1.1;
++}
++.hub-dashboard-heading {
++  padding-left: 46px;
++}
++.hub-dashboard-heading::before {
++  left: 18px;
++}
++.hub-dashboard-heading h1 {
++  font-size: 30px;
++  margin-bottom: 8px;
++}
++.hub-dashboard-heading p {
++  line-height: 1.5;
++}
++@media (max-width: 1320px) {
++  .hub-brand {
++    padding-inline: 20px;
++    gap: 8px;
++  }
++  .hub-dashboard-heading h1 {
++    font-size: 25px;
++  }
++}
++@media (max-width: 760px) {
++  .hub-dashboard-heading {
++    padding-left: 12px;
++  }
++  .hub-dashboard-heading::before {
++    left: 0;
++  }
++  .hub-dashboard-heading h1 {
++    font-size: 19px;
++    line-height: 1.5;
++  }
++}
+diff --git a/memhub/apps/web/src/hub-dashboard.test.ts b/memhub/apps/web/src/hub-dashboard.test.ts
+new file mode 100644
+index 0000000..86af075
+--- /dev/null
++++ b/memhub/apps/web/src/hub-dashboard.test.ts
+@@ -0,0 +1,252 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { getHubDashboard, type HubSource } from "./hub-api";
++import { effectiveHubSources, getAllHubSources } from "./hub-dashboard";
++import type { PairDevice } from "./hub-pairing";
++
++const source = (id: string, extra: Partial<HubSource> = {}): HubSource => ({
++  source_id: id,
++  device_id: "device",
++  scope_id: "scope",
++  display_name: id,
++  adapter_id: "cloud-memory-hub.agent",
++  status: "active",
++  device_display_name: "Synthetic Mac",
++  device_status: "active",
++  ...extra,
++});
++const device: PairDevice = {
++  device_id: "device",
++  display_name: "Synthetic Mac",
++  revision: 1,
++  status: "active",
++  grants: [{ scope_id: "scope", permissions: ["memory:read"] }],
++  created_at: "2026-11-10T00:00:00Z",
++};
++const dashboard = {
++  schema_version: 1,
++  instance_id: "instance",
++  scope_id: "scope",
++  generated_at: "2026-11-10T00:00:00+00:00",
++  statistics: {
++    device_connections: 1,
++    agent_connections: 2,
++    shared_records: 12,
++    handoffs: 2,
++  },
++  record_types: [
++    { kind: "conversation", label: "对话", count: 6 },
++    { kind: "remember", label: "记忆", count: 4 },
++    { kind: "handoff", label: "交接", count: 2 },
++    { kind: "other", label: "其他", count: 0 },
++  ],
++  daily_activity: Array.from({ length: 7 }, (_, index) => ({
++    date: `2026-11-${String(index + 4).padStart(2, "0")}`,
++    count: index,
++  })),
++  activity_timezone: "UTC",
++  activity_state: "ready",
++  missing_timestamps: 0,
++};
++const summary = (sources: HubSource[], next_offset: number | null) => ({
++  schema_version: 1,
++  instance_id: "instance",
++  scope: { scope_id: "scope", display_name: "Synthetic" },
++  sources,
++  next_offset,
++  sources_total: 12,
++  visible_memory_total: null,
++  visible_history_total: null,
++});
++afterEach(() => vi.unstubAllGlobals());
++describe("real scoped collaboration connections", () => {
++  it("includes read-only grants and deduplicates by source, never by an install option", () => {
++    expect(
++      effectiveHubSources(
++        [source("a"), source("a"), source("b")],
++        [device],
++        "scope",
++      ).map((row) => row.source_id),
++    ).toEqual(["a", "b"]);
++  });
++  it.each(["events:write", "memory:read", "history:read"] as const)(
++    "accepts the relevant permission %s",
++    (permission) => {
++      expect(
++        effectiveHubSources(
++          [source("a")],
++          [
++            {
++              ...device,
++              grants: [{ scope_id: "scope", permissions: [permission] }],
++            },
++          ],
++          "scope",
++        ),
++      ).toHaveLength(1);
++    },
++  );
++  it("rejects revoked sources, revoked devices, other scopes and sync-only grants", () => {
++    expect(
++      effectiveHubSources(
++        [
++          source("revoked", { status: "revoked" }),
++          source("old-device", { device_status: "revoked" }),
++          source("other-project", { scope_id: "other" }),
++          source("unknown-device", { device_id: "other" }),
++        ],
++        [device],
++        "scope",
++      ),
++    ).toEqual([]);
++    expect(
++      effectiveHubSources(
++        [source("a")],
++        [{ ...device, status: "revoked" }],
++        "scope",
++      ),
++    ).toEqual([]);
++    expect(
++      effectiveHubSources(
++        [source("a")],
++        [
++          {
++            ...device,
++            grants: [{ scope_id: "scope", permissions: ["sync:read"] }],
++          },
++        ],
++        "scope",
++      ),
++    ).toEqual([]);
++    expect(
++      effectiveHubSources(
++        [source("a", { scope_id: "global" })],
++        [device],
++        "global",
++      ),
++    ).toEqual([]);
++  });
++  it("loads every summary page including empty intermediate pages and deduplicates overlaps", async () => {
++    const fetcher = vi
++      .fn()
++      .mockResolvedValueOnce(Response.json(summary([source("a")], 10)))
++      .mockResolvedValueOnce(Response.json(summary([], 20)))
++      .mockResolvedValueOnce(
++        Response.json(summary([source("a"), source("b")], null)),
++      );
++    vi.stubGlobal("fetch", fetcher);
++    expect(
++      (
++        await getAllHubSources(
++          "instance",
++          "scope",
++          new AbortController().signal,
++        )
++      ).map((row) => row.source_id),
++    ).toEqual(["a", "b"]);
++    expect(
++      fetcher.mock.calls.map(([, init]) => JSON.parse(init.body).offset),
++    ).toEqual([0, 10, 20]);
++  });
++  it("fails closed for repeating pagination and a mismatched later page", async () => {
++    vi.stubGlobal(
++      "fetch",
++      vi.fn().mockResolvedValue(Response.json(summary([source("a")], 0))),
++    );
++    await expect(
++      getAllHubSources("instance", "scope", new AbortController().signal),
++    ).rejects.toThrow("分页");
++    vi.stubGlobal(
++      "fetch",
++      vi
++        .fn()
++        .mockResolvedValueOnce(Response.json(summary([source("a")], 10)))
++        .mockResolvedValueOnce(
++          Response.json({
++            ...summary([source("b")], null),
++            instance_id: "wrong",
++          }),
++        ),
++    );
++    await expect(
++      getAllHubSources("instance", "scope", new AbortController().signal),
++    ).rejects.toThrow("不一致");
++  });
++});
++describe("dashboard transport", () => {
++  it("uses the scoped administrator endpoint and accepts UTC offsets", async () => {
++    const fetcher = vi.fn().mockResolvedValue(Response.json(dashboard));
++    vi.stubGlobal("fetch", fetcher);
++    expect(await getHubDashboard("instance", "scope")).toEqual(dashboard);
++    expect(fetcher).toHaveBeenCalledWith(
++      "/hub/v1/console/dashboard",
++      expect.objectContaining({
++        method: "POST",
++        credentials: "same-origin",
++        body: JSON.stringify({ scope_id: "scope" }),
++      }),
++    );
++  });
++  it.each([
++    { instance_id: "other" },
++    { scope_id: "other" },
++    { schema_version: 2 },
++    { statistics: { ...dashboard.statistics, shared_records: null } },
++    { statistics: { ...dashboard.statistics, agent_connections: -1 } },
++    {
++      record_types: [
++        ...dashboard.record_types.slice(0, 3),
++        dashboard.record_types[0],
++      ],
++    },
++    { generated_at: "2026-11-10T00:00:00+08:00" },
++    { daily_activity: dashboard.daily_activity.slice(1) },
++    {
++      daily_activity: dashboard.daily_activity.map((row, i) =>
++        i === 2 ? { ...row, date: "2026-11-08" } : row,
++      ),
++    },
++    { activity_state: "ready", missing_timestamps: 1 },
++    {
++      activity_state: "unavailable",
++      daily_activity: [],
++      missing_timestamps: 0,
++    },
++  ])(
++    "rejects an unconfirmed or mismatched metric envelope %j",
++    async (change) => {
++      vi.stubGlobal(
++        "fetch",
++        vi.fn().mockResolvedValue(Response.json({ ...dashboard, ...change })),
++      );
++      await expect(getHubDashboard("instance", "scope")).rejects.toThrow(
++        "不一致",
++      );
++    },
++  );
++  it("preserves unavailable time data instead of turning it into zero activity", async () => {
++    const unavailable = {
++      ...dashboard,
++      activity_state: "unavailable",
++      daily_activity: [],
++      missing_timestamps: 2,
++    };
++    vi.stubGlobal(
++      "fetch",
++      vi.fn().mockResolvedValue(Response.json(unavailable)),
++    );
++    expect(await getHubDashboard("instance", "scope")).toEqual(unavailable);
++  });
++  it("does not fabricate statistics after a 503 response", async () => {
++    vi.stubGlobal(
++      "fetch",
++      vi
++        .fn()
++        .mockResolvedValue(
++          Response.json({ detail: "read_unavailable" }, { status: 503 }),
++        ),
++    );
++    await expect(getHubDashboard("instance", "scope")).rejects.toThrow(
++      "暂时不可用",
++    );
++  });
++});
+diff --git a/memhub/apps/web/src/hub-dashboard.ts b/memhub/apps/web/src/hub-dashboard.ts
+new file mode 100644
+index 0000000..9f726ca
+--- /dev/null
++++ b/memhub/apps/web/src/hub-dashboard.ts
+@@ -0,0 +1,63 @@
++import { getHubSummary, HubError, type HubSource } from "./hub-api";
++import type { PairDevice } from "./hub-pairing";
++
++const sharingPermissions = new Set([
++  "events:write",
++  "memory:read",
++  "history:read",
++]);
++
++export function effectiveHubSources(
++  sources: HubSource[],
++  devices: PairDevice[],
++  scope: string,
++): HubSource[] {
++  const allowed = new Set(
++    devices
++      .filter(
++        (device) =>
++          device.status === "active" &&
++          device.grants.some(
++            (grant) =>
++              grant.scope_id === scope &&
++              grant.permissions.some((permission) =>
++                sharingPermissions.has(permission),
++              ),
++          ),
++      )
++      .map((device) => device.device_id),
++  );
++  return [
++    ...new Map(
++      sources
++        .filter(
++          (source) =>
++            source.scope_id === scope &&
++            source.status === "active" &&
++            source.device_status === "active" &&
++            allowed.has(source.device_id),
++        )
++        .map((source) => [source.source_id, source]),
++    ).values(),
++  ];
++}
++
++export async function getAllHubSources(
++  instance: string,
++  scope: string,
++  signal: AbortSignal,
++): Promise<HubSource[]> {
++  const sources = new Map<string, HubSource>();
++  const visited = new Set<number>();
++  let offset: number | null = 0;
++  while (offset !== null) {
++    if (visited.has(offset))
++      throw new HubError("来源列表分页未能完成，请刷新后重试。");
++    visited.add(offset);
++    const page = await getHubSummary(instance, scope, offset, signal);
++    for (const source of page.sources) sources.set(source.source_id, source);
++    offset = page.next_offset;
++    signal.throwIfAborted();
++  }
++  return [...sources.values()];
++}

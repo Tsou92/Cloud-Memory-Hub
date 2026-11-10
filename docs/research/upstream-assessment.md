@@ -161,3 +161,6 @@ Linux CI 随后暴露本地来源根目录 inode 复用。继续复用固定 Cor
 轻量配置器仅负责配对和配置；JSONC／YAML 写入复用安装的 OpenCode／Hermes 官方命令，
 不复制解析器或安装整个 Core。补丁 0037 只为既有控制台增加默认接入卡片，保留高级 JSON 路径。
 范围、兼容与失败恢复见 [ADR-0065](../adr/0065-one-link-remote-agent-onboarding.md)。
+
+
+2026-11-10 参考图改版继续复用既有 HubConsole、HubContext、SdkMemoryLibrary、SdkRawHistory、ModelSettings、连接／备份／问答／治理组件。固定上游没有按 Hub 项目授权显示的协作网络和接纳统计，因此补丁 0040 只重组壳层、总览与样式，并复用 summary/device 分页和既有响应校验。Hub 新增只读投影复用来源、grant、事件回执、Core 队列元数据及 ScopeGrant 校验；不复制记忆核心，不引入监控或心跳服务。接口及兼容说明见 [ADR-0066](../adr/0066-reference-dashboard.md)。

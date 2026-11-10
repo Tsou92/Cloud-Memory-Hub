@@ -29,7 +29,15 @@ def test_connection_resources_need_origin_but_not_administrator(tmp_path):
             for path in PUBLIC_CONNECT_PATHS:
                 reply = await client.get(path)
                 assert reply.status_code == 200
-                assert reply.headers["cache-control"] == "no-store"
+                if path == "/hub/assets/hub-orb-v1.png":
+                    assert reply.headers["cache-control"] == "public, max-age=86400"
+                    assert reply.headers["content-type"] == "image/png"
+                    assert reply.content.startswith(b"\x89PNG\r\n\x1a\n")
+                    head = await client.head(path)
+                    assert head.status_code == 200 and head.content == b""
+                    assert head.headers["content-length"] == str(len(reply.content))
+                else:
+                    assert reply.headers["cache-control"] == "no-store"
                 assert reply.headers["referrer-policy"] == "no-referrer"
                 assert config.admin_token not in reply.text
                 assert "internal-test-only" not in reply.text

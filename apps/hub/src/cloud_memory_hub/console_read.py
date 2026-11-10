@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
+from cloud_memory_hub.console_dashboard import dashboard
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
 from cloud_memory_hub.read_contract import (
     READ_RESPONSE_BYTES,
@@ -161,6 +162,14 @@ class ConsoleRead:
     async def summary(self, request, *, session_credential=""):
         return await run_in_threadpool(
             self._summary, request, self.request_privacy(session_credential)
+        )
+
+    async def dashboard(self, request, *, session_credential=""):
+        return await run_in_threadpool(
+            dashboard,
+            self,
+            request.scope_id,
+            self.request_privacy(session_credential),
         )
 
     async def read(self, operation, request, *, session_credential=""):

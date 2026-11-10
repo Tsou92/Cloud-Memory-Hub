@@ -26,6 +26,9 @@ apps/hub/src/*
 !apps/hub/src/cloud_memory_hub/
 apps/hub/src/cloud_memory_hub/*
 !apps/hub/src/cloud_memory_hub/*.py
+!apps/hub/src/cloud_memory_hub/web_assets/
+apps/hub/src/cloud_memory_hub/web_assets/*
+!apps/hub/src/cloud_memory_hub/web_assets/hub-orb.png
 !apps/hub/src/cloud_memory_hub/onboarding/
 apps/hub/src/cloud_memory_hub/onboarding/*
 !apps/hub/src/cloud_memory_hub/onboarding/__init__.py
