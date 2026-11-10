@@ -149,6 +149,11 @@
       "path": "patches/0029-sdk-anthropic-qa.patch",
       "scope": "reuse_anthropic_messages_for_sdk_memory_question_answering",
       "digest": "sha256:56b76300dbd977b96c5bb196d47bac263f49f437b00e87e609579792e4c2efad"
+    },
+    {
+      "path": "patches/0030-hub-console-governance.patch",
+      "scope": "administrator_ordinary_memory_forget_preview_confirmation_and_idempotent_recovery",
+      "digest": "sha256:f8d3f86358d3dd825290059f2be8a176c8145ea44156b74fc2c2dac4a6efde7b"
     }
   ]
 }
