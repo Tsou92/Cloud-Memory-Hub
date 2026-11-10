@@ -3,8 +3,8 @@
 Run beside probe_agent_access.py, probe_claude_recall.py and probe_claude_native.py
 with the installed Hub Python. Only temporary identities/storage and a synthetic
 extractor are used. No external model, existing Agent configuration, purge or
-backup restore is exercised. The current blocked client queue is reported as a
-limitation, not as completed client-side rule propagation.
+backup restore is exercised. Terminal upload rejection is distinct from full
+client-side rule propagation or deletion of locally retained content.
 """
 
 import json
@@ -30,6 +30,25 @@ from probe_agent_access import LiveHub, device_config
 TEXT = "Synthetic orchard plan: the shared release meeting takes place every Friday afternoon."
 NEW_TEXT = "Synthetic new packaging detail accompanies the old orchard plan."
 LATER_TEXT = "Synthetic unrelated telescope progress follows the suppressed event."
+
+
+class UploadObserver:
+    """Count real HTTP upload attempts without reading or storing request bodies."""
+
+    def __init__(self, app):
+        self.inner = app
+        self.core = app.core
+        self.statuses = []
+
+    async def __call__(self, scope, receive, send):
+        upload = scope.get("method") == "POST" and scope.get("path") == "/hub/v1/events"
+
+        async def observed(message):
+            if upload and message["type"] == "http.response.start":
+                self.statuses.append(message["status"])
+            await send(message)
+
+        await self.inner(scope, receive, observed)
 
 
 def invoke(settings, command, payload=None):
@@ -120,7 +139,7 @@ def server_state(hub):
         ).fetchall()
     with hub.app.core.state.cmh_ingest._database() as db:
         receipts = db.execute(
-            "SELECT device_id,event_id,receipt_id FROM cmh_event_receipts "
+            "SELECT device_id,event_id,receipt_id,request_id FROM cmh_event_receipts "
             "ORDER BY device_id,event_id"
         ).fetchall()
         receipts = [tuple(row) for row in receipts]
@@ -148,6 +167,8 @@ def forget(hub, scope, memory_id):
 
 
 def exercise(hub, root):
+    observer = UploadObserver(hub.app)
+    hub.app = observer
     hub.run(stop_drain(hub))
     scope = hub.call(
         "/hub/v1/projects",
@@ -177,15 +198,67 @@ def exercise(hub, root):
 
     forget(hub, scope, memory_id)
     baseline = server_state(hub)
+    before_reconnect = len(observer.statuses)
     hub.offline = False
     resumed = invoke(second, "sync")
-    assert resumed["delivery"] == "failed" and resumed["retryable"] is False
-    assert resumed["error"] == "remote_identity_conflict", "unexpected_client_409_mapping"
-    assert resumed["queued"] == 2 and resumed["accepted"] == 0, "blocked_queue_changed"
-    assert server_state(hub) == baseline, "rejected_replay_changed_server_intake"
+    print(
+        json.dumps(
+            {
+                "phase": "reconnect",
+                "queued": resumed["queued"],
+                "accepted": resumed["accepted"],
+                "rejected": resumed["rejected"],
+                "error": resumed.get("error"),
+                "upload_statuses": observer.statuses[before_reconnect:],
+            }
+        ),
+        flush=True,
+    )
+    assert resumed["queued"] == 0 and resumed["accepted"] == 1, (
+        "terminal_rejection_did_not_continue_to_later_event"
+    )
+    assert resumed["delivery"] == "attempted" and "error" not in resumed
+    assert resumed["rejected"] == {"governance_content_suppressed": 1}
+    assert observer.statuses[before_reconnect:] == [409, 202], "unexpected_upload_attempts"
+    after_reconnect = server_state(hub)
+    added_jobs = set(after_reconnect[0]) - set(baseline[0])
+    added_receipts = set(after_reconnect[1]) - set(baseline[1])
+    assert len(added_jobs) == len(added_receipts) == 1, "later_event_not_accepted_once"
+    device_id, event_id, receipt_id, request_id = next(iter(added_receipts))
+    assert (device_id, event_id) == (service.connection.device_id, later["event_id"])
+    assert added_jobs == {(receipt_id, request_id)}, "later_event_job_receipt_mismatch"
+    assert set(baseline[0]) <= set(after_reconnect[0])
+    assert set(baseline[1]) <= set(after_reconnect[1])
 
-    # Observe the precise public server reason without relying on the client's
-    # current generic 409 mapping. The duplicate rejection remains side-effect free.
+    reopened = AgentSettings.from_file(second).open()
+    assert reopened.outbox.pending() == (), "terminal_event_remains_pending"
+    repeated = reopened.outbox.enqueue(mixed)
+    assert repeated == {
+        "event_id": mixed["event_id"],
+        "status": "rejected",
+        "receipt_id": None,
+        "error": "governance_content_suppressed",
+        "retryable": False,
+    }, "repeated_enqueue_lost_terminal_reason"
+    assert reopened.outbox.enqueue(later) == {
+        "event_id": later["event_id"],
+        "status": "accepted",
+        "receipt_id": receipt_id,
+    }
+    with sqlite3.connect(reopened.outbox.path) as db:
+        retained = db.execute(
+            "SELECT payload FROM events WHERE event_id=?", (mixed["event_id"],)
+        ).fetchone()
+    expected_payload = prepare_event(mixed, reopened.privacy).canonical_payload()
+    assert retained == (expected_payload,), "rejected_payload_not_retained"
+    before_retry = list(observer.statuses)
+    retried = invoke(second, "sync")
+    assert retried == resumed, "reopened_sync_changed_terminal_counts"
+    assert observer.statuses == before_retry, "reopened_sync_repeated_upload"
+    assert server_state(hub) == after_reconnect, "reopened_sync_changed_server_intake"
+
+    # Observe the precise public server reason independently. This deliberate
+    # direct retry is distinct from the client's verified no-upload retry above.
     rejection = hub.call(
         "/hub/v1/events",
         method="POST",
@@ -194,9 +267,7 @@ def exercise(hub, root):
         body=mixed,
     )
     assert rejection == {"detail": "governance_content_suppressed"}
-    assert server_state(hub) == baseline, "repeated_rejection_changed_server_intake"
-    pending = AgentSettings.from_file(second).open().outbox.pending()
-    assert [row.event_id for row in pending] == [mixed["event_id"], later["event_id"]]
+    assert server_state(hub) == after_reconnect, "repeated_rejection_changed_server_intake"
     after = invoke(second, "search", {"query": TEXT})
     assert not any(row["record_id"] == memory_id for row in after["items"]), "forgotten_recalled"
     history = hub.call(
@@ -207,19 +278,24 @@ def exercise(hub, root):
     )
     assert len(history["items"]) == 1 and TEXT in history["items"][0]["content"]
     return {
-        "server_checks_passed": [
+        "checks_passed": [
             "peer_read_before_forget",
             "offline_queue_persisted_across_client_processes",
             "ordinary_forget_completed",
             "changed_source_mixed_event_rejected_in_full",
-            "no_new_receipt_or_write_job_after_reconnect",
+            "rejected_event_has_no_receipt_or_write_job",
+            "later_valid_event_has_one_receipt_and_write_job",
+            "terminal_reason_and_payload_retained_after_reopen",
+            "same_event_enqueue_remains_rejected",
+            "reopened_sync_does_not_repeat_uploads",
             "forgotten_memory_not_returned_by_search",
             "retained_original_explicitly_readable",
         ],
         "server_rejection": "governance_content_suppressed",
-        "client_error": resumed["error"],
+        "client_rejected": resumed["rejected"],
+        "client_accepted": resumed["accepted"],
         "client_pending": resumed["queued"],
-        "client_limitation": "permanent_rejection_retains_and_blocks_later_queue_items",
+        "terminal_rejection_continuation_verified": True,
         "client_rule_propagation_verified": False,
         "external_model_used": False,
         "real_two_host_network_test": False,

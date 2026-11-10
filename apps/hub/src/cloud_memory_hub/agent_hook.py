@@ -162,6 +162,8 @@ async def process_message(service, message):
     # Local receipt lookup also runs after cancellation; a queued write stays visible.
     saved = await service.capture_message(**arguments)
     status["capture"] = saved["status"]
+    if saved["status"] == "rejected":
+        status["capture_error"] = saved["error"]
     return output, status
 
 

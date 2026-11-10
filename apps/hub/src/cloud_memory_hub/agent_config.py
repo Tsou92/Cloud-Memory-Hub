@@ -94,3 +94,12 @@ class AgentSettings:
             privacy=privacy,
         )
         return AgentAccess(connection, outbox, scope_id=self.scope_id, source_id=self.source_id)
+
+    def upgrade_outbox(self, backup_file: Path) -> dict:
+        connection = RemoteConnection.from_file(self.connection_file)
+        return LocalOutbox.upgrade(
+            self.state_dir / "outbox.sqlite3",
+            instance_id=connection.instance_id,
+            device_id=connection.device_id,
+            backup_file=backup_file,
+        )
