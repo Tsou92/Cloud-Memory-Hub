@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
-FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70 AS source
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS source
+RUN apt-get -o Acquire::Retries=0 update \
+    && apt-get -o Acquire::Retries=0 upgrade -y \
+    && apt-get -o Acquire::Retries=0 install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace
 COPY scripts/__init__.py scripts/check_repository.py scripts/prepare_upstream.py ./scripts/
@@ -16,7 +18,9 @@ ENV VITE_CORE_URL=/ VITE_CMH_CONSOLE=true
 RUN pnpm --filter @one-memory/web... -r build
 
 FROM web AS web-tests
-RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+RUN apt-get -o Acquire::Retries=0 update \
+    && apt-get -o Acquire::Retries=0 upgrade -y \
+    && apt-get -o Acquire::Retries=0 install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
 RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
     src/MemorySpace.sdk-start.test.tsx src/MemorySpace.test.tsx \
@@ -37,8 +41,10 @@ RUN /opt/cmh/venv/bin/python -c \
     "import shutil; from one_memory.embedding_assets import resolve_asset_dir, verify_assets; shutil.copytree('/embedding-assets', resolve_asset_dir(), dirs_exist_ok=True); verify_assets()"
 RUN /opt/cmh/venv/bin/cloud-memory-connector --help > /dev/null
 
-FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70 AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 ca-certificates \
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS runtime
+RUN apt-get -o Acquire::Retries=0 update \
+    && apt-get -o Acquire::Retries=0 upgrade -y \
+    && apt-get -o Acquire::Retries=0 install -y --no-install-recommends libgomp1 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 1000 --create-home cmh \
     && mkdir -p /data /config /governance /backups \
