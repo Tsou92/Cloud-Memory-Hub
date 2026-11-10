@@ -1,0 +1,173 @@
+diff --git a/memhub/apps/core/tests/test_connection_lifetime.py b/memhub/apps/core/tests/test_connection_lifetime.py
+index 1356920..45e360c 100644
+--- a/memhub/apps/core/tests/test_connection_lifetime.py
++++ b/memhub/apps/core/tests/test_connection_lifetime.py
+@@ -11,8 +11,11 @@ limit of 61,440 open files; every later open then failed and the app answered
+ import asyncio
+ import gc
+ import sqlite3
++import threading
++import weakref
+ from contextlib import contextmanager
+
++import pytest
+ from httpx import ASGITransport, AsyncClient
+ from pydantic import SecretStr
+
+@@ -21,8 +24,38 @@ from one_memory.config import Settings
+ from one_memory.imports.sources.registry import build_source_catalog
+
+
+-def _open_connections() -> int:
+-    return sum(isinstance(item, sqlite3.Connection) for item in gc.get_objects())
++class _TrackedConnection(sqlite3.Connection):
++    # Add weak-reference support without changing close, caching, or transactions.
++    __slots__ = ("__weakref__",)
++
++
++class _ConnectionTracker:
++    def __init__(self, connect):
++        self._connect = connect
++        self._references = []
++        self._lock = threading.Lock()
++
++    def connect(self, *args, **kwargs):
++        # The fixed Core/SDK/Chroma paths use the default connection factory.
++        # An unexpected factory must fail this test instead of escaping its count.
++        assert len(args) < 6 and "factory" not in kwargs, "untracked connection factory"
++        connection = self._connect(*args, **kwargs, factory=_TrackedConnection)
++        with self._lock:
++            self._references.append(weakref.ref(connection))
++        return connection
++
++    def count(self) -> int:
++        with self._lock:
++            references = list(self._references)
++        return sum(reference() is not None for reference in references)
++
++
++@pytest.fixture
++def connection_tracker(monkeypatch):
++    tracker = _ConnectionTracker(sqlite3.connect)
++    monkeypatch.setattr(sqlite3, "connect", tracker.connect)
++    monkeypatch.setattr(sqlite3.dbapi2, "connect", tracker.connect)
++    return tracker
+
+
+ @contextmanager
+@@ -36,7 +69,9 @@ def _without_cyclic_collection():
+         gc.collect()
+
+
+-def test_polled_endpoints_close_every_connection_they_open(tmp_path, monkeypatch):
++def test_polled_endpoints_close_every_connection_they_open(
++    tmp_path, monkeypatch, connection_tracker
++):
+     monkeypatch.setattr("one_memory.model_presets._preset_data", lambda: None)
+     home = tmp_path / "home"
+     home.mkdir()
+@@ -71,10 +106,102 @@ def test_polled_endpoints_close_every_connection_they_open(tmp_path, monkeypatch
+             for path in paths:
+                 await client.get(path)
+             with _without_cyclic_collection():
+-                before = _open_connections()
++                before = connection_tracker.count()
+                 for path in paths:
+                     await client.get(path)
+-                left_open = _open_connections() - before
++                left_open = connection_tracker.count() - before
+             assert left_open == 0, f"{left_open} connections left for the collector"
+
+     asyncio.run(scenario())
++
++
++@pytest.mark.parametrize("entrypoint", ["sqlite3", "dbapi2"])
++def test_counter_detects_unclosed_connections_without_retaining_them(
++    connection_tracker, entrypoint
++):
++    connect = sqlite3.connect if entrypoint == "sqlite3" else sqlite3.dbapi2.connect
++
++    def use_connection(*, close):
++        connection = connect(":memory:")
++        connection.execute("SELECT 1").fetchone()
++        reference = weakref.ref(connection)
++        if close:
++            connection.close()
++        return reference
++
++    with _without_cyclic_collection():
++        before = connection_tracker.count()
++        closed = use_connection(close=True)
++        assert closed() is None
++        assert connection_tracker.count() == before
++        unclosed = use_connection(close=False)
++        try:
++            assert unclosed() is not None
++            assert connection_tracker.count() == before + 1
++        finally:
++            if unclosed() is not None:
++                unclosed().close()
++        assert unclosed() is None
++        assert connection_tracker.count() == before
++
++
++@pytest.mark.parametrize("positional", [False, True])
++def test_counter_rejects_an_untracked_factory(connection_tracker, positional):
++    class OtherConnection(sqlite3.Connection):
++        pass
++
++    with pytest.raises(AssertionError, match="untracked connection factory"):
++        if positional:
++            sqlite3.connect(":memory:", 5.0, 0, "", True, OtherConnection)
++        else:
++            sqlite3.connect(":memory:", factory=OtherConnection)
++    assert connection_tracker.count() == 0
++
++
++def test_counter_does_not_retain_a_concurrently_growing_tuple(connection_tracker, monkeypatch):
++    entered, resume, finished = threading.Event(), threading.Event(), threading.Event()
++    errors, result = [], []
++    snapshot_calls = 0
++    get_objects = gc.get_objects
++
++    def values():
++        for value in range(20):
++            if value == 10:
++                entered.set()
++                assert resume.wait(5), "counter did not release tuple construction"
++            yield value
++
++    def construct():
++        try:
++            result.append(tuple(values()))
++        except BaseException as error:  # noqa: BLE001 - worker errors must fail the test
++            errors.append(error)
++        finally:
++            finished.set()
++
++    def held_heap_snapshot():
++        nonlocal snapshot_calls
++        snapshot_calls += 1
++        # Fix the old counter's thread interleaving: retain the real heap snapshot
++        # while tuple() resizes its partially filled tuple. No exception is faked.
++        # The replacement counter must never enter this wrapper.
++        snapshot = get_objects()
++        resume.set()
++        assert finished.wait(5), "tuple construction did not finish"
++        return snapshot
++
++    monkeypatch.setattr(gc, "get_objects", held_heap_snapshot)
++    # Collect before the worker starts; collecting the partial tuple could untrack it.
++    with _without_cyclic_collection():
++        worker = threading.Thread(target=construct)
++        worker.start()
++        try:
++            assert entered.wait(5), "tuple construction did not reach its resize"
++            assert connection_tracker.count() == 0
++        finally:
++            resume.set()
++            worker.join(5)
++        assert not worker.is_alive()
++        assert [str(error) for error in errors] == []
++        assert result == [tuple(range(20))]
++        assert snapshot_calls == 0

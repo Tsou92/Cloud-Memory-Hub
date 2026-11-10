@@ -83,3 +83,11 @@
 - 复用现有日志 factory、handler、formatter、轮转与 strict policy 锁，新增同步维护租约、受控关闭和按原配置接管新流。Hub 文件执行器负责精确授权、持久 staging 与真实字节检查；上游不增加治理数据库或删除选择算法。
 - 原生 FileHandler 在文件替换后仍持有旧 inode，关闭后 emit 又可能自动重开，故仅替换文件或普通 close 不足以保证恢复。补丁让失败的受控处理器保持封闭，重试后绑定当前文件；未知调用者文件流与自定义轮转明确拒绝。
 - 原生新增与相关回归 192 项、Core 39 项通过。合同与完整执行边界见 [ADR-0043](../../docs/adr/0043-diagnostic-physical-execution.md)；不据此宣称 Core 旧日志、Docker 历史输出或全部 purge 已清理。
+
+## 0039-sqlite-connection-test-observer.patch
+
+- 类型：仅测试观测器与校准回归，作用于固定上游的 `test_connection_lifetime.py`；不修改 Core／SDK 运行时代码。
+- 根因：原 `gc.get_objects()` 全堆快照会持有后台线程尚在构造的元组，Python 3.12.9 的真实 `_settings` 路径因此产生 `tupleobject.c:909`，并诱发连接 checkout 无法完整收尾。
+- 修复：测试在应用创建前通过原生连接 factory 登记弱引用；Connection 子类仅增加弱引用槽，不覆盖 close、缓存或事务方法。保留预热、全部 GET 路径、`gc.disable()`、原后台生命周期与 `left_open == 0`。意外工厂在打开连接前明确拒绝，避免漏计。
+- 验证：官方隔离 runner 中，恢复原计数表达式的独立修前对照稳定失败，实际异常与 CI 相同；修后本文件 6 项通过，与未改数据库访问测试同进程运行共 39 项通过，生成测试索引仍为 343 文件。关闭／故意漏关连接和并发 tuple 构造均使用真实 Python / SQLite 行为，无假异常或超时放宽。
+- 范围与完整验证记录见 [SQLite 测试观测器记录](../../docs/reviews/2026-11-10-sqlite-test-counter.md)。完整 Core 远程 CI 仍需由新提交执行，本记录不替代它。
