@@ -2,6 +2,12 @@
 
 本索引记录新增发布修复的相关测试，不代替全套测试收集或真实客户端验收。
 
+## ADR-0063：受控定期备份
+
+- 需求：FR-11、FR-13、R3-01；设计见 [ADR-0063](../../../docs/adr/0063-managed-backup-and-recovery.md)。
+- `test_backup_store.py` 与 `test_backup_runtime.py`：三卷清单、真实 Core／SDK 快照、WAL、损坏／不安全文件、失败发布、保留清理、持久计划、真实子进程及 Uvicorn 停机／重启、满盘状态故障恢复和真实快照组合。合计 59 项；对应上游快照／备份／维护恢复回归 27 项通过。
+- 证据与未部署边界见[备份第一步记录](../../../docs/reviews/2026-11-10-managed-backup.md)。
+
 ## ADR-0062：客户端只读处理进度
 
 - 需求：FR-01、FR-02、FR-07、FR-12、R2-04；设计见 [ADR-0062](../../../docs/adr/0062-client-processing-status.md)。

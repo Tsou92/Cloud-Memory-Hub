@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import secrets
+import signal
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -15,6 +17,21 @@ from cloud_memory_hub.diagnostics import initialize_diagnostics, install_process
 from cloud_memory_hub.governance_authority import activate_authority, require_separate_directory
 from cloud_memory_hub.remote_access import DeviceAccessStore
 from cloud_memory_hub.storage_lease import StorageLease, StorageLeaseError
+
+
+@contextmanager
+def graceful_sigterm():
+    """Let Uvicorn re-raise SIGTERM after cleanup without an ambiguous -15 exit.
+
+    Uvicorn owns the signal during its lifespan. Its final re-raise invokes this
+    saved handler only after shutdown, so the supervisor can require exit zero.
+    A TERM before this context is installed remains an unsuccessful stop.
+    """
+    previous = signal.signal(signal.SIGTERM, lambda *_: None)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def initialize(directory: Path, *, governance_dir: Path) -> None:
@@ -59,6 +76,7 @@ def _main() -> None:
         "command",
         choices=[
             "serve",
+            "supervise",
             "init",
             "migrate-governance",
             "migrate-originals",
@@ -165,19 +183,26 @@ def _main() -> None:
         parser.error("serve uses CMH_CONFIG_DIR / CMH_GOVERNANCE_DIR environment settings")
     config = HubConfig.from_environment()
     config.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if args.command == "supervise":
+        from cloud_memory_hub.backup_runtime import serve_supervised
+
+        serve_supervised(config, Path(os.environ.get("CMH_BACKUP_DIR", "/backups")))
+        return
     with StorageLease(config.data_dir, config.config_dir, config.governance_dir):
         import uvicorn
 
         from cloud_memory_hub.app import create_hub
 
-        uvicorn.run(
-            create_hub(config),
-            host=config.host,
-            port=config.port,
-            access_log=False,
-            proxy_headers=False,
-            log_config=None,
-        )
+        application = create_hub(config)
+        with graceful_sigterm():
+            uvicorn.run(
+                application,
+                host=config.host,
+                port=config.port,
+                access_log=False,
+                proxy_headers=False,
+                log_config=None,
+            )
 
 
 def main() -> None:
