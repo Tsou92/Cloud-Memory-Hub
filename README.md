@@ -10,20 +10,20 @@
 
 ## 当前状态与支持范围
 
-**当前是面向自行部署用户的发行候选开发阶段，产品版本为 `0.1.0.dev0`，尚未发布正式版本标签或可下载的正式 Release。** 截至 2026-11-10，公开源码基线为 `6337a61`；首次[远程 CI](https://github.com/Tsou92/Cloud-Memory-Hub/actions/workflows/quality.yml)已启动，两项 quality 检查通过，runtime 尚未完成，完整门禁仍待验收。早期 MVP 的两机结果也不能替代新发行包验收。
+**当前是面向自行部署用户的发行候选开发阶段，产品版本为 `0.1.0.dev0`，尚未发布正式版本标签或可下载的正式 Release。** 截至 2026-11-10，提交 `ad8d661` 的[远程 CI](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42768563998)中，两项 quality 检查通过，Hub 测试 2,162 项通过、6 项跳过；Core 有两项因 Linux 目录 inode 复用暴露真实授权缺陷而失败。补丁 0034 已修复该问题，本机完整 Core 5,231 项通过，NAS 定向 166 项通过；最终提交的远程 CI 和发行镜像尚待验收，仍不能发布。客户端局部验收通过不代表完整门禁通过。
 
 | 入口 | 当前能力 | 验收边界 |
 | --- | --- | --- |
 | NAS 服务 | Linux amd64，Docker / Compose；项目隔离、共享记忆、原文与交接 | 已有真实 NAS 运行与两台 Mac 读写证据；其他架构未验 |
-| Mac 候选客户端 | arm64、Python 3.12；独立安装、配对、MCP 配置导出、后台补传与状态 | 本机全新安装及 NAS 联调通过；新包的 Mac mini 安装与真实宿主接入仍待验 |
-| Claude Code CLI | MCP / Skill 与指定项目的逐轮 hooks | 早期 MVP 已验证真实模型读写和同会话下一轮召回 |
+| Mac 候选客户端 | arm64、Python 3.12；独立安装、配对、MCP 配置导出、后台补传与状态 | preview.4 两台 Mac 安装、双向原文／交接及单端撤销通过；独立空卷实例真实网页登录、下载配对和客户端导入已通过 |
+| Claude Code CLI | MCP / Skill 与指定项目的逐轮 hooks | preview.4 与真实 CLI 2.1.321 完成 2 轮采集、4 轮同会话召回；使用本地合成 Hub 和模型替身，不代表 NAS／外部模型联调 |
 | Codex 桌面 | MCP / Skill / CLI 工作流 | 已在真实桌面对话中验证原生 MCP 读写；每轮自动触发未验 |
 | 其他 Agent | 通用 MCP 或 Skill + CLI 接口 | OpenCode、Hermes、Cherry Studio、Open Design 等仍需逐一宿主验收 |
-| 管理网页 | 项目、记忆、原文、来源、带引用的问答、普通忘记、设备配对、备份设置 | 组件与构建验证已有记录；真实浏览器点击及完整视觉验收仍待完成 |
+| 管理网页 | 项目、记忆、原文、来源、带引用的问答、普通忘记、设备配对、备份设置 | 独立实例真实配对、模型候选及连接测试、备份、项目问答和忘记已验证；新手引导、来源查看及窄屏复验通过；最终 NAS 制品仍待验 |
 
 NAS 已验证两版本自动备份及重启后计划保留，并完成受控恢复的 **11 项正常恢复检查与 7 项真实进程中断检查**：空三卷导入、历史回滚保留较新忘记／设备撤销、损坏归档拒绝及保护版本恢复。此证据使用独立合成数据，不包含 NAS 断电、硬盘故障或全部中断位置，见[演练记录](docs/backup-and-recovery.md#nas-恢复演练记录)。
 
-完整历史自动导入、所有 Agent 的自动采集、离线记忆读取缓存、离线删除规则传播和旧日志全域治理仍在后续范围。当前候选应先用独立项目和合成数据试用，保留原数据及备份；正式发行还需完成新包第二台 Mac、实际宿主、浏览器及远端 CI 验收。
+完整历史自动导入、所有 Agent 的自动采集、离线记忆读取缓存、离线删除规则传播和旧日志全域治理仍在后续范围。当前候选应先用独立项目和合成数据试用，保留原数据及备份；正式发行仍需完成最终 NAS 制品验收，并让包含授权修复的最终提交通过完整远程 CI，详见[客户端实测与边界](docs/reviews/2026-11-10-self-service-clients.md)。
 
 ## 从源码在 NAS 试部署
 
@@ -63,9 +63,9 @@ docker compose exec hub cat /config/admin-token
 
 | 内容 | 入口 |
 | --- | --- |
-| 两机共享记忆与交接 | [两台 Mac MVP](docs/reviews/2026-11-10-two-host-mvp.md) · [自动共享](docs/reviews/2026-11-10-visible-turn-mvp.md) |
+| 两机共享记忆与交接 | [preview.4 两机与 Claude CLI](docs/reviews/2026-11-10-self-service-clients.md) · [两台 Mac MVP](docs/reviews/2026-11-10-two-host-mvp.md) · [自动共享](docs/reviews/2026-11-10-visible-turn-mvp.md) |
 | 长期记忆与下一轮召回 | [显式记忆验收](docs/reviews/2026-11-10-explicit-memory.md) · [同会话与重连](docs/reviews/2026-11-10-next-turn-and-reconnect.md) · [队列拒绝修复](docs/reviews/2026-11-10-terminal-upload-rejections.md) |
-| 网页与候选客户端 | [控制台记录](docs/reviews/2026-11-10-project-console.md) · [Mac 安装及待验项](docs/reviews/2026-11-10-self-service-clients.md) · [模型配置](docs/reviews/2026-11-10-model-catalog.md) |
+| 网页与候选客户端 | [首次网页使用](docs/reviews/2026-11-10-browser-first-use.md) · [控制台记录](docs/reviews/2026-11-10-project-console.md) · [Mac 安装及待验项](docs/reviews/2026-11-10-self-service-clients.md) · [模型配置](docs/reviews/2026-11-10-model-catalog.md) |
 | 备份与恢复 | [操作及 NAS 演练](docs/backup-and-recovery.md) · [自动备份记录](docs/reviews/2026-11-10-managed-backup.md) |
 | 需求与支持边界 | [需求说明](docs/requirements.md) · [发布计划](docs/release-plan.md) · [六入口能力清单](docs/research/g1-client-capabilities.md) |
 | 工程与来源 | [工程规范](docs/engineering.md) · [上游复用清单](docs/research/upstream-assessment.md) · [架构](docs/architecture/overview.md) |

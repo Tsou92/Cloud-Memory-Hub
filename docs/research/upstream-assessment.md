@@ -140,3 +140,16 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 可继续原样复用无符号链接目录遍历、文件身份快照、总预算、原字节保留、临时文件证明、同步替换、原处理器重绑定，以及本轮实际 Core 写者维护。新合同的重点是分类/分帧、物理授权、覆盖域版本和父操作归属；跨项目混合旧内容仍按未确认范围拒绝。
 
 2026-11-10 公开发布准备：新增 Hub 管理员 scope 适配，复用现有 SDK 记忆库、原文组件和模型设置，不新建记忆存储或整套网页。问答继续复用 SdkMemoryAnswerer，并以现有 Anthropic Messages 转换器补 provider 分支；设计与接口边界见 [ADR-0057](../adr/0057-administrator-console-reads.md) 和 [ADR-0058](../adr/0058-anthropic-memory-question-answering.md)。本地验证不等于 NAS 或公开发行通过。
+
+Linux CI 随后暴露本地来源根目录 inode 复用。继续复用固定 Core 的 `imports/access.py`、
+`SourceGrantStore`、候选确认和描述符读取；原 `_changed_ns` 在 Linux 没有创建时间，
+且固定源码无 statx 适配，因此需要最小平台元数据封装。旧授权不能无证据自动升级，
+原两项失败测试保留，设计与兼容边界见 [ADR-0064](../adr/0064-source-root-generation.md)。
+
+首次网页使用继续复用 ModelSettings、SdkRawHistory、HubBackups 与既有恢复命令。
+补丁 0035 修正控制台 CSS 对原表单的覆盖、为完整 Hub 原文提供可读展示并保留原始内容、
+补齐现有备份指南入口；不新建历史协议或恢复实现，见[浏览器验收](../reviews/2026-11-10-browser-first-use.md)。
+
+补丁 0036 继续复用同一控制台、模型表单和客户端安装器，补清首次上手顺序及下载后的
+连接步骤。来源详情沿已有当前项目 `history-get` 与原文续页读取，忘记后仍须显式点击，
+不改变自动列表过滤；仅将已存在的来源字段接入前端类型及导航，不新增服务接口。
