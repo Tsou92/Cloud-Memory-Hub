@@ -15,33 +15,28 @@
 
 [产品主页](https://memoryhub.tsounas.cn) · [下载发行版](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest) · [接入指南](docs/client-installation.md) · [问题反馈](https://github.com/Tsou92/Cloud-Memory-Hub/issues)
 
+安装前请确认发行页已有公开的正式版本；发行包更新期间，请等待新版，不使用旧归档或测试制品代替。
+
 <a id="在-nas-安装发行版"></a>
 
 ## 🚀 三步部署
 
-从下方发行页选择已发布版本，在自己的 NAS 上部署。
+**推荐让电脑上的 Agent 帮你安装，不需要自己输入 Docker 命令。**
 
-1. **准备 NAS。** 使用 Linux amd64 主机，启用 Docker / Compose，并准备电脑可访问的 **HTTPS 入口**；已验证的跨设备方案使用 Tailscale HTTPS。
-2. **下载并导入。** 从[发行页](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest)下载 NAS 镜像、源码包和 `SHA256SUMS`，核对摘要后导入镜像、解压源码。默认接入无需下载 Mac 高级客户端包。
-3. **启动自己的 Hub。** 配置服务地址和持久存储，按[发行版首次运行](docs/development-runtime.md#发行版首次运行)启动并登录网页、创建项目。需要记忆自动提炼时，再配置并测试模型接口。
+1. **在 NAS 开启 Docker 和 SSH。** Docker 通常在「应用中心／容器管理」中；SSH 通常在「控制面板／终端」中。记下 NAS 地址、登录用户名和 SSH 端口。当前发行镜像适用于 Intel / AMD NAS（Linux amd64）。
+2. **复制下面的话给 Agent。** 使用电脑上能够执行终端命令的 Claude Code、Codex 等。替换三个括号里的信息；首次登录和必要授权按 Agent 提示在本机完成，密码不要发进聊天。
+3. **打开 Agent 返回的管理页面。** 在网页中配置模型、创建项目，然后连接各台设备上的 Agent。
 
-<details>
-<summary>查看下载后的校验与导入命令</summary>
-
-将同一发行版本的 NAS 镜像、源码包和 `SHA256SUMS` 放入 NAS 的同一个新目录。下面使用已发布版本作示例；只需将第一行的 `CMH_VERSION` 改为实际下载的版本号（保留 `v` 前缀），再在该目录执行：
-
-```sh
-CMH_VERSION=v0.1.2
-sha256sum --ignore-missing -c SHA256SUMS &&
-docker load -i "cloud-memory-hub-${CMH_VERSION}-linux-amd64.tar.gz" &&
-tar -xzf "cloud-memory-hub-${CMH_VERSION}-source.tar.gz" &&
-cd "cloud-memory-hub-${CMH_VERSION}" &&
-printf 'CMH_IMAGE=cloud-memory-hub:%s\n' "$CMH_VERSION"
+```text
+请帮我把 Cloud Memory Hub 部署到 NAS。
+NAS 地址：[填写地址]；SSH 用户名：[填写用户名]；SSH 端口：[填写端口，通常为 22]。
+请先阅读 https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/nas-installation.md ，
+按官方指南使用最新已发布版本，完成下载校验、Docker 部署、可访问的 HTTPS 入口和健康检查。
+已有实例请先备份，保留原数据和配置。需要我登录或授权时，请指导我在本机完成，不要让我把密码或密钥发到聊天。
+完成后给我管理页面地址，并指导我安全登录和连接 Agent。
 ```
 
-确认镜像包和源码包都通过校验。把终端最后输出的 `CMH_IMAGE` 配置行写入解压目录的 `.env`，再将 `CMH_PUBLIC_ORIGIN` 设为自己的真实 HTTPS 地址，继续[首次运行](docs/development-runtime.md#发行版首次运行)。已有实例升级前，先按[备份与恢复指南](docs/backup-and-recovery.md)保存配置和数据。
-
-</details>
+[不清楚 SSH 在哪里？查看安装说明](docs/nas-installation.md) · [熟悉 Docker？查看手动安装](docs/nas-installation.md#手动安装)
 
 ## 🔌 三步使用
 
@@ -74,7 +69,7 @@ printf 'CMH_IMAGE=cloud-memory-hub:%s\n' "$CMH_VERSION"
 
 | 想做什么 | 去这里 |
 | --- | --- |
-| 安装、升级或排查 NAS 服务 | [运行指南](docs/development-runtime.md) · [发行附件与校验](docs/release-artifacts.md) |
+| 首次部署、升级或排查 NAS 服务 | [让 Agent 帮你安装](docs/nas-installation.md) · [运行指南](docs/development-runtime.md) |
 | 连接 Agent、启用高级本地采集 | [设备与 Agent 接入](docs/client-installation.md) · [自动召回](docs/agent-recall.md) |
 | 配置备份、恢复历史版本 | [备份与恢复](docs/backup-and-recovery.md) |
 | 查看已完成与待完成能力 | [发布计划](docs/release-plan.md) · [需求说明](docs/requirements.md) |

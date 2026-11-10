@@ -4,7 +4,7 @@
 
 ## 发行版首次运行
 
-准备 Linux amd64 NAS 上的 Docker / Compose。按 [README](../README.md#在-nas-安装发行版)下载并校验镜像及源码包，导入镜像；
+不熟悉终端的用户先看[让 Agent 帮你安装](nas-installation.md)。手动操作时，准备 Linux amd64 NAS 上的 Docker / Compose，按[手动安装](nas-installation.md#手动安装)下载并校验镜像及源码包，导入镜像；
 在解压目录的 `.env` 填好固定 `CMH_IMAGE` 和自己的 `CMH_PUBLIC_ORIGIN`。本段仅用于全新实例；已有数据直接看[升级说明](#已有实例升级保持配置和身份)。
 
 ```sh
@@ -71,7 +71,7 @@ docker compose exec hub cat /config/admin-token
 
 先校验候选镜像的下载摘要、Linux amd64 平台和 `org.opencontainers.image.revision`，保留旧镜像。在私有目录保存原 Compose、`.env` 和实际三个卷名，记录旧版本；不要公开这些配置。沿用原 Compose 项目名、原 data/config/governance 卷、HTTPS Origin、端口和资源限制，不运行 `setup` 或 `init`。
 
-将 `.env` 的 `CMH_IMAGE` 改为已核验的固定候选镜像。已有 Compose 还需按本仓库配置为 `hub` 增加独立 `/backups` 挂载；目标目录须为运行用户 `1000:1000` 拥有、权限 `0700`。使用默认 `supervise`，移除已有的 `command: ["serve"]` 覆盖或明确改成 `command: ["supervise"]`。不要把备份放入运行三卷内，也不要更名或新建三业务卷来代替升级。
+将 `.env` 的 `CMH_IMAGE` 改为已核验的固定候选镜像。已有 Compose 仅在缺少 `/backups` 时按本仓库配置增加独立挂载；已经存在的备份挂载保持原样，不重复新增或改名。新增目标目录须为运行用户 `1000:1000` 拥有、权限 `0700`。使用默认 `supervise`，移除已有的 `command: ["serve"]` 覆盖或明确改成 `command: ["supervise"]`。不要把备份放入运行三卷内，也不要更名或新建三业务卷来代替升级。
 
 停止原 Hub 和所有挂载同一三卷的写者后，用候选镜像创建并完整检查升级前版本。此命令也适用于尚无备份调度器的旧镜像；备份实现来自候选镜像，数据与身份来自原卷：
 
@@ -132,11 +132,11 @@ SDK 和 Core 都从 manifest 固定源码及补丁构建，Hub 锁文件将两�
 
 ## NAS 目标与当前边界
 
-部署前应核对宿主可用资源及其他容器负载。当前容器限制为 3 GiB 内存、2 CPU，提炼任务并发为 1；这只是初始保护配置，不能替代真实模型、历史导入和索引负载测试。
+部署前按目标 NAS 的架构、可用内存、磁盘空间和其他容器负载确认资源余量。当前容器限制为 3 GiB 内存、2 CPU，提炼任务并发为 1；这只是初始保护配置，不能替代真实模型、历史导入和索引负载测试。
 
-运行数据与备份应使用独立的持久化位置，并在部署前核对存储冗余方案。可通过 `CMH_BACKUP_PATH` 将备份放在不同磁盘的私有目录；实际宿主路径、权限和容量告警仍须逐次部署核对。限定恢复流程已在 NAS 独立卷完成[演练](backup-and-recovery.md#nas-恢复演练记录)，不代表宿主磁盘故障已测。磁盘阵列不能代替版本备份。
+运行卷与备份应尽量放在不同故障域，可通过 `CMH_BACKUP_PATH` 将备份放在不同磁盘的私有目录；实际宿主路径、权限和容量告警仍须逐次部署核对。限定恢复流程已在 NAS 独立卷完成[演练](backup-and-recovery.md#nas-恢复演练记录)，不代表宿主磁盘故障已测。RAID0 中任一盘故障会影响该阵列，RAID5 也不能代替版本备份。
 
-当前 Compose 只发布本机回环端口。远程入口必须配置明确的 HTTPS Origin（`CMH_PUBLIC_ORIGIN`）并经过认证边界；还未提供或验证通用生产反向代理配置。远程 HTTPS 入口已通过[两台 Mac 的 MVP 验收](reviews/2026-11-10-two-host-mvp.md)，其他远程接入方式仍待实际验证。容器地址不能作为 NAS 外部可达地址使用。
+当前 Compose 只发布本机回环端口。远程入口必须配置明确的 HTTPS Origin（`CMH_PUBLIC_ORIGIN`）并经过认证边界；还未提供或验证通用生产反向代理配置。Tailscale HTTPS 已通过[两台 Mac 的 MVP 验收](reviews/2026-11-10-two-host-mvp.md)，其他 NAS 转发和第三方网络方案仍待实际验证。容器地址不能作为 NAS 外部可达地址使用。
 
 SSH 能连接不等于可以操作 Docker。部署前在同一账户执行 `docker info` 和 `docker compose version`；如果 Docker socket 返回权限错误，应先由 NAS 管理员配置账户权限。不能通过放宽 socket 的全局访问权限来绕过。当前核对结果见 [NAS 运行记录](reviews/2026-10-23-nas-preflight.md)。
 
