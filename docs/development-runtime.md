@@ -1,12 +1,32 @@
-# 实验容器运行指南
+# NAS 安装、运行与升级指南
 
-状态：用于开发与发行候选试部署，尚未完成正式发行验收。管理核心和网页复用 MemHub；普通业务的受控备份、空目标导入与同实例历史回滚已实现，并通过 NAS 的 11 项正常恢复及 7 项真实进程中断检查，操作与范围见[备份与恢复](backup-and-recovery.md)。下文保留旧实例迁移和诊断文件治理的独立边界，不以业务恢复通过代替全部旧日志治理；网络边界见 [ADR-0002](adr/0002-nas-runtime-boundary.md)，历史治理证据见[在途任务取消及恢复记录](reviews/2026-11-10-inflight-execution.md)。
+适用于公开发行版本的 NAS 安装与维护；下载、版本和校验文件以 [GitHub Releases](https://github.com/Tsou92/Cloud-Memory-Hub/releases) 为准。管理核心和网页复用 MemHub；普通业务的受控备份、空目标导入与同实例历史回滚已实现，并通过 NAS 的 11 项正常恢复及 7 项真实进程中断检查，操作与范围见[备份与恢复](backup-and-recovery.md)。下文保留旧实例迁移和诊断文件治理的独立边界，不以业务恢复通过代替全部旧日志治理；网络边界见 [ADR-0002](adr/0002-nas-runtime-boundary.md)，历史治理证据见[在途任务取消及恢复记录](reviews/2026-11-10-inflight-execution.md)。
 
-## 构建与首次运行
+## 发行版首次运行
 
-诊断恢复的只读维护入口为 `diagnostic-preview --writers-stopped --operation-id UUID`：先停止该实例所有写者，使用原 data/config/governance 卷与原私有配置运行命令。它持有现有存储租约，在普通服务启动之前读取实际已提交的 purge 和精确文件候选；返回元数据，不输出日志正文、不签确认、不执行删除。失败保留现场。新增 execution schema2 目前仅供隔离组件验证，普通服务明确拒绝该格式，不能在常驻实例自行迁移；该诊断文件治理的完整确认/恢复入口尚未交付，见 [ADR-0043](adr/0043-diagnostic-physical-execution.md)。
+准备 Linux amd64 NAS 上的 Docker / Compose。按 [README](../README.md#在-nas-安装发行版)下载并校验镜像及源码包，导入镜像；
+在解压目录的 `.env` 填好固定 `CMH_IMAGE` 和自己的 `CMH_PUBLIC_ORIGIN`。本段仅用于全新实例；已有数据直接看[升级说明](#已有实例升级保持配置和身份)。
 
-已有完整绑定的隔离 schema2 实例可显式运行 `activate-file-coverage --writers-stopped`，将文件覆盖要求提高到 SDK 和 Core 的四个范围。命令沿用该实例的三个目录、私有配置及互斥锁，只增加覆盖要求，不完成迁移、删除或业务恢复。成功响应中的 `pending` 表示待处理操作数，`changed=false` 表示已经启用；它们都不是日志正文已清除的证明。旧 schema1、绑定缺口或无效 witness 保持原状并拒绝；若提高要求后的复核失败，保留现场并可重试同一命令。提高后不能直接使用不认识该能力的旧程序；不要手工删除能力行以回退。详见 [ADR-0047](adr/0047-core-file-coverage-and-physical-authority.md)。普通服务的 schema2 限制仍保持。
+```sh
+docker compose run --rm setup &&
+docker compose up -d --no-build hub &&
+docker compose ps hub
+```
+
+初始化只做一次。启动后通过自己的 HTTPS 入口打开管理页，管理员凭证在 NAS 本机终端查看：
+
+```sh
+docker compose exec hub cat /config/admin-token
+```
+
+只在登录页粘贴凭证，随后创建项目、配置模型，再进入「连接 Agent」为每台电脑生成独立的一次性链接。
+电脑端跟随页面的一条命令或 Agent 安装话术即可，无须额外安装图形 App。用一条测试记忆完成保存和跨端读回，再试任务交接。
+
+默认端口只绑定 NAS 的 `127.0.0.1:8800`，不能在另一台电脑把 `localhost` 当作 NAS 地址。
+需用已配置的 HTTPS 反向代理连接该回环端口，并保证 `.env` 的 Origin 与浏览器实际地址一致；现有验收使用 Tailscale HTTPS。
+HTTPS 尚未准备好时先完成网络配置；不要关闭 TLS 校验或把管理员凭证放进公开链接。
+
+## 从源码构建与首次运行
 
 需要 Docker 与 Compose，以及可访问 GitHub、锁定依赖和 Hugging Face 模型文件的构建网络。目标为 Linux amd64；其他主机架构运行该镜像需要 Docker 的模拟支持。镜像包含第三方许可证和上游来源清单，以及构建时按固定摘要校验的内置检索模型；首次运行无需下载它。源码检出及依赖安装不会访问本机 Agent 历史。
 
@@ -37,17 +57,17 @@ docker compose exec hub cat /config/admin-token
 
 已有诊断文件的只读范围检查见 [ADR-0042](adr/0042-diagnostic-file-governance.md)。开发者可运行 `make probe-diagnostic-inventory` 验证真实接纳请求、原生共根日志及前后数据不变；该命令仅创建独立合成实例，不检查或清理日常数据。当前未接通管理员文件删除入口、持久清理进度或旧日志恢复重放，不因解析器返回 remove 就认为文件已经删除。
 
-此策略不清理升级前已存在的日志文件或 Docker 日志；回退旧镜像也会恢复旧诊断输出行为。正式实例升级仍需完成日志历史治理与整体恢复验收，不能只因新日志没有正文就认为旧副本已删除。
+此策略不清理升级前已存在的日志文件或 Docker 日志；回退旧镜像也会恢复旧诊断输出行为。普通业务升级按下文的备份和兼容性步骤执行；旧日志全域治理仍是单独的后续范围，不能只因新日志没有正文就认为旧副本已删除。
 
 - `hub_data` 保存 Core 数据、接纳的处理任务及索引；`hub_config` 保存管理员凭证、加密密钥、加密的模型凭证数据库，以及设备身份／项目授权、来源、事件回执及完整已过滤原文库。配置卷现在也包含长期历史正文，必须纳入与数据卷一致的私有备份和治理范围。设备权限协议见 [ADR-0004](adr/0004-remote-device-access.md)，上传及回滚语义见 [ADR-0006](adr/0006-remote-ingest.md)。
 - `hub_governance` 保存不含正文的治理意图、执行记录及独立 SDK 准入日志，独立挂载至 `/governance`；普通业务快照恢复不能覆盖或删除它。自定义 `CMH_GOVERNANCE_DIR` 时，目录不能位于 data/config 内，也不能包含它们。机制与限制见 [ADR-0011](adr/0011-governance-authority-and-offline-sync.md) 和 [ADR-0038](adr/0038-durable-sdk-admission.md)。
 - 普通停止使用 `docker compose down`；不加 `--volumes`。保留卷后再次启动会复用配置和数据。
-- 配置密钥丢失会导致加密凭证无法读取。候选 Compose 增加独立 `hub_backups` 卷与容器内调度，默认关闭；配置方法见[备份与恢复](backup-and-recovery.md)。新镜像默认 `supervise`，显式 `serve` 仍可用但不执行定时备份。已有自定义 Compose 需要增加 `/backups` 可写私有挂载。全量归档导入、保留当前安全授权与治理的同实例历史回滚、损坏归档拒绝和一次真实进程中断恢复已有 NAS 合成数据证据；断电、硬盘故障、全部中断位置及最终发行包仍未验，不能据此承诺任意灾难恢复。
+- 配置密钥丢失会导致加密凭证无法读取。候选 Compose 增加独立 `hub_backups` 卷与容器内调度，默认关闭；配置方法见[备份与恢复](backup-and-recovery.md)。新镜像默认 `supervise`，显式 `serve` 仍可用但不执行定时备份。已有自定义 Compose 需要增加 `/backups` 可写私有挂载。全量归档导入、保留当前安全授权与治理的同实例历史回滚、损坏归档拒绝和一次真实进程中断恢复已有 NAS 合成数据证据；0.1.2 最终发行包的 NAS 安装和升级已通过；断电、硬盘故障及全部中断位置仍未验，不能据此承诺任意灾难恢复。
 - 初始化中断后不要直接删除既有凭证重试；先检查配置卷并保留副本，避免覆盖已经使用的密钥。
 
 ## 已有实例升级（保持配置和身份）
 
-以下顺序复用已实现的冷备份与容器入口；最终候选在日常 NAS 上的升级、原 MCP 读回和失败回退联合验收仍待完成。仅适用于当前存储格式相容的版本；需要治理或原文迁移的旧实例，先按下文对应迁移说明处理，不能用换镜像绕过版本检查。
+以下顺序复用已实现的冷备份与容器入口。0.1.2 原发行镜像已完成隔离服务与日常 NAS 的冷备升级、原 MCP 读取／写入及读回，见[最终制品验收](reviews/2026-11-10-final-artifact-acceptance.md)；本轮没有重新执行失败回退，已有恢复演练保留其原版本边界。仅适用于当前存储格式相容的版本；需要治理或原文迁移的旧实例，先按下文对应迁移说明处理，不能用换镜像绕过版本检查。
 
 先校验候选镜像的下载摘要、Linux amd64 平台和 `org.opencontainers.image.revision`，保留旧镜像。在私有目录保存原 Compose、`.env` 和实际三个卷名，记录旧版本；不要公开这些配置。沿用原 Compose 项目名、原 data/config/governance 卷、HTTPS Origin、端口和资源限制，不运行 `setup` 或 `init`。
 
@@ -170,3 +190,9 @@ make check-container
 启动会先丢弃未提交到主日志的孤立计划，再完成待执行操作并重放已完成操作。仅恢复旧 Core 时仍使用原签名范围，不追加意图，也不清理后来无关任务。已完成 purge 的队列正文即使已变成严格清理标记，仍须重新压缩并核验，以覆盖旧页尚留正文的恢复点；历史操作较多时会重复全库压缩，当前没有恢复耗时上限承诺。
 
 代码、恢复测试与安装证据见[本轮验证记录](reviews/2026-11-10-inflight-execution.md)。这些历史治理能力仍不覆盖完整生产力治理、任意混搭备份恢复、离线删除传播或全部 SDK 副作用。发行候选已另行提供限定的[受控备份恢复](backup-and-recovery.md)，两者按各自范围验收；当前发布进度见[发布计划](release-plan.md)。
+
+## 高级诊断文件维护边界
+
+诊断恢复的只读维护入口为 `diagnostic-preview --writers-stopped --operation-id UUID`：先停止该实例所有写者，使用原 data/config/governance 卷与原私有配置运行命令。它持有现有存储租约，在普通服务启动之前读取实际已提交的 purge 和精确文件候选；返回元数据，不输出日志正文、不签确认、不执行删除。失败保留现场。新增 execution schema2 目前仅供隔离组件验证，普通服务明确拒绝该格式，不能在常驻实例自行迁移；该诊断文件治理的完整确认/恢复入口尚未交付，见 [ADR-0043](adr/0043-diagnostic-physical-execution.md)。
+
+已有完整绑定的隔离 schema2 实例可显式运行 `activate-file-coverage --writers-stopped`，将文件覆盖要求提高到 SDK 和 Core 的四个范围。命令沿用该实例的三个目录、私有配置及互斥锁，只增加覆盖要求，不完成迁移、删除或业务恢复。成功响应中的 `pending` 表示待处理操作数，`changed=false` 表示已经启用；它们都不是日志正文已清除的证明。旧 schema1、绑定缺口或无效 witness 保持原状并拒绝；若提高要求后的复核失败，保留现场并可重试同一命令。提高后不能直接使用不认识该能力的旧程序；不要手工删除能力行以回退。详见 [ADR-0047](adr/0047-core-file-coverage-and-physical-authority.md)。普通服务的 schema2 限制仍保持。
