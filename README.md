@@ -6,7 +6,7 @@
 
 已验证的日常入口为指定项目中的 Claude Code CLI 自动钩子，以及 Codex 桌面的 Skill／CLI 工作流。本轮 MacBook 的 Codex 桌面对话还实际完成原生 MCP 读取与写入；其他桌面会话及每轮自动触发仍未验证。已有 Agent 会话需要新会话或重新连接，才能加载更新后的 MCP 配置。
 
-当前正收口面向 GitHub 自行部署的产品发布：NAS 已备份升级到 `preview-f0f3740`，网页现按实际 Hub 项目读取记忆、原文和来源，提供带引用的 Anthropic 问答及普通忘记预览确认。安装、重启、真实模型和忘记后的召回验证通过；浏览器视觉、自助配对、全新客户端安装、自动备份恢复与正式发行仍未完成。参见[发布计划](docs/release-plan.md)与[控制台安装验收](docs/reviews/2026-11-10-project-console.md)。参赛准备在独立分支开展，不改变产品主体。
+当前正收口面向 GitHub 自行部署的产品发布：NAS 已备份升级到 `preview-92f0a02`，网页提供真实项目记忆、原文、来源、带引用的 Anthropic 问答、普通忘记及项目／设备配对。Mac arm64 候选包已在全新环境独立安装并配对，支持 MCP 配置导出和后台补传管理。浏览器视觉、新包第二台 Mac／实际宿主接入、自动备份恢复与正式发行仍未完成。参见[发布计划](docs/release-plan.md)、[控制台验收](docs/reviews/2026-11-10-project-console.md)和[自助客户端记录](docs/reviews/2026-11-10-self-service-clients.md)。参赛准备在独立分支开展，不改变产品主体。
 
 当前主线按用户确认收敛为多设备共享记忆、通用接入和任务交接。Agent 保存的记忆更新可直接读取；交接正文可按 ID 在另一端接续，无需等待 NAS 模型提炼。接入配置见 [Agent 使用说明](docs/agent-access.md)，最新结果见[两台 Mac 验收记录](docs/reviews/2026-11-10-two-host-mvp.md)。
 
@@ -14,7 +14,7 @@ MacBook 与 Mac mini 已分别安装客户端，使用独立设备、来源和�
 
 两台 Mac 的日常 Claude／Codex MCP 与 Skill 均已安装，原有配置保留并已备份。真实 Claude 模型已按 Skill 约定使用 MCP，保持同一会话读到 Mac mini 的新决定并保存交接；原生 Skill 只读调用也通过。新增当前轮自动 hook 已完成真实 Claude、NAS、Mini 的 4/4 隔离验收并安装到指定项目目录。前序 Codex 桌面验证使用 Skill 的本机 CLI 绑定读取 Claude 交接并保存接续；本轮新增的原生 MCP 证据见上文控制台记录。证据、安装验收及首次探针比对失败的复核见[自动共享记录](docs/reviews/2026-11-10-visible-turn-mvp.md)，宿主边界见[路线图](docs/roadmap.md)与[六入口能力清单](docs/research/g1-client-capabilities.md)。
 
-当前问题召回已升级到两台 Mac：每轮并行读取相关旧记忆和最近原文，真实 Claude 的项目 hook 与对端读回通过。NAS 模型配置已启用，支持自动获取候选列表；真实 Anthropic 提炼、两机双向语义搜索及 Mini 真实 Claude 原生 Skill 读取长期记忆并回答均已通过。当前服务为 `f0f3740`，客户端仍为 `60fb82b`；前序模型结果与边界见[模型配置记录](docs/reviews/2026-11-10-model-catalog.md)和[显式记忆验收](docs/reviews/2026-11-10-explicit-memory.md)。
+当前问题召回已升级到两台 Mac：每轮并行读取相关旧记忆和最近原文，真实 Claude 的项目 hook 与对端读回通过。NAS 模型配置已启用，支持自动获取候选列表；真实 Anthropic 提炼、两机双向语义搜索及 Mini 真实 Claude 原生 Skill 读取长期记忆并回答均已通过。当前服务为 `92f0a02`，客户端仍为 `60fb82b`；前序模型结果与边界见[模型配置记录](docs/reviews/2026-11-10-model-catalog.md)和[显式记忆验收](docs/reviews/2026-11-10-explicit-memory.md)。
 
 真实 Claude 已在同一会话的下一轮自动使用另一台 Mac 经断线补传后新提炼的长期记忆；重复发送只产生一份服务端任务。NAS 隔离验证同时确认遗忘内容不会因重投复活。被拒内容阻塞后续队列的问题已修复并备份升级至两台 Mac，原事件与回执保持；新版两机 MCP 7/7、实际项目钩子及双向读回通过。已有宿主会话需重连加载新 MCP，不能将配置切换视为热升级，见[修复记录](docs/reviews/2026-11-10-terminal-upload-rejections.md)。首次探针的文本比较误判及只读复核如实记录在[联合验收](docs/reviews/2026-11-10-next-turn-and-reconnect.md)。
 
