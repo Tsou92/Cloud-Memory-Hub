@@ -18,7 +18,7 @@ from cloud_memory_hub.events import (
     prepare_event,
     require_current_filter,
 )
-from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
+from cloud_memory_hub.privacy import CredentialFilter, PrivacyError, parse_json
 
 OUTBOX_VERSION = 2
 TERMINAL_REJECTION_CODE = "governance_content_suppressed"
@@ -39,6 +39,15 @@ class PendingEvent:
     event_id: str
     payload_digest: str
     payload: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class EventMetadata:
+    sequence: int
+    event_id: str
+    payload_digest: str
+    status: str
+    receipt_id: str | None
 
 
 def _private(path: Path, *, directory=False):
@@ -328,6 +337,67 @@ class LocalOutbox:
             result.append(
                 PendingEvent(
                     row["sequence"], row["event_id"], row["payload_digest"], row["payload"]
+                )
+            )
+        return tuple(result)
+
+    def recent_metadata(self, *, scope_id: str, source_id: str, limit: int = 5):
+        """Read a bounded, source-scoped sample; never expose or modify event content."""
+        try:
+            if scope_id != "global":
+                canonical_uuid(scope_id)
+            canonical_uuid(source_id)
+            if type(limit) is not int or not 1 <= limit <= 5:
+                raise ValueError
+        except (ValueError, TypeError, AttributeError):
+            raise OutboxError("invalid_metadata_query") from None
+        with self._connection() as db:
+            rows = db.execute(
+                "SELECT sequence,event_id,payload_digest,status,receipt_id,payload "
+                "FROM events WHERE json_extract(payload,'$.scope_id')=? "
+                "AND json_extract(payload,'$.source_id')=? AND NOT EXISTS "
+                "(SELECT 1 FROM delivery_rejections AS r WHERE r.event_id=events.event_id) "
+                "ORDER BY sequence DESC LIMIT ?",
+                (scope_id, source_id, limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                # Hydrate only selected rows to validate the authoritative binding and
+                # digest. SQLite's first-key JSON lookup alone cannot prove either.
+                event = EventEnvelope.model_validate(parse_json(row["payload"]))
+                require_current_filter(event, self.privacy)
+                if (
+                    (event.instance_id, event.device_id) != (self.instance_id, self.device_id)
+                    or (event.scope_id, event.source_id) != (scope_id, source_id)
+                    or event.event_id != row["event_id"]
+                    or event.canonical_payload() != row["payload"]
+                    or event.payload_digest() != row["payload_digest"]
+                    or type(row["sequence"]) is not int
+                    or row["sequence"] < 1
+                    or row["status"] not in {"accepted", "queued"}
+                ):
+                    raise ValueError
+                if row["status"] == "accepted":
+                    canonical_uuid(row["receipt_id"])
+                elif row["receipt_id"] is not None:
+                    raise ValueError
+            except (
+                ValidationError,
+                PrivacyError,
+                EventError,
+                ValueError,
+                TypeError,
+                AttributeError,
+            ):
+                raise OutboxError("outbox_metadata_corrupted") from None
+            result.append(
+                EventMetadata(
+                    row["sequence"],
+                    row["event_id"],
+                    row["payload_digest"],
+                    row["status"],
+                    row["receipt_id"],
                 )
             )
         return tuple(result)

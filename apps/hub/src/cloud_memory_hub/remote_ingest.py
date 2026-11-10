@@ -437,4 +437,6 @@ class RemoteIngest:
             },
             "status": "accepted",
             "processing_state": job.state,
+            "server_enqueued_at": job.created_at,
+            "processing_updated_at": job.updated_at,
         }

@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from cloud_memory_hub.agent_config import AgentSettings
+from cloud_memory_hub.client_processing import read_processing_sample
 from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.local_outbox import LocalOutbox
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError, parse_json
@@ -165,16 +166,23 @@ async def client_status(config_file, *, check_remote=False, transport=None):
     result = {
         "queue": service.outbox.status(),
         "remote": {"status": "not_checked"},
+        "processing": {"status": "not_checked"},
         "scope_id": settings.scope_id,
         "source_id": settings.source_id,
     }
     if check_remote:
+        events = service.outbox.recent_metadata(
+            scope_id=settings.scope_id, source_id=settings.source_id
+        )
         try:
             result["remote"] = await verify_connection(
                 service.connection,
                 scope_id=settings.scope_id,
                 source_id=settings.source_id,
                 transport=transport,
+            )
+            result["processing"] = await read_processing_sample(
+                service.connection, events, transport=transport
             )
         except TransportError as error:
             result["remote"] = {

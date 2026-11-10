@@ -138,13 +138,9 @@ def _http_failure(status: int) -> TransportError:
     )
 
 
-async def _terminal_upload_rejection(response, path, payload, expected):
+async def _matches_error_detail(response, code):
     if not (
-        path == "/hub/v1/events"
-        and payload is not None
-        and expected == 202
-        and response.status_code == 409
-        and response.headers.get("content-type", "").split(";")[0].lower() == "application/json"
+        response.headers.get("content-type", "").split(";")[0].lower() == "application/json"
         and response.headers.get("content-encoding", "identity").lower() == "identity"
     ):
         return False
@@ -154,7 +150,7 @@ async def _terminal_upload_rejection(response, path, payload, expected):
             return False
         body.extend(chunk)
     try:
-        return parse_json(body) == {"detail": TERMINAL_REJECTION_CODE}
+        return parse_json(body) == {"detail": code}
     except PrivacyError:
         return False
 
@@ -173,8 +169,21 @@ async def _request(client, connection, path, *, payload=None, expected=200):
                 },
             ) as response:
                 if response.status_code != expected:
-                    if await _terminal_upload_rejection(response, path, payload, expected):
+                    if (
+                        path == "/hub/v1/events"
+                        and payload is not None
+                        and expected == 202
+                        and response.status_code == 409
+                        and await _matches_error_detail(response, TERMINAL_REJECTION_CODE)
+                    ):
                         raise TransportError(TERMINAL_REJECTION_CODE)
+                    if (
+                        path.startswith("/hub/v1/events/")
+                        and payload is None
+                        and response.status_code == 404
+                        and await _matches_error_detail(response, "event_not_found")
+                    ):
+                        raise TransportError("event_not_found")
                     raise _http_failure(response.status_code)
                 if (
                     response.headers.get("content-type", "").split(";")[0].lower()
