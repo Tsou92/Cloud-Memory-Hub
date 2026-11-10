@@ -1,0 +1,239 @@
+diff --git a/memhub/apps/core/src/one_memory/diagnostic_log.py b/memhub/apps/core/src/one_memory/diagnostic_log.py
+index 486d143..93d2d42 100644
+--- a/memhub/apps/core/src/one_memory/diagnostic_log.py
++++ b/memhub/apps/core/src/one_memory/diagnostic_log.py
+@@ -693,8 +693,9 @@ def core_diagnostic_maintenance(*, roots: tuple[Path, ...], detached_handlers=()
+     Failure retains paused resources; a subsequent context can retry them.
+     This is I/O coordination, not deletion authority or disk-content coverage.
+     """
+-    from hy_memory.utils import diagnostic_policy as policy
+-    from hy_memory.utils.file_log_lifecycle import diagnostic_file_maintenance
++    from one_memory.hy_memory_bridge import hy_diagnostic_maintenance_dependencies
++
++    policy, diagnostic_file_maintenance = hy_diagnostic_maintenance_dependencies()
+ 
+     global _maintenance_owner
+     if (type(roots) is not tuple or not roots or len(roots) > 16
+diff --git a/memhub/apps/core/src/one_memory/hy_memory_bridge.py b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+index 4b5daa6..c7a9c6a 100644
+--- a/memhub/apps/core/src/one_memory/hy_memory_bridge.py
++++ b/memhub/apps/core/src/one_memory/hy_memory_bridge.py
+@@ -49,6 +49,57 @@ from one_memory.semantic_deadline import SemanticMemoryHit
+ DEFAULT_RELEVANCE_FLOOR = 0.35
+ 
+ 
++def hy_anthropic_messages_url(base_url: str) -> str:
++    from hy_memory.agent.anthropic_messages import messages_url
++
++    return messages_url(base_url)
++
++
++def hy_anthropic_build_payload(
++    messages: Sequence[Mapping[str, Any]],
++    *,
++    model: str,
++    max_tokens: int,
++    temperature: float | None = None,
++    stop: Sequence[str] | None = None,
++    tools: Sequence[Mapping[str, Any]] | None = None,
++    tool_choice: str | dict[str, Any] | None = None,
++    extra_body: dict[str, Any] | None = None,
++) -> dict[str, Any]:
++    from hy_memory.agent.anthropic_messages import build_payload
++
++    return build_payload(
++        messages,
++        model=model,
++        max_tokens=max_tokens,
++        temperature=temperature,
++        stop=stop,
++        tools=tools,
++        tool_choice=tool_choice,
++        extra_body=extra_body,
++    )
++
++
++def hy_anthropic_parse_response(payload: object, *, model: str) -> dict[str, Any]:
++    from hy_memory.agent.anthropic_messages import parse_response
++
++    return parse_response(payload, model=model)
++
++
++def hy_anthropic_request_error_type() -> type[RuntimeError]:
++    from hy_memory.agent.anthropic_messages import AnthropicRequestError
++
++    return AnthropicRequestError
++
++
++def hy_diagnostic_maintenance_dependencies() -> tuple[Any, Callable[..., Any]]:
++    """Resolve SDK maintenance dependencies without acquiring any locks."""
++    from hy_memory.utils import diagnostic_policy
++    from hy_memory.utils.file_log_lifecycle import diagnostic_file_maintenance
++
++    return diagnostic_policy, diagnostic_file_maintenance
++
++
+ def hy_relevance_floor() -> float:
+     raw = os.environ.get("ONE_MEMORY_HY_RELEVANCE_FLOOR", "").strip()
+     if not raw:
+diff --git a/memhub/apps/core/src/one_memory/model_catalog.py b/memhub/apps/core/src/one_memory/model_catalog.py
+index c7e4f3f..5b79d27 100644
+--- a/memhub/apps/core/src/one_memory/model_catalog.py
++++ b/memhub/apps/core/src/one_memory/model_catalog.py
+@@ -165,9 +165,9 @@ class ModelCatalog:
+ 
+ def _models_url(provider: ProviderKind, base_url: str) -> str:
+     if provider is ProviderKind.ANTHROPIC:
+-        from hy_memory.agent.anthropic_messages import messages_url
++        from one_memory.hy_memory_bridge import hy_anthropic_messages_url
+ 
+-        return messages_url(base_url).removesuffix("/messages") + "/models"
++        return hy_anthropic_messages_url(base_url).removesuffix("/messages") + "/models"
+     suffix = "/api/tags" if provider is ProviderKind.OLLAMA else "/models"
+     return base_url.rstrip("/") + suffix
+ 
+diff --git a/memhub/apps/core/src/one_memory/model_probe.py b/memhub/apps/core/src/one_memory/model_probe.py
+index 8d48cca..3637d29 100644
+--- a/memhub/apps/core/src/one_memory/model_probe.py
++++ b/memhub/apps/core/src/one_memory/model_probe.py
+@@ -379,18 +379,18 @@ class ModelProber:
+             try:
+                 body = response.json()
+                 if require_anthropic_message:
+-                    from hy_memory.agent.anthropic_messages import (
+-                        AnthropicRequestError,
+-                        parse_response,
++                    from one_memory.hy_memory_bridge import (
++                        hy_anthropic_parse_response,
++                        hy_anthropic_request_error_type,
+                     )
+ 
+                     # A successful probe must meet the actual SDK response
+                     # contract, including usage and complete text output.
+                     try:
+-                        normalized = parse_response(
++                        normalized = hy_anthropic_parse_response(
+                             body, model=str((payload or {}).get("model", ""))
+                         )
+-                    except AnthropicRequestError:
++                    except hy_anthropic_request_error_type():
+                         return _stage(stage, False, ProbeCode.INVALID_RESPONSE, started)
+                     if normalized["finish_reason"] != "stop":
+                         return _stage(stage, False, ProbeCode.INVALID_RESPONSE, started)
+@@ -531,11 +531,11 @@ def _structured_request(
+             },
+         )
+     if profile.provider_kind is ProviderKind.ANTHROPIC:
+-        from hy_memory.agent.anthropic_messages import messages_url
++        from one_memory.hy_memory_bridge import hy_anthropic_messages_url
+ 
+         return (
+             "POST",
+-            messages_url(base_url),
++            hy_anthropic_messages_url(base_url),
+             _headers(profile.provider_kind, secret),
+             attach_disable_thinking(
+                 profile,
+diff --git a/memhub/apps/core/src/one_memory/sdk_memory_qa.py b/memhub/apps/core/src/one_memory/sdk_memory_qa.py
+index 774bc6f..62d5bf3 100644
+--- a/memhub/apps/core/src/one_memory/sdk_memory_qa.py
++++ b/memhub/apps/core/src/one_memory/sdk_memory_qa.py
+@@ -9,16 +9,17 @@ from contextlib import aclosing
+ from typing import Literal
+ 
+ import httpx
+-from hy_memory.agent.anthropic_messages import (
+-    AnthropicRequestError,
+-    build_payload,
+-    messages_url,
+-    parse_response,
+-)
+ from pydantic import BaseModel, ConfigDict
+ 
+ from one_memory.http_client import create_async_client
+-from one_memory.hy_memory_bridge import HyMemoryBridge, HySdkMemoryRecord
++from one_memory.hy_memory_bridge import (
++    HyMemoryBridge,
++    HySdkMemoryRecord,
++    hy_anthropic_build_payload,
++    hy_anthropic_messages_url,
++    hy_anthropic_parse_response,
++    hy_anthropic_request_error_type,
++)
+ from one_memory.memory_qa import (
+     MemoryAnswerError,
+     _DeferredSecretStore,
+@@ -292,12 +293,18 @@ class SdkMemoryAnswerer:
+         try:
+             body = response.json()
+             if profile.provider_kind is ProviderKind.ANTHROPIC:
+-                parsed = parse_response(body, model=profile.model)
++                parsed = hy_anthropic_parse_response(body, model=profile.model)
+                 if parsed["finish_reason"] != "stop" or parsed["tool_calls"]:
+                     raise ValueError("incomplete_answer")
+                 body = {"message": {"content": parsed["content"]}}
+             return _parse_model_answer(body)
+-        except (AnthropicRequestError, KeyError, IndexError, TypeError, ValueError) as error:
++        except (
++            hy_anthropic_request_error_type(),
++            KeyError,
++            IndexError,
++            TypeError,
++            ValueError,
++        ) as error:
+             raise MemoryAnswerError("memory_answer_invalid_model_output") from error
+ 
+     async def _model_chunks(
+@@ -449,7 +456,7 @@ def _sdk_answer_request(
+         messages[0]["content"] += (
+             " 仅返回 JSON 对象，字段为 answer（字符串）和 citations（memory_id 字符串数组）。"
+         )
+-        payload = build_payload(
++        payload = hy_anthropic_build_payload(
+             messages,
+             model=profile.model,
+             max_tokens=768,
+@@ -458,7 +465,7 @@ def _sdk_answer_request(
+         attach_disable_thinking(profile, payload)
+         return (
+             "POST",
+-            messages_url(base_url),
++            hy_anthropic_messages_url(base_url),
+             {"x-api-key": secret or "", "anthropic-version": "2023-06-01"},
+             payload,
+         )
+diff --git a/memhub/apps/core/tests/test_model_probe_input_revision.py b/memhub/apps/core/tests/test_model_probe_input_revision.py
+index f0e6131..24239fd 100644
+--- a/memhub/apps/core/tests/test_model_probe_input_revision.py
++++ b/memhub/apps/core/tests/test_model_probe_input_revision.py
+@@ -94,7 +94,7 @@ def test_concurrent_update_still_rejects_width_or_capability_cas(tmp_path, width
+     "provider,code",
+     [
+         (ProviderKind.OPENAI_COMPATIBLE, ProbeCode.MISSING_API_KEY),
+-        (ProviderKind.ANTHROPIC, ProbeCode.STRUCTURED_OUTPUT_UNSUPPORTED),
++        (ProviderKind.ANTHROPIC, ProbeCode.MISSING_API_KEY),
+         (ProviderKind.HY_DEFAULT, ProbeCode.HY_DEFAULT_UNAVAILABLE),
+     ],
+ )
+diff --git a/memhub/apps/core/tests/test_retrieval_lifespan.py b/memhub/apps/core/tests/test_retrieval_lifespan.py
+index 3b7fd82..0295e42 100644
+--- a/memhub/apps/core/tests/test_retrieval_lifespan.py
++++ b/memhub/apps/core/tests/test_retrieval_lifespan.py
+@@ -79,7 +79,16 @@ def test_index_enabled_serve_imports_without_building_an_unmanaged_app(tmp_path,
+         [sys.executable, "-m", "one_memory.cli", "serve"],
+         env={
+             **os.environ,
+-            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
++            # Keep the caller's fixed SDK binding in the real serve subprocess.
++            "PYTHONPATH": os.pathsep.join(
++                filter(
++                    None,
++                    (
++                        str(Path(__file__).resolve().parents[1] / "src"),
++                        os.environ.get("PYTHONPATH", ""),
++                    ),
++                )
++            ),
+         },
+         stdout=subprocess.PIPE,
+         stderr=subprocess.PIPE,
