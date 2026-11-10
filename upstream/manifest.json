@@ -194,6 +194,11 @@
       "path": "patches/0038-raw-lexical-timeout-fallback.patch",
       "scope": "preserve_authorized_lexical_candidates_on_optional_raw_semantic_timeout_without_extending_read_deadlines",
       "digest": "sha256:ed8e77e64bfc5a2e0efac47c28c2a00959c72ce25452e7613e28bb7698039792"
+    },
+    {
+      "path": "patches/0039-sqlite-connection-test-observer.patch",
+      "scope": "test_only_weakref_sqlite_connection_count_and_deterministic_gc_snapshot_race_regression",
+      "digest": "sha256:e6274571d72eebe4b1c4b7076432adfb776b3c288ceac3f34daea37dba170bab"
     }
   ]
 }
