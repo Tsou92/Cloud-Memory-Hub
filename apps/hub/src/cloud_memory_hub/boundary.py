@@ -19,6 +19,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_boundary import guarded_call
+from cloud_memory_hub.onboarding_api import PUBLIC_CONNECT_PATHS, public_connection_response
 
 STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg"})
 
@@ -87,6 +88,11 @@ class CloudBoundary:
             and origin != self.config.public_origin
         ):
             await JSONResponse({"detail": "origin_not_allowed"}, status_code=403)(
+                scope, receive, send
+            )
+            return
+        if path in PUBLIC_CONNECT_PATHS:
+            await public_connection_response(path, request.method, self.config.public_origin)(
                 scope, receive, send
             )
             return

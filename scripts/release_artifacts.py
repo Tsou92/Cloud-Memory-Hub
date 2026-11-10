@@ -27,6 +27,10 @@ from scripts.client_distribution.install import verify as verify_client
 MAX_ASSET_BYTES = 2 * 1024**3
 TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:rc[1-9][0-9]*)?\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+IMAGE_INDEX = "application/vnd.oci.image.index.v1+json"
+IMAGE_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+IMAGE_CONFIG = "application/vnd.oci.image.config.v1+json"
+MAX_IMAGE_METADATA_BYTES = 2 * 1024**2
 
 
 class ReleaseError(ValueError):
@@ -94,11 +98,98 @@ def read_json(path):
     return json.loads(path.read_text())
 
 
-def archive_json(archive, member):
-    info = archive.getmember(member)
-    require(info.isfile() and info.size <= 2 * 1024**2, "release_archive_metadata_invalid")
+def image_archive_bytes(archive, member):
+    require(
+        isinstance(member, str)
+        and member
+        and not PurePosixPath(member).is_absolute()
+        and ".." not in PurePosixPath(member).parts
+        and "\\" not in member,
+        "release_image_archive_invalid",
+    )
+    matches = [item for item in archive.getmembers() if item.name == member]
+    require(len(matches) == 1, "release_image_archive_invalid")
+    info = matches[0]
+    require(
+        info.isfile() and 0 < info.size <= MAX_IMAGE_METADATA_BYTES,
+        "release_image_archive_invalid",
+    )
     with archive.extractfile(info) as stream:
-        return json.load(stream)
+        return stream.read()
+
+
+def image_json(encoded):
+    try:
+        return json.loads(encoded)
+    except (ValueError, UnicodeError):
+        raise ReleaseError("release_image_archive_invalid") from None
+
+
+def archive_json(archive, member):
+    return image_json(image_archive_bytes(archive, member))
+
+
+def image_descriptor(value, allowed_types):
+    require(
+        isinstance(value, dict)
+        and isinstance(value.get("mediaType"), str)
+        and value.get("mediaType") in allowed_types
+        and isinstance(value.get("digest"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", value["digest"])
+        and type(value.get("size")) is int
+        and 0 < value["size"] <= MAX_IMAGE_METADATA_BYTES,
+        "release_image_descriptor_invalid",
+    )
+    return {key: value[key] for key in ("mediaType", "digest", "size")}
+
+
+def image_blob(archive, descriptor):
+    encoded = image_archive_bytes(archive, "blobs/sha256/" + descriptor["digest"][7:])
+    require(
+        len(encoded) == descriptor["size"]
+        and "sha256:" + hashlib.sha256(encoded).hexdigest() == descriptor["digest"],
+        "release_image_descriptor_mismatch",
+    )
+    return encoded
+
+
+def image_document(archive, descriptor):
+    value = image_json(image_blob(archive, descriptor))
+    require(
+        isinstance(value, dict)
+        and type(value.get("schemaVersion")) is int
+        and value["schemaVersion"] == 2
+        and value.get("mediaType") == descriptor["mediaType"],
+        "release_image_descriptor_invalid",
+    )
+    return value
+
+
+def bind_image_descriptor(archive, image_id, value, config_bytes):
+    descriptor = image_descriptor(value, {IMAGE_INDEX, IMAGE_MANIFEST})
+    require(descriptor["digest"] == image_id, "release_image_descriptor_mismatch")
+    document = image_document(archive, descriptor)
+    if descriptor["mediaType"] == IMAGE_INDEX:
+        manifests = document.get("manifests")
+        require(isinstance(manifests, list), "release_image_descriptor_invalid")
+        candidates = []
+        for entry in manifests:
+            child = image_descriptor(entry, {IMAGE_MANIFEST})
+            platform = entry.get("platform")
+            require(
+                isinstance(platform, dict)
+                and isinstance(platform.get("os"), str)
+                and isinstance(platform.get("architecture"), str),
+                "release_image_descriptor_invalid",
+            )
+            if platform["os"] == "linux" and platform["architecture"] == "amd64":
+                candidates.append(child)
+        require(len(candidates) == 1, "release_image_platform_ambiguous")
+        document = image_document(archive, candidates[0])
+    require(isinstance(document.get("layers"), list), "release_image_descriptor_invalid")
+    config = image_descriptor(document.get("config"), {IMAGE_CONFIG})
+    require(image_blob(archive, config) == config_bytes, "release_image_config_mismatch")
+    return descriptor
 
 
 def image_receipt(directory, identity, inspection):
@@ -125,19 +216,19 @@ def image_receipt(directory, identity, inspection):
             isinstance(manifests, list) and len(manifests) == 1, "release_image_archive_invalid"
         )
         manifest = manifests[0]
+        require(isinstance(manifest, dict), "release_image_archive_invalid")
         require(manifest.get("RepoTags") == [image_ref], "release_image_tag_mismatch")
-        config = manifest["Config"]
-        info = archive.getmember(config)
-        require(info.isfile() and info.size <= 2 * 1024**2, "release_image_archive_invalid")
-        with archive.extractfile(info) as stream:
-            encoded = stream.read()
+        encoded = image_archive_bytes(archive, manifest.get("Config"))
+        config_digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        descriptor = None
+        if image.get("Descriptor") is None:
+            require(config_digest == image_id, "release_image_config_mismatch")
+        else:
+            descriptor = bind_image_descriptor(archive, image_id, image["Descriptor"], encoded)
+        configuration = image_json(encoded)
         require(
-            "sha256:" + hashlib.sha256(encoded).hexdigest() == image_id,
-            "release_image_config_mismatch",
-        )
-        configuration = json.loads(encoded)
-        require(
-            configuration.get("os") == "linux"
+            isinstance(configuration, dict)
+            and configuration.get("os") == "linux"
             and configuration.get("architecture") == "amd64"
             and configuration.get("config", {})
             .get("Labels", {})
@@ -150,8 +241,11 @@ def image_receipt(directory, identity, inspection):
         "artifact": record,
         "image_ref": image_ref,
         "image_id": image_id,
+        "config_digest": config_digest,
         "platform": "linux/amd64",
     }
+    if descriptor is not None:
+        receipt["descriptor"] = descriptor
     write_json(directory / "image-receipt.json", receipt)
     return receipt
 

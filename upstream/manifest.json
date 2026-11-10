@@ -23,7 +23,7 @@
     {
       "path": "patches/0004-show-sdk-library-on-first-open.patch",
       "scope": "runtime_compatibility_with_regression_tests",
-      "digest": "sha256:7201d14d74a8688d7aee3d11181d565f817054a3afd7b5ed7e65b14d57902332"
+      "digest": "sha256:4427e0bc41fa952188f1ef72d0edb5e199d3cc09bf41560ea3eb787c0508ab5f"
     },
     {
       "path": "patches/0005-external-source-write-authorizer.patch",
@@ -164,6 +164,36 @@
       "path": "patches/0032-hub-backup-settings.patch",
       "scope": "administrator_backup_plan_status_and_bounded_version_catalog",
       "digest": "sha256:7c733eb0d738f96df8aab9a69ba7bc230f86d287b744b23155f5ff6569ee7b40"
+    },
+    {
+      "path": "patches/0033-core-sdk-boundary-and-cold-regressions.patch",
+      "scope": "core_sdk_adapter_boundary_and_cold_environment_regressions",
+      "digest": "sha256:c506d50ad4c63a229506893a196cefd4020c492d22cefd27c5629f95e2da90a2"
+    },
+    {
+      "path": "patches/0034-source-root-generation.patch",
+      "scope": "source_root_generation_identity_and_explicit_legacy_candidate_reconfirmation",
+      "digest": "sha256:d7f08e2c613f0156a58bc2239c86a5113b45da63951f05e0e627947dd37796e6"
+    },
+    {
+      "path": "patches/0035-console-form-history-and-backup-guidance.patch",
+      "scope": "console_model_form_layout_readable_hub_history_and_existing_backup_guide",
+      "digest": "sha256:263f8dcf46990da49e7ccc69c98e8ac1f6beeab34711082825c547552b9a2424"
+    },
+    {
+      "path": "patches/0036-console-first-use-guidance.patch",
+      "scope": "novice_console_onboarding_model_setup_pairing_guidance_and_scoped_original_navigation",
+      "digest": "sha256:61194a619b71345382301057e1116c9b5d4904152a15ec3725781bf6a795e039"
+    },
+    {
+      "path": "patches/0037-one-link-agent-onboarding.patch",
+      "scope": "default_one_time_link_agent_onboarding_with_secret_free_recovery_and_advanced_json_compatibility",
+      "digest": "sha256:5bc614f10606226151b6f2ac81ac8f39469db4cde9a0cb4fbc4c77da13ac945e"
+    },
+    {
+      "path": "patches/0038-raw-lexical-timeout-fallback.patch",
+      "scope": "preserve_authorized_lexical_candidates_on_optional_raw_semantic_timeout_without_extending_read_deadlines",
+      "digest": "sha256:ed8e77e64bfc5a2e0efac47c28c2a00959c72ce25452e7613e28bb7698039792"
     }
   ]
 }

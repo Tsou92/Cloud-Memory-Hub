@@ -121,6 +121,54 @@ class DistributionTests(unittest.TestCase):
 
     @patch.object(installer.sys, "version_info", (3, 12, 9))
     @patch.object(installer.sys, "platform", "darwin")
+    @patch.object(installer.platform, "machine", return_value="arm64")
+    @patch.object(installer.subprocess, "run")
+    def test_python_shim_uses_resolved_base_for_new_venv(self, run, _machine):
+        base = self.root / "Python installation/bin/python3.12"
+        base.parent.mkdir(parents=True)
+        base.write_text("synthetic interpreter\n")
+        base.chmod(0o700)
+        shim = self.root / "shims/python3.12"
+        shim.parent.mkdir()
+        shim.symlink_to(base)
+        target = self.root / "new installation"
+        with (
+            patch.object(installer.sys, "_base_executable", str(shim)),
+            patch.object(installer.sys, "executable", str(self.root / "venv launcher")),
+        ):
+            installer.install(self.package, target, self.manifest)
+        self.assertEqual(
+            run.call_args_list[0].args[0],
+            [str(base), "-I", "-m", "venv", str(target / "venv")],
+        )
+        self.assertTrue(shim.is_symlink())
+        self.assertEqual(base.read_text(), "synthetic interpreter\n")
+
+    @patch.object(installer.sys, "version_info", (3, 12, 9))
+    @patch.object(installer.sys, "platform", "darwin")
+    @patch.object(installer.platform, "machine", return_value="arm64")
+    @patch.object(installer.subprocess, "run")
+    def test_missing_or_invalid_base_does_not_choose_another_python(self, run, _machine):
+        target = self.root / "uncreated installation"
+        not_executable = self.root / "not executable"
+        not_executable.write_text("synthetic interpreter\n")
+        not_executable.chmod(0o600)
+        for base in (
+            None,
+            "",
+            "python3.12",
+            str(self.root / "absent"),
+            str(self.root),
+            str(not_executable),
+        ):
+            with self.subTest(base=base), patch.object(installer.sys, "_base_executable", base):
+                with self.assertRaisesRegex(ValueError, "^python_base_executable_unavailable$"):
+                    installer.install(self.package, target, self.manifest)
+                self.assertFalse(target.exists())
+                run.assert_not_called()
+
+    @patch.object(installer.sys, "version_info", (3, 12, 9))
+    @patch.object(installer.sys, "platform", "darwin")
     @patch.object(installer.platform, "machine", return_value="x86_64")
     def test_other_architecture_is_rejected_without_creating_target(self, _machine):
         target = self.root / "wrong_architecture"

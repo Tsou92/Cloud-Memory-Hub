@@ -1,10 +1,10 @@
 # 实验容器运行指南
 
-状态：用于 G1 开发验证，尚未达到完整产品或 NAS 正式部署的交付条件。管理核心和网页复用 MemHub；网络边界见 [ADR-0002](adr/0002-nas-runtime-boundary.md)，当前治理证据与未完成项见[在途任务取消及恢复记录](reviews/2026-11-10-inflight-execution.md)。
+状态：用于开发与发行候选试部署，尚未完成正式发行验收。管理核心和网页复用 MemHub；普通业务的受控备份、空目标导入与同实例历史回滚已实现，并通过 NAS 的 11 项正常恢复及 7 项真实进程中断检查，操作与范围见[备份与恢复](backup-and-recovery.md)。下文保留旧实例迁移和诊断文件治理的独立边界，不以业务恢复通过代替全部旧日志治理；网络边界见 [ADR-0002](adr/0002-nas-runtime-boundary.md)，历史治理证据见[在途任务取消及恢复记录](reviews/2026-11-10-inflight-execution.md)。
 
 ## 构建与首次运行
 
-诊断恢复的只读维护入口为 `diagnostic-preview --writers-stopped --operation-id UUID`：先停止该实例所有写者，使用原 data/config/governance 卷与原私有配置运行命令。它持有现有存储租约，在普通服务启动之前读取实际已提交的 purge 和精确文件候选；返回元数据，不输出日志正文、不签确认、不执行删除。失败保留现场。新增 execution schema2 目前仅供隔离组件验证，普通服务明确拒绝该格式，不能在常驻实例自行迁移；完整确认/恢复入口尚未交付，见 [ADR-0043](adr/0043-diagnostic-physical-execution.md)。
+诊断恢复的只读维护入口为 `diagnostic-preview --writers-stopped --operation-id UUID`：先停止该实例所有写者，使用原 data/config/governance 卷与原私有配置运行命令。它持有现有存储租约，在普通服务启动之前读取实际已提交的 purge 和精确文件候选；返回元数据，不输出日志正文、不签确认、不执行删除。失败保留现场。新增 execution schema2 目前仅供隔离组件验证，普通服务明确拒绝该格式，不能在常驻实例自行迁移；该诊断文件治理的完整确认/恢复入口尚未交付，见 [ADR-0043](adr/0043-diagnostic-physical-execution.md)。
 
 已有完整绑定的隔离 schema2 实例可显式运行 `activate-file-coverage --writers-stopped`，将文件覆盖要求提高到 SDK 和 Core 的四个范围。命令沿用该实例的三个目录、私有配置及互斥锁，只增加覆盖要求，不完成迁移、删除或业务恢复。成功响应中的 `pending` 表示待处理操作数，`changed=false` 表示已经启用；它们都不是日志正文已清除的证明。旧 schema1、绑定缺口或无效 witness 保持原状并拒绝；若提高要求后的复核失败，保留现场并可重试同一命令。提高后不能直接使用不认识该能力的旧程序；不要手工删除能力行以回退。详见 [ADR-0047](adr/0047-core-file-coverage-and-physical-authority.md)。普通服务的 schema2 限制仍保持。
 
@@ -42,8 +42,30 @@ docker compose exec hub cat /config/admin-token
 - `hub_data` 保存 Core 数据、接纳的处理任务及索引；`hub_config` 保存管理员凭证、加密密钥、加密的模型凭证数据库，以及设备身份／项目授权、来源、事件回执及完整已过滤原文库。配置卷现在也包含长期历史正文，必须纳入与数据卷一致的私有备份和治理范围。设备权限协议见 [ADR-0004](adr/0004-remote-device-access.md)，上传及回滚语义见 [ADR-0006](adr/0006-remote-ingest.md)。
 - `hub_governance` 保存不含正文的治理意图、执行记录及独立 SDK 准入日志，独立挂载至 `/governance`；普通业务快照恢复不能覆盖或删除它。自定义 `CMH_GOVERNANCE_DIR` 时，目录不能位于 data/config 内，也不能包含它们。机制与限制见 [ADR-0011](adr/0011-governance-authority-and-offline-sync.md) 和 [ADR-0038](adr/0038-durable-sdk-admission.md)。
 - 普通停止使用 `docker compose down`；不加 `--volumes`。保留卷后再次启动会复用配置和数据。
-- 配置密钥丢失会导致加密凭证无法读取。候选 Compose 增加独立 `hub_backups` 卷与容器内调度，默认关闭；配置方法见[备份与恢复](backup-and-recovery.md)。新镜像默认 `supervise`，显式 `serve` 仍可用但不执行定时备份。已有自定义 Compose 需要增加 `/backups` 可写私有挂载。完整导入／历史回滚和灾难恢复仍未完成验收，不应依赖此实验版本承载唯一数据。
+- 配置密钥丢失会导致加密凭证无法读取。候选 Compose 增加独立 `hub_backups` 卷与容器内调度，默认关闭；配置方法见[备份与恢复](backup-and-recovery.md)。新镜像默认 `supervise`，显式 `serve` 仍可用但不执行定时备份。已有自定义 Compose 需要增加 `/backups` 可写私有挂载。全量归档导入、保留当前安全授权与治理的同实例历史回滚、损坏归档拒绝和一次真实进程中断恢复已有 NAS 合成数据证据；断电、硬盘故障、全部中断位置及最终发行包仍未验，不能据此承诺任意灾难恢复。
 - 初始化中断后不要直接删除既有凭证重试；先检查配置卷并保留副本，避免覆盖已经使用的密钥。
+
+## 已有实例升级（保持配置和身份）
+
+以下顺序复用已实现的冷备份与容器入口；最终候选在日常 NAS 上的升级、原 MCP 读回和失败回退联合验收仍待完成。仅适用于当前存储格式相容的版本；需要治理或原文迁移的旧实例，先按下文对应迁移说明处理，不能用换镜像绕过版本检查。
+
+先校验候选镜像的下载摘要、Linux amd64 平台和 `org.opencontainers.image.revision`，保留旧镜像。在私有目录保存原 Compose、`.env` 和实际三个卷名，记录旧版本；不要公开这些配置。沿用原 Compose 项目名、原 data/config/governance 卷、HTTPS Origin、端口和资源限制，不运行 `setup` 或 `init`。
+
+将 `.env` 的 `CMH_IMAGE` 改为已核验的固定候选镜像。已有 Compose 还需按本仓库配置为 `hub` 增加独立 `/backups` 挂载；目标目录须为运行用户 `1000:1000` 拥有、权限 `0700`。使用默认 `supervise`，移除已有的 `command: ["serve"]` 覆盖或明确改成 `command: ["supervise"]`。不要把备份放入运行三卷内，也不要更名或新建三业务卷来代替升级。
+
+停止原 Hub 和所有挂载同一三卷的写者后，用候选镜像创建并完整检查升级前版本。此命令也适用于尚无备份调度器的旧镜像；备份实现来自候选镜像，数据与身份来自原卷：
+
+```sh
+set -eu
+docker compose stop hub
+docker compose run --rm --no-deps --entrypoint /opt/cmh/venv/bin/python hub -c 'import json, os; from pathlib import Path; from cloud_memory_hub.config import HubConfig; from cloud_memory_hub.backup_store import create_backup, inspect_backup; root = Path("/backups"); result = create_backup(HubConfig.from_environment(), root, revision=os.environ["CMH_REVISION"]); checked = inspect_backup(root / result["backup_id"]); print(json.dumps({key: checked[key] for key in ("backup_id", "created_at", "file_count", "total_bytes")}))'
+docker compose up -d --no-build hub
+docker compose ps hub
+```
+
+备份或校验失败时停在该步骤，保留原卷和已有版本，不继续切换。保存成功返回的备份 ID；启动后核对健康、网页实际 revision、原实例身份和项目权限，再通过原有 MCP 配置读取已知记录或交接，不能只凭首页或容器处于 running 判成功。管理员和模型密钥无需重新填写，客户端不重新配对。备份计划默认关闭，升级验收后按[备份与恢复](backup-and-recovery.md)启用所需周期。
+
+升级失败不自动恢复旧镜像或覆盖数据。先停止候选并保留失败现场；只有确认没有恢复未完成标记、没有不兼容迁移且旧版能读取当前格式时，才恢复原 Compose／`.env` 并显式启动旧镜像，继续使用当前三卷。需要回退业务内容时使用[同实例历史回滚](backup-and-recovery.md#同实例历史回滚)，保留较新的设备安全状态和治理记录。发现 `.cmh-restore-incomplete.json` 时保持停服，按该指南处理，不能切换到不认识标记的旧程序强行启动。
 
 ## 已有实验实例的治理迁移
 
@@ -80,7 +102,7 @@ docker compose ps
 
 该命令要求三个存储租约均可取得，逐条从旧队列冻结输入恢复 Event，与旧摘要、身份和重新生成的 WriteRequest 比对，所有记录通过后一次提交。旧队列已回收、表示有歧义或内容不符时返回 `original_migration_source_unproven` 并回滚整个迁移，不能填空正文后继续。重复运行只验证现有归档。详细兼容边界见 [ADR-0017](adr/0017-accepted-original-archive.md)。
 
-没有下迁移；旧镜像会拒绝新格式。升级后出现问题应保持停服并诊断，不能直接切旧镜像，更不能修改版本号绕过检查。恢复升级前完整备份也必须保留并验证当前独立治理权威，不能用旧备份覆盖新的忘记／删除记录。完整恢复产品流程仍待实现。
+没有下迁移；旧镜像会拒绝新格式。升级后出现问题应保持停服并诊断，不能直接切旧镜像，更不能修改版本号绕过检查。恢复升级前完整备份也必须保留并验证当前独立治理权威，不能用旧备份覆盖新的忘记／删除记录。现在可按[受控恢复指南](backup-and-recovery.md)执行同实例历史回滚或空目标导入；所选版本必须满足该指南的身份、密钥、治理链和未完成写入检查，不支持直接混搭或覆盖三个旧卷。
 
 ## 原文关联扩展
 
@@ -92,9 +114,9 @@ SDK 和 Core 都从 manifest 固定源码及补丁构建，Hub 锁文件将两�
 
 目标设备是 DXP4800 Plus、Pentium Gold 8505、约 16 GB 内存。用户提供的观测中可用内存约 7.8 GiB；该数值随其他容器负载变化。当前容器限制为 3 GiB 内存、2 CPU，提炼任务并发为 1；这只是初始保护配置，不能替代真实模型、历史导入和索引负载测试。
 
-已知 Docker 数据位于双 NVMe RAID0，主数据卷为四盘 RAID5。计划将运行数据和历史备份版本放在不同卷，实际宿主路径、权限、容量告警和恢复流程需在部署阶段验证。RAID0 中任一盘故障会影响该阵列，RAID5 也不能代替版本备份。
+已知 Docker 数据位于双 NVMe RAID0，主数据卷为四盘 RAID5。可通过 `CMH_BACKUP_PATH` 将备份放在不同磁盘的私有目录；实际宿主路径、权限和容量告警仍须逐次部署核对。限定恢复流程已在 NAS 独立卷完成[演练](backup-and-recovery.md#nas-恢复演练记录)，不代表宿主磁盘故障已测。RAID0 中任一盘故障会影响该阵列，RAID5 也不能代替版本备份。
 
-当前 Compose 只发布本机回环端口。远程入口必须配置明确的 HTTPS Origin（`CMH_PUBLIC_ORIGIN`）并经过认证边界；还未提供或验证生产反向代理配置。Tailscale、绿联转发和节点小宝均待实际验证。容器地址不能作为 NAS 外部可达地址使用。
+当前 Compose 只发布本机回环端口。远程入口必须配置明确的 HTTPS Origin（`CMH_PUBLIC_ORIGIN`）并经过认证边界；还未提供或验证通用生产反向代理配置。Tailscale HTTPS 已通过[两台 Mac 的 MVP 验收](reviews/2026-11-10-two-host-mvp.md)，绿联转发和节点小宝仍待实际验证。容器地址不能作为 NAS 外部可达地址使用。
 
 SSH 能连接不等于可以操作 Docker。部署前在同一账户执行 `docker info` 和 `docker compose version`；如果 Docker socket 返回权限错误，应先由 NAS 管理员配置账户权限。不能通过放宽 socket 的全局访问权限来绕过。当前核对结果见 [NAS 运行记录](reviews/2026-10-23-nas-preflight.md)。
 
@@ -147,4 +169,4 @@ make check-container
 
 启动会先丢弃未提交到主日志的孤立计划，再完成待执行操作并重放已完成操作。仅恢复旧 Core 时仍使用原签名范围，不追加意图，也不清理后来无关任务。已完成 purge 的队列正文即使已变成严格清理标记，仍须重新压缩并核验，以覆盖旧页尚留正文的恢复点；历史操作较多时会重复全库压缩，当前没有恢复耗时上限承诺。
 
-代码、恢复测试与安装证据见[本轮验证记录](reviews/2026-11-10-inflight-execution.md)。这些能力仍不覆盖完整生产力治理、任意混搭备份恢复、离线删除传播或全部 SDK 副作用；G1 尚未完成。
+代码、恢复测试与安装证据见[本轮验证记录](reviews/2026-11-10-inflight-execution.md)。这些历史治理能力仍不覆盖完整生产力治理、任意混搭备份恢复、离线删除传播或全部 SDK 副作用。发行候选已另行提供限定的[受控备份恢复](backup-and-recovery.md)，两者按各自范围验收；当前发布进度见[发布计划](release-plan.md)。

@@ -26,6 +26,12 @@ from cloud_memory_hub.remote_access import (
     RevisionRequest,
 )
 from cloud_memory_hub.remote_ingest import RemoteIngest, SourceRegistration
+from cloud_memory_hub.remote_pairing import (
+    PairingClaim,
+    PairingRequest,
+    PairingRevoke,
+    PairingStore,
+)
 from cloud_memory_hub.remote_read import RemoteRead
 
 MAX_BODY_BYTES = 64 * 1024
@@ -80,7 +86,46 @@ def create_remote_api(
     executor=None,
     *,
     admission=None,
+    public_origin=None,
 ) -> Starlette:
+    pairing_store = PairingStore(ingest, public_origin) if public_origin is not None else None
+
+    def configured_pairings():
+        if pairing_store is None:
+            raise AccessError("pairing_unavailable", 503)
+        return pairing_store
+
+    async def create_pairing(request: Request):
+        require_admin(request)
+        pairings = configured_pairings()
+        body = await read_body(request, PairingRequest)
+        issued = await run_in_threadpool(pairings.create, body)
+        return response(
+            {**issued.pairing, "invitation_secret": issued.invitation_secret.get_secret_value()},
+            201,
+        )
+
+    async def pairing_status(request: Request):
+        require_admin(request)
+        return response(
+            await run_in_threadpool(
+                configured_pairings().get, str(request.path_params["pairing_id"])
+            )
+        )
+
+    async def revoke_pairing(request: Request):
+        require_admin(request)
+        pairings = configured_pairings()
+        await read_body(request, PairingRevoke)
+        return response(
+            await run_in_threadpool(pairings.revoke, str(request.path_params["pairing_id"]))
+        )
+
+    async def claim_pairing(request: Request):
+        pairings = configured_pairings()
+        body = await read_body(request, PairingClaim)
+        return response(await run_in_threadpool(pairings.claim, body))
+
     async def projects(request: Request):
         require_admin(request)
         if request.method in {"GET", "HEAD"}:
@@ -213,6 +258,10 @@ def create_remote_api(
 
     return Starlette(
         routes=[
+            Route("/hub/v1/pairings", create_pairing, methods=["POST"]),
+            Route("/hub/v1/pairings/claim", claim_pairing, methods=["POST"]),
+            Route("/hub/v1/pairings/{pairing_id:uuid}", pairing_status, methods=["GET"]),
+            Route("/hub/v1/pairings/{pairing_id:uuid}/revoke", revoke_pairing, methods=["POST"]),
             Route("/hub/v1/governance/preview", governance_preview, methods=["POST"]),
             Route("/hub/v1/governance/execute", governance_execute, methods=["POST"]),
             Route("/hub/v1/projects", projects, methods=["GET", "POST"]),

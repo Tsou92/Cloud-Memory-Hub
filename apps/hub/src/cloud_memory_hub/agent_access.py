@@ -74,44 +74,11 @@ def _identity(value: str | None) -> str:
         raise AgentAccessError("request_identity_invalid") from None
 
 
-class AgentAccess:
-    """One device/source/scope binding; action inputs cannot select another project."""
+class AgentOperations:
+    """Shared validation, reads and handoff format; subclasses choose durable delivery."""
 
-    def __init__(
-        self,
-        connection: RemoteConnection,
-        outbox: LocalOutbox,
-        *,
-        scope_id: str,
-        source_id: str,
-        transport=None,
-    ):
-        try:
-            canonical_uuid(source_id)
-            if scope_id != "global":
-                canonical_uuid(scope_id)
-            if (connection.instance_id, connection.device_id) != (
-                outbox.instance_id,
-                outbox.device_id,
-            ):
-                raise ValueError("binding_mismatch")
-            self.privacy = CredentialFilter(
-                tuple(
-                    dict.fromkeys(
-                        (
-                            *outbox.privacy.known_credentials,
-                            connection.credential.get_secret_value(),
-                        )
-                    )
-                )
-            )
-        except (ValueError, TypeError, AttributeError, PrivacyError):
-            raise AgentAccessError("agent_binding_invalid") from None
-        self.connection = connection
-        self.outbox = outbox
-        self.scope_id = scope_id
-        self.source_id = source_id
-        self.transport = transport
+    async def _save(self, content, *, request_id, session_id):
+        raise NotImplementedError
 
     async def remember(self, text: str, *, request_id=None, session_id=None) -> dict:
         try:
@@ -159,36 +126,7 @@ class AgentAccess:
         )
         return result
 
-    async def capture_message(self, role: str, text: str, *, request_id, session_id) -> dict:
-        """Persist one visible host message; the hook separately bounds network work."""
-        try:
-            if (
-                role not in {"user", "assistant"}
-                or not isinstance(text, str)
-                or not text.strip()
-                or len(text.encode()) > MAX_CAPTURE_BYTES
-            ):
-                raise ValueError
-        except (ValueError, TypeError, UnicodeError):
-            raise AgentAccessError("capture_message_invalid") from None
-        return await self._save(
-            {
-                "messages": [{"role": role, "text": text}],
-                "metadata": {
-                    "adapter_id": "claude-code",
-                    "capture_kind": "visible_hook",
-                    "capture_version": 1,
-                },
-            },
-            request_id=request_id,
-            session_id=session_id,
-            kind="conversation_turn",
-            deliver=False,
-        )
-
-    async def _save(
-        self, content: dict, *, request_id, session_id, kind="operation", deliver=True
-    ) -> dict:
+    def prepare_event(self, content: dict, *, request_id, session_id, kind="operation"):
         event_id = _identity(request_id)
         conversation_id = event_id if session_id is None else _identity(session_id)
         try:
@@ -212,33 +150,11 @@ class AgentAccess:
                 _handoff(parse_json(event.content["text"]))
                 if len(event.canonical_payload().encode()) > MAX_ORIGINAL_RESPONSE_BYTES:
                     raise AgentAccessError("handoff_invalid")
-            payload = event.model_dump(mode="json")
-            self.outbox.enqueue(payload)
-            failure = await self._deliver() if deliver else None
-            # Re-enqueue is the existing idempotent receipt lookup, without new storage.
-            result = self.outbox.enqueue(payload)
+            return event
         except PrivacyError:
             raise AgentAccessError("privacy_rejected") from None
         except EventError:
             raise AgentAccessError("agent_event_invalid") from None
-        except OutboxError as error:
-            code = (
-                "request_identity_conflict"
-                if str(error) == "event_identity_conflict"
-                else "agent_outbox_unavailable"
-            )
-            raise AgentAccessError(code) from None
-        result["processing_state"] = "not_checked"
-        if failure is not None and result["status"] == "queued":
-            result.update(error=failure.code, retryable=failure.retryable)
-        return result
-
-    async def _deliver(self):
-        try:
-            await send_pending(self.connection, self.outbox, transport=self.transport)
-        except TransportError as error:
-            return error
-        return None
 
     async def _read(self, operation: str, request: dict):
         try:
@@ -246,7 +162,7 @@ class AgentAccess:
                 self.connection,
                 operation,
                 {**request, "scope_id": self.scope_id},
-                privacy=self.outbox.privacy,
+                privacy=self.privacy,
                 transport=self.transport,
             )
         except TransportError as error:
@@ -271,7 +187,7 @@ class AgentAccess:
             original, item = await read_original_remote(
                 self.connection,
                 {"record_id": handoff_id, "scope_id": self.scope_id},
-                privacy=self.outbox.privacy,
+                privacy=self.privacy,
                 transport=self.transport,
             )
         except TransportError as error:
@@ -306,6 +222,106 @@ class AgentAccess:
             "content_trust": "untrusted_history",
             "handoff": document.model_dump(mode="json"),
         }
+
+
+class AgentAccess(AgentOperations):
+    """One local device/source/scope binding with a durable offline outbox."""
+
+    def __init__(
+        self,
+        connection: RemoteConnection,
+        outbox: LocalOutbox,
+        *,
+        scope_id: str,
+        source_id: str,
+        transport=None,
+    ):
+        try:
+            canonical_uuid(source_id)
+            if scope_id != "global":
+                canonical_uuid(scope_id)
+            if (connection.instance_id, connection.device_id) != (
+                outbox.instance_id,
+                outbox.device_id,
+            ):
+                raise ValueError("binding_mismatch")
+            self.privacy = CredentialFilter(
+                tuple(
+                    dict.fromkeys(
+                        (
+                            *outbox.privacy.known_credentials,
+                            connection.credential.get_secret_value(),
+                        )
+                    )
+                )
+            )
+        except (ValueError, TypeError, AttributeError, PrivacyError):
+            raise AgentAccessError("agent_binding_invalid") from None
+        self.connection = connection
+        self.outbox = outbox
+        self.scope_id = scope_id
+        self.source_id = source_id
+        self.transport = transport
+
+    async def capture_message(self, role: str, text: str, *, request_id, session_id) -> dict:
+        """Persist one visible host message; the hook separately bounds network work."""
+        try:
+            if (
+                role not in {"user", "assistant"}
+                or not isinstance(text, str)
+                or not text.strip()
+                or len(text.encode()) > MAX_CAPTURE_BYTES
+            ):
+                raise ValueError
+        except (ValueError, TypeError, UnicodeError):
+            raise AgentAccessError("capture_message_invalid") from None
+        return await self._save(
+            {
+                "messages": [{"role": role, "text": text}],
+                "metadata": {
+                    "adapter_id": "claude-code",
+                    "capture_kind": "visible_hook",
+                    "capture_version": 1,
+                },
+            },
+            request_id=request_id,
+            session_id=session_id,
+            kind="conversation_turn",
+            deliver=False,
+        )
+
+    async def _save(
+        self, content: dict, *, request_id, session_id, kind="operation", deliver=True
+    ) -> dict:
+        event = self.prepare_event(content, request_id=request_id, session_id=session_id, kind=kind)
+        try:
+            payload = event.model_dump(mode="json")
+            self.outbox.enqueue(payload)
+            failure = await self._deliver() if deliver else None
+            # Re-enqueue is the existing idempotent receipt lookup, without new storage.
+            result = self.outbox.enqueue(payload)
+        except PrivacyError:
+            raise AgentAccessError("privacy_rejected") from None
+        except EventError:
+            raise AgentAccessError("agent_event_invalid") from None
+        except OutboxError as error:
+            code = (
+                "request_identity_conflict"
+                if str(error) == "event_identity_conflict"
+                else "agent_outbox_unavailable"
+            )
+            raise AgentAccessError(code) from None
+        result["processing_state"] = "not_checked"
+        if failure is not None and result["status"] == "queued":
+            result.update(error=failure.code, retryable=failure.retryable)
+        return result
+
+    async def _deliver(self):
+        try:
+            await send_pending(self.connection, self.outbox, transport=self.transport)
+        except TransportError as error:
+            return error
+        return None
 
     async def status(self, *, sync: bool = False) -> dict:
         if type(sync) is not bool:

@@ -1,0 +1,985 @@
+diff --git a/memhub/apps/core/src/one_memory/imports/access.py b/memhub/apps/core/src/one_memory/imports/access.py
+index ba251b5..4cc6a23 100644
+--- a/memhub/apps/core/src/one_memory/imports/access.py
++++ b/memhub/apps/core/src/one_memory/imports/access.py
+@@ -9,6 +9,8 @@ from enum import StrEnum
+ from pathlib import Path
+ from typing import BinaryIO
+
++from one_memory.imports.root_metadata import RootMetadata, root_metadata
++
+ DEFAULT_MAX_SOURCE_FILE_BYTES = 2 * 1024 * 1024 * 1024
+ SENSITIVE_HOME_DIRECTORIES = {
+     "Desktop",
+@@ -110,6 +112,7 @@ def _open_relative_file(source: AuthorizedSourceFile) -> BinaryIO:
+             raise SourceAccessError(SourceAccessErrorCode.ROOT_NOT_DIRECTORY)
+
+         canonical_details = requested_details
++        canonical_descriptor = root_descriptor
+         if requested_root != source.root:
+             try:
+                 canonical_descriptor = os.open(source.root, directory_flags)
+@@ -129,9 +132,9 @@ def _open_relative_file(source: AuthorizedSourceFile) -> BinaryIO:
+                 canonical_details.st_ino,
+             ):
+                 raise SourceAccessError(SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED)
+-        if source.root_identity is not None and not _root_identity_matches_details(
++        if source.root_identity is not None and not _root_identity_matches_descriptor(
+             source.root,
+-            canonical_details,
++            canonical_descriptor,
+             source.root_identity,
+         ):
+             raise SourceAccessError(SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED)
+@@ -372,15 +375,33 @@ class AuthorizedSourceRoot:
+         )
+
+
+-def _root_details(root: Path) -> tuple[Path, os.stat_result]:
++def _root_details(root: Path) -> tuple[Path, RootMetadata]:
+     try:
+         resolved = root.expanduser().resolve(strict=True)
+-        details = resolved.stat()
+-    except (OSError, RuntimeError):
++        descriptor = os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
++    except OSError as error:
++        if error.errno == errno.ENOTDIR:
++            raise SourceAccessError(SourceAccessErrorCode.ROOT_NOT_DIRECTORY) from None
++        raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE) from None
++    except (AttributeError, RuntimeError, TypeError, NotImplementedError):
++        raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE) from None
++    try:
++        return resolved, _root_descriptor_metadata(descriptor)
++    finally:
++        try:
++            os.close(descriptor)
++        except OSError:
++            raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE) from None
++
++
++def _root_descriptor_metadata(descriptor: int) -> RootMetadata:
++    try:
++        details = root_metadata(descriptor)
++    except (OSError, TypeError, NotImplementedError):
+         raise SourceAccessError(SourceAccessErrorCode.SOURCE_UNAVAILABLE) from None
+-    if not stat.S_ISDIR(details.st_mode):
++    if not stat.S_ISDIR(details.mode):
+         raise SourceAccessError(SourceAccessErrorCode.ROOT_NOT_DIRECTORY)
+-    return resolved, details
++    return details
+
+
+ def _changed_ns(details: os.stat_result) -> int:
+@@ -388,8 +409,8 @@ def _changed_ns(details: os.stat_result) -> int:
+
+     ext4 can recycle an inode number immediately after an unlink, so
+     ``st_dev:st_ino`` is not enough to tell a replacement from the file that was
+-    authorised. macOS reports birth time, which a newly created replacement
+-    cannot share. Linux has no portable birth-time field here, so zero means
++    authorised. macOS reports birth time, which helps distinguish a newly
++    created replacement. Linux has no portable birth-time field here, so zero means
+     "unavailable" and callers fall back to the existing inode identity.
+     """
+     birthtime_ns = getattr(details, "st_birthtime_ns", None)
+@@ -405,16 +426,15 @@ def _same_file(details: os.stat_result, *, file_identity: str, changed_ns: int)
+     return changed_ns == 0 or _changed_ns(details) == changed_ns
+
+
+-def _hash_root(resolved: Path, details: os.stat_result, device: int | None) -> str:
+-    prefix = "" if device is None else f"{device}:"
++def _hash_root(resolved: Path, details: RootMetadata) -> str:
+     identity = (
+-        f"{resolved}\0{prefix}{details.st_ino}:{details.st_mode}:{details.st_uid}:{details.st_gid}"
++        f"{resolved}\0{details.inode}:{details.mode}:{details.uid}:{details.gid}:{details.birth_ns}"
+     )
+-    return "root:v2:" + hashlib.sha256(identity.encode()).hexdigest()
++    return "root:v3:" + hashlib.sha256(identity.encode()).hexdigest()
+
+
+-def _root_identity_matches_details(resolved: Path, details: os.stat_result, expected: str) -> bool:
+-    return _hash_root(resolved, details, None) == expected
++def _root_identity_matches_descriptor(resolved: Path, descriptor: int, expected: str) -> bool:
++    return _hash_root(resolved, _root_descriptor_metadata(descriptor)) == expected
+
+
+ def source_root_identity(root: Path) -> str:
+@@ -424,12 +444,12 @@ def source_root_identity(root: Path) -> str:
+     device-bound identity would silently revoke every grant after a restart.
+     """
+     resolved, details = _root_details(root)
+-    return _hash_root(resolved, details, None)
++    return _hash_root(resolved, details)
+
+
+ def root_identity_matches(root: Path, expected: str) -> bool:
+     resolved, details = _root_details(root)
+-    return _root_identity_matches_details(resolved, details, expected)
++    return _hash_root(resolved, details) == expected
+
+
+ def _check_root_identity(root: Path, expected: str | None) -> None:
+diff --git a/memhub/apps/core/src/one_memory/imports/connections.py b/memhub/apps/core/src/one_memory/imports/connections.py
+index 360204d..95f347b 100644
+--- a/memhub/apps/core/src/one_memory/imports/connections.py
++++ b/memhub/apps/core/src/one_memory/imports/connections.py
+@@ -187,6 +187,11 @@ class SourceConnectionStore:
+     ) -> str:
+         registration = self.candidates.resolve(registration, user_id=user_id, db=db)
+         source_id = registration.descriptor.source_id
++        prior = db.execute(
++            "SELECT root_identity FROM source_grants WHERE user_id=? AND source_id=?",
++            (user_id, source_id),
++        ).fetchone()
++        reconfirm_legacy_candidate = False
+         if registration.candidate.kind is RootCandidateKind.USER_SELECTED:
+             if expected_candidate_revision != registration.candidate.revision:
+                 raise ConnectionIntentError("source_candidate_revision_conflict")
+@@ -194,7 +199,18 @@ class SourceConnectionStore:
+                 "SELECT root_id FROM source_candidates WHERE user_id=? AND source_id=?",
+                 (user_id, source_id),
+             ).fetchone()
+-            if saved is None or saved["root_id"] != expected_root:
++            # A v2 grant cannot prove the directory generation. Only an explicit
++            # confirmation of the current v3 root may replace this saved identity.
++            reconfirm_legacy_candidate = (
++                saved is not None
++                and prior is not None
++                and saved["root_id"].startswith("root:v2:")
++                and prior["root_identity"] == saved["root_id"]
++                and expected_root.startswith("root:v3:")
++            )
++            if not reconfirm_legacy_candidate and (
++                saved is None or saved["root_id"] != expected_root
++            ):
+                 raise ConnectionIntentError("source_identity_changed")
+         elif expected_candidate_revision not in {None, 0}:
+             raise ConnectionIntentError("source_candidate_revision_conflict")
+@@ -210,17 +226,15 @@ class SourceConnectionStore:
+             user_confirmed=True,
+             home=self.home,
+         )
+-        if not root_identity_matches(registration.candidate.path, expected_root):
++        if root.root_identity != expected_root or not root_identity_matches(
++            registration.candidate.path, expected_root
++        ):
+             raise ConnectionIntentError("source_identity_changed")
+         existing = db.execute(
+             "SELECT job_id FROM import_jobs WHERE user_id=? AND source_id=? "
+             "AND status IN ('pending','running','paused','interrupted','failed') LIMIT 1",
+             (user_id, source_id),
+         ).fetchone()
+-        prior = db.execute(
+-            "SELECT root_identity FROM source_grants WHERE user_id=? AND source_id=?",
+-            (user_id, source_id),
+-        ).fetchone()
+         root_changed = prior is not None and prior["root_identity"] != expected_root
+         running = db.execute(
+             "SELECT 1 FROM import_jobs WHERE user_id=? AND source_id=? "
+@@ -236,6 +250,12 @@ class SourceConnectionStore:
+                 "AND status IN ('pending','paused','interrupted','failed')",
+                 (now, user_id, source_id),
+             )
++        if reconfirm_legacy_candidate:
++            db.execute(
++                "UPDATE source_candidates SET root_id=?,revision=revision+1,updated_at=? "
++                "WHERE user_id=? AND source_id=?",
++                (expected_root, now, user_id, source_id),
++            )
+         self.grants.write_grant(
+             db,
+             user_id=user_id,
+diff --git a/memhub/apps/core/src/one_memory/imports/grants.py b/memhub/apps/core/src/one_memory/imports/grants.py
+index e0ddffd..4a260c5 100644
+--- a/memhub/apps/core/src/one_memory/imports/grants.py
++++ b/memhub/apps/core/src/one_memory/imports/grants.py
+@@ -77,7 +77,10 @@ class SourceGrantStore:
+             home=self.home,
+             max_file_bytes=_max_source_file_bytes(source_id),
+         )
+-        if expected_root_id is not None and not root_identity_matches(root, expected_root_id):
++        if expected_root_id is not None and (
++            authorized.root_identity != expected_root_id
++            or not root_identity_matches(root, expected_root_id)
++        ):
+             raise SourceAccessError(SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED)
+         now = datetime.now(UTC).isoformat()
+         with self._connect(writing=True) as connection:
+@@ -160,7 +163,9 @@ class SourceGrantStore:
+             home=self.home,
+             max_file_bytes=_max_source_file_bytes(source_id),
+         )
+-        if not root_identity_matches(Path(row["requested_path"]), row["root_identity"]):
++        if authorized.root_identity != row["root_identity"] or not root_identity_matches(
++            Path(row["requested_path"]), row["root_identity"]
++        ):
+             raise SourceAccessError(SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED)
+         return authorized
+
+diff --git a/memhub/apps/core/src/one_memory/imports/root_metadata.py b/memhub/apps/core/src/one_memory/imports/root_metadata.py
+new file mode 100644
+index 0000000..4f1f535
+--- /dev/null
++++ b/memhub/apps/core/src/one_memory/imports/root_metadata.py
+@@ -0,0 +1,116 @@
++"""Read a directory's identity from an open descriptor, including its birth time."""
++
++import ctypes
++import errno
++import os
++import sys
++from collections.abc import Callable
++from dataclasses import dataclass
++from functools import cache
++from typing import cast
++
++
++@dataclass(frozen=True)
++class RootMetadata:
++    inode: int
++    mode: int
++    uid: int
++    gid: int
++    birth_ns: int
++
++
++class _StatxTimestamp(ctypes.Structure):
++    _fields_ = [
++        ("seconds", ctypes.c_int64),
++        ("nanoseconds", ctypes.c_uint32),
++        ("reserved", ctypes.c_int32),
++    ]
++
++
++class _Statx(ctypes.Structure):
++    # Linux UAPI fixes this structure at 256 bytes. Fields after dev_minor are
++    # not needed here; reserve their complete space for newer kernel versions.
++    _fields_ = [
++        ("mask", ctypes.c_uint32),
++        ("blksize", ctypes.c_uint32),
++        ("attributes", ctypes.c_uint64),
++        ("nlink", ctypes.c_uint32),
++        ("uid", ctypes.c_uint32),
++        ("gid", ctypes.c_uint32),
++        ("mode", ctypes.c_uint16),
++        ("spare", ctypes.c_uint16),
++        ("inode", ctypes.c_uint64),
++        ("size", ctypes.c_uint64),
++        ("blocks", ctypes.c_uint64),
++        ("attributes_mask", ctypes.c_uint64),
++        ("atime", _StatxTimestamp),
++        ("btime", _StatxTimestamp),
++        ("ctime", _StatxTimestamp),
++        ("mtime", _StatxTimestamp),
++        ("rdev_major", ctypes.c_uint32),
++        ("rdev_minor", ctypes.c_uint32),
++        ("dev_major", ctypes.c_uint32),
++        ("dev_minor", ctypes.c_uint32),
++        ("reserved", ctypes.c_uint64 * 14),
++    ]
++
++
++_AT_EMPTY_PATH = 0x1000
++_STATX_REQUEST = 0x07FF | 0x0800  # BASIC_STATS | BTIME
++_STATX_REQUIRED = 0x0001 | 0x0002 | 0x0008 | 0x0010 | 0x0100 | 0x0800
++
++
++@cache
++def _statx_function() -> Callable[..., int]:
++    try:
++        function = ctypes.CDLL(None, use_errno=True).statx
++    except (AttributeError, OSError):
++        raise OSError(errno.ENOTSUP, "Directory birth time is unavailable") from None
++    function.argtypes = [
++        ctypes.c_int,
++        ctypes.c_char_p,
++        ctypes.c_int,
++        ctypes.c_uint,
++        ctypes.POINTER(_Statx),
++    ]
++    function.restype = ctypes.c_int
++    return cast(Callable[..., int], function)
++
++
++def _linux_metadata(descriptor: int) -> RootMetadata:
++    details = _Statx()
++    result = _statx_function()(
++        descriptor, b"", _AT_EMPTY_PATH, _STATX_REQUEST, ctypes.byref(details)
++    )
++    if result != 0:
++        raise OSError(ctypes.get_errno(), "Directory identity is unavailable")
++    if details.mask & _STATX_REQUIRED != _STATX_REQUIRED:
++        raise OSError(errno.ENOTSUP, "Directory birth time is unavailable")
++    if details.btime.nanoseconds >= 1_000_000_000:
++        raise OSError(errno.EIO, "Invalid directory birth time")
++    return RootMetadata(
++        inode=details.inode,
++        mode=details.mode,
++        uid=details.uid,
++        gid=details.gid,
++        birth_ns=details.btime.seconds * 1_000_000_000 + details.btime.nanoseconds,
++    )
++
++
++def root_metadata(descriptor: int) -> RootMetadata:
++    if sys.platform == "linux":
++        return _linux_metadata(descriptor)
++    details = os.fstat(descriptor)
++    birth_ns = getattr(details, "st_birthtime_ns", None)
++    if birth_ns is None:
++        birth_time = getattr(details, "st_birthtime", None)
++        if birth_time is None:
++            raise OSError(errno.ENOTSUP, "Directory birth time is unavailable")
++        birth_ns = int(birth_time * 1_000_000_000)
++    return RootMetadata(
++        inode=details.st_ino,
++        mode=details.st_mode,
++        uid=details.st_uid,
++        gid=details.st_gid,
++        birth_ns=birth_ns,
++    )
+diff --git a/memhub/apps/core/tests/TEST_INDEX.md b/memhub/apps/core/tests/TEST_INDEX.md
+index 25244f5..5c94616 100644
+--- a/memhub/apps/core/tests/TEST_INDEX.md
++++ b/memhub/apps/core/tests/TEST_INDEX.md
+@@ -317,6 +317,7 @@
+ | `test_source_readers.py` | `contract` | 覆盖 jsonl is resumable and does not advance over an incomplete tail、sqlite reader uses monotonic row checkpoint、zstd jsonl reader resumes by completed record 等 7 个场景。 |
+ | `test_source_registry_and_grants.py` | `contract` | 覆盖 catalog resolves defaults and marks environment overrides、recall hosts that can append join the live sync poller、declarations with no reader are named rather than mistaken for behaviour 等 15 个场景。 |
+ | `test_source_root_identity_reboot.py` | `contract` | 覆盖 a grant survives the volume being renumbered after a restart、a replaced directory is still refused after a restart、the identity no longer depends on the device number 场景。 |
++| `test_source_root_metadata.py` | `contract` | 覆盖 a missing libc statx function is unavailable、file open checks the open root generation before reading、linux procfs without birth time refuses authorization 等 10 个场景。 |
+ | `test_source_session_count_api.py` | `integration` | 3925a kernel item 2 (BUG-01): the session count reaches the authorization page. |
+ | `test_source_status_latency.py` | `integration` | Source status polling must not rediscover an already authorized history tree. |
+ | `test_source_sync_idempotent.py` | `integration` | Final-state Harness sync is idempotent and resumes missed source work. |
+@@ -347,4 +348,4 @@
+ | `test_workspace_recall.py` | `contract` | Workspace memories were unreachable from every host; these pin the way in. |
+ | `test_write_queue_lease_renewal.py` | `contract` | Rule 8: a lease must outlive the work it covers, and be renewed while it runs. |
+
+-共 342 个测试文件。
++共 343 个测试文件。
+diff --git a/memhub/apps/core/tests/core_test_classification.py b/memhub/apps/core/tests/core_test_classification.py
+index d5422e5..e80a9e8 100644
+--- a/memhub/apps/core/tests/core_test_classification.py
++++ b/memhub/apps/core/tests/core_test_classification.py
+@@ -14,8 +14,8 @@ from pathlib import Path
+ import pytest
+
+ PRIMARY_MARKERS = ("unit", "contract", "integration", "performance", "live")
+-EXPECTED_TEST_FILE_COUNT = 342
+-EXPECTED_TEST_FILES_SHA256 = "871064fda6319d0c8de3171dd2bd905db69cc9687de4fce2391b7b7789711c6b"  # pragma: allowlist secret
++EXPECTED_TEST_FILE_COUNT = 343
++EXPECTED_TEST_FILES_SHA256 = "f5ca0c07ad7b96a9915b04047eaa8018590aef14f8deb78d7275f57f6ef1005b"  # pragma: allowlist secret
+
+ # Pure transformations, validation models, parity checks and state machines.
+ # This list is intentionally small: uncertain files default to contract.
+diff --git a/memhub/apps/core/tests/test_source_candidate_connections.py b/memhub/apps/core/tests/test_source_candidate_connections.py
+index 48437e9..3227135 100644
+--- a/memhub/apps/core/tests/test_source_candidate_connections.py
++++ b/memhub/apps/core/tests/test_source_candidate_connections.py
+@@ -6,7 +6,7 @@ from threading import Event
+
+ import pytest
+
+-from one_memory.imports.access import SourceAccessError, source_root_identity
++from one_memory.imports.access import AuthorizedSourceRoot, SourceAccessError, source_root_identity
+ from one_memory.imports.candidates import SourceCandidateError, SourceCandidateStore
+ from one_memory.imports.connections import ConnectionIntentError, SourceConnectionStore
+ from one_memory.imports.grants import SourceGrantStore
+@@ -187,3 +187,195 @@ def test_legacy_grant_without_candidate_retains_previous_behavior(tmp_path, cand
+         candidate_kind=RootCandidateKind.DEFAULT,
+     )
+     assert granted.revision == 1
++
++
++def legacy_selected_grant(setup):
++    """Represent an existing v2 installation without approving its current root."""
++    candidates, store, reg, root, database = setup
++    select(candidates, reg, root)
++    original = {
++        **options(reg, root, "before-upgrade"),
++        "source_candidate_revisions": {"claude-code": 1},
++    }
++    receipt = store.connect(**original)
++    details = root.stat()
++    legacy = (
++        "root:v2:"
++        + hashlib.sha256(
++            f"{root.resolve()}\0{details.st_ino}:{details.st_mode}:{details.st_uid}:{details.st_gid}".encode()
++        ).hexdigest()
++    )
++    old_roots = {"claude-code": legacy}
++    original["source_roots"] = old_roots
++    old_fingerprint = hashlib.sha256(
++        json.dumps(
++            {
++                "sources": ("claude-code",),
++                "roots": old_roots,
++                "overrides": True,
++                "full_rescan": False,
++                "onboarding": False,
++                "source_candidate_revisions": {"claude-code": 1},
++            },
++            sort_keys=True,
++        ).encode()
++    ).hexdigest()
++    with sqlite3.connect(database) as db:
++        db.execute("UPDATE source_candidates SET root_id=?", (legacy,))
++        db.execute("UPDATE source_grants SET root_identity=?", (legacy,))
++        db.execute("UPDATE source_connection_intents SET request_hash=?", (old_fingerprint,))
++        db.execute(
++            "INSERT INTO source_cursors "
++            "(user_id,source_id,file_key,file_identity,checkpoint,checkpoint_anchor,"
++            "observed_size,observed_modified_ns,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
++            ("local", "claude-code", "kept-file", "kept-inode", "byte:7", None, 7, 1, "earlier"),
++        )
++    return original, receipt
++
++
++def selected_state(database):
++    with sqlite3.connect(database) as db:
++        return {
++            table: db.execute(f"SELECT * FROM {table}").fetchall()
++            for table in ("source_candidates", "source_grants", "source_cursors", "import_jobs")
++        }
++
++
++def test_v2_selected_directory_requires_new_confirmation_and_replay_never_upgrades(setup):
++    _, store, reg, root, database = setup
++    original, receipt = legacy_selected_grant(setup)
++    before = selected_state(database)
++    with pytest.raises(SourceAccessError, match="source_identity_changed"):
++        store.grants.authorized_root(user_id="local", source_id="claude-code")
++
++    assert store.connect(**original) == receipt
++    assert selected_state(database) == before
++
++    current = source_root_identity(root)
++    assert current.startswith("root:v3:")
++    kwargs = {
++        **options(reg, root, "confirm-upgrade"),
++        "source_candidate_revisions": {"claude-code": 1},
++    }
++    accepted = store.connect(**kwargs)
++    assert accepted.accepted_source_ids == ("claude-code",)
++    assert accepted.failed_sources == {}
++    assert store.jobs.get(receipt.jobs[0].job_id).status is ImportStatus.CANCELLED
++    assert store.grants.require_receipt(user_id="local", source_id="claude-code").root_id == current
++    assert store.grants.authorized_root(user_id="local", source_id="claude-code").root == root
++    with sqlite3.connect(database) as db:
++        assert db.execute(
++            "SELECT requested_path,root_id,revision FROM source_candidates"
++        ).fetchone() == (str(root), current, 2)
++    assert selected_state(database)["source_cursors"] == before["source_cursors"]
++
++    revoked = store.grants.revoke(user_id="local", source_id="claude-code")
++    after = selected_state(database)
++    assert store.connect(**kwargs) == accepted
++    assert store.grants.require_receipt(user_id="local", source_id="claude-code") == revoked
++    assert selected_state(database) == after
++
++
++@pytest.mark.parametrize(
++    ("case", "reason"),
++    [
++        ("unconfirmed", "environment_override_confirmation_required"),
++        ("stale_revision", "source_candidate_revision_conflict"),
++        ("old_identity", "source_identity_changed"),
++        ("wrong_current_identity", "source_identity_changed"),
++        ("missing_grant", "source_identity_changed"),
++        ("different_grant", "source_identity_changed"),
++        ("v3_candidate_mismatch", "source_identity_changed"),
++        ("running_import", "source_import_busy"),
++    ],
++)
++def test_v2_selected_directory_reconfirmation_keeps_all_other_guards(setup, case, reason):
++    _, store, reg, root, database = setup
++    original, receipt = legacy_selected_grant(setup)
++    kwargs = {
++        **options(reg, root, "confirm-upgrade"),
++        "source_candidate_revisions": {"claude-code": 1},
++    }
++    if case == "unconfirmed":
++        kwargs["confirm_overrides"] = False
++    elif case == "stale_revision":
++        kwargs["source_candidate_revisions"] = {"claude-code": 0}
++    elif case == "old_identity":
++        kwargs["source_roots"] = original["source_roots"]
++    elif case == "wrong_current_identity":
++        kwargs["source_roots"] = {"claude-code": "root:v3:" + "0" * 64}
++    elif case == "running_import":
++        store.jobs.claim(receipt.jobs[0].job_id)
++    else:
++        with sqlite3.connect(database) as db:
++            if case == "missing_grant":
++                db.execute("DELETE FROM source_grants")
++            elif case == "different_grant":
++                db.execute("UPDATE source_grants SET root_identity=?", ("root:v2:" + "0" * 64,))
++            else:
++                db.execute("UPDATE source_candidates SET root_id=?", ("root:v3:" + "0" * 64,))
++    before = selected_state(database)
++    refused = store.connect(**kwargs)
++    assert refused.accepted_source_ids == ()
++    assert refused.failed_sources == {"claude-code": reason}
++    assert selected_state(database) == before
++
++
++def test_v2_reconfirmation_rolls_back_candidate_grant_and_jobs_together(setup, monkeypatch):
++    _, store, reg, root, database = setup
++    legacy_selected_grant(setup)
++    before = selected_state(database)
++    write = store.grants.write_grant
++
++    def fail_after_grant(db, **kwargs):
++        write(db, **kwargs)
++        assert db.execute("SELECT root_id,revision FROM source_candidates").fetchone()[1] == 2
++        raise ConnectionIntentError("injected_after_grant")
++
++    monkeypatch.setattr(store.grants, "write_grant", fail_after_grant)
++    refused = store.connect(
++        **options(reg, root, "confirm-upgrade"), source_candidate_revisions={"claude-code": 1}
++    )
++    assert refused.failed_sources == {"claude-code": "injected_after_grant"}
++    assert selected_state(database) == before
++
++
++@pytest.mark.parametrize("legacy_selected", [False, True])
++def test_connection_checks_captured_identity_when_path_changes_back(
++    setup, monkeypatch, legacy_selected
++):
++    _, store, reg, custom, database = setup
++    if legacy_selected:
++        legacy_selected_grant(setup)
++        root = custom
++        revisions = {"claude-code": 1}
++    else:
++        root = reg.candidate.path
++        revisions = {}
++    (root / "history").write_bytes(b"approved synthetic source")
++    expected = source_root_identity(root)
++    kwargs = options(reg, root, "confirm-current-generation")
++    before = selected_state(database)
++    original_saved, replacement_saved = root.with_name("original"), root.with_name("replacement")
++    grant = AuthorizedSourceRoot.grant
++    captured = []
++
++    def swap_and_restore_during_capture(**arguments):
++        root.rename(original_saved)
++        root.mkdir()
++        (root / "history").write_bytes(b"unapproved synthetic replacement")
++        result = grant(**arguments)
++        captured.append(result.root_identity)
++        root.rename(replacement_saved)
++        original_saved.rename(root)
++        return result
++
++    monkeypatch.setattr(AuthorizedSourceRoot, "grant", swap_and_restore_during_capture)
++    refused = store.connect(**kwargs, source_candidate_revisions=revisions)
++
++    assert refused.accepted_source_ids == ()
++    assert refused.failed_sources == {"claude-code": "source_identity_changed"}
++    assert len(captured) == 1 and captured[0] != expected
++    assert source_root_identity(root) == expected
++    assert (replacement_saved / "history").read_bytes() == b"unapproved synthetic replacement"
++    assert selected_state(database) == before
+diff --git a/memhub/apps/core/tests/test_source_registry_and_grants.py b/memhub/apps/core/tests/test_source_registry_and_grants.py
+index a89e230..0bd3dfa 100644
+--- a/memhub/apps/core/tests/test_source_registry_and_grants.py
++++ b/memhub/apps/core/tests/test_source_registry_and_grants.py
+@@ -1,8 +1,17 @@
+ import os
+ import re
++import sqlite3
+ from pathlib import Path
+ from typing import get_args
+
++import pytest
++
++from one_memory.imports.access import (
++    AuthorizedSourceRoot,
++    SourceAccessError,
++    SourceAccessErrorCode,
++    source_root_identity,
++)
+ from one_memory.imports.adapters import (
+     ScanEvent,
+     SourceCapabilities,
+@@ -20,6 +29,57 @@ from one_memory.imports.sources.registry import (
+ )
+
+
++@pytest.mark.parametrize("operation", ["load", "grant"])
++def test_grant_checks_captured_identity_when_path_changes_back(tmp_path, monkeypatch, operation):
++    home = tmp_path / "home"
++    root = home / "source"
++    root.mkdir(parents=True)
++    (root / "history").write_bytes(b"approved synthetic source")
++    database = tmp_path / "data.sqlite"
++    store = SourceGrantStore(database, home=home)
++    store.grant(
++        user_id="local",
++        source_id="claude-code",
++        root=root,
++        candidate_kind=RootCandidateKind.DEFAULT,
++    )
++    expected = source_root_identity(root)
++    with sqlite3.connect(database) as db:
++        before = db.execute("SELECT * FROM source_grants").fetchall()
++    original_saved, replacement_saved = home / "original", home / "replacement"
++    root.rename(original_saved)
++    root.mkdir()
++    (root / "history").write_bytes(b"unapproved synthetic replacement")
++    grant = AuthorizedSourceRoot.grant
++    captured = []
++
++    def restore_original_after_capture(**kwargs):
++        result = grant(**kwargs)
++        captured.append(result.root_identity)
++        root.rename(replacement_saved)
++        original_saved.rename(root)
++        return result
++
++    monkeypatch.setattr(AuthorizedSourceRoot, "grant", restore_original_after_capture)
++    with pytest.raises(SourceAccessError) as refused:
++        if operation == "load":
++            store.authorized_root(user_id="local", source_id="claude-code")
++        else:
++            store.grant(
++                user_id="local",
++                source_id="claude-code",
++                root=root,
++                candidate_kind=RootCandidateKind.DEFAULT,
++                expected_root_id=expected,
++            )
++    assert refused.value.code is SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED
++    assert len(captured) == 1 and captured[0] != expected
++    assert source_root_identity(root) == expected
++    assert (replacement_saved / "history").read_bytes() == b"unapproved synthetic replacement"
++    with sqlite3.connect(database) as db:
++        assert db.execute("SELECT * FROM source_grants").fetchall() == before
++
++
+ def test_catalog_resolves_defaults_and_marks_environment_overrides(tmp_path) -> None:
+     catalog = build_source_catalog(
+         home=tmp_path / "home",
+diff --git a/memhub/apps/core/tests/test_source_root_identity_reboot.py b/memhub/apps/core/tests/test_source_root_identity_reboot.py
+index 94146e9..b70453d 100644
+--- a/memhub/apps/core/tests/test_source_root_identity_reboot.py
++++ b/memhub/apps/core/tests/test_source_root_identity_reboot.py
+@@ -1,27 +1,21 @@
++import ctypes
+ import hashlib
+ import os
+ import sqlite3
++import sys
++from dataclasses import replace
+ from pathlib import Path
++from types import SimpleNamespace
+
+ import pytest
+
++from one_memory.imports import access, root_metadata
+ from one_memory.imports.access import SourceAccessError, SourceAccessErrorCode
+ from one_memory.imports.grants import SourceGrantStore
+ from one_memory.imports.sources.registry import RootCandidateKind
+
+
+-def _identity_recorded_on_another_boot(root: Path, *, inode_offset: int = 0) -> str:
+-    """The stable formula a previous boot recorded, without that boot's device number."""
+-    resolved = root.resolve(strict=True)
+-    details = resolved.stat()
+-    identity = (
+-        f"{resolved}\0{details.st_ino + inode_offset}:"
+-        f"{details.st_mode}:{details.st_uid}:{details.st_gid}"
+-    )
+-    return "root:v2:" + hashlib.sha256(identity.encode()).hexdigest()
+-
+-
+-def _granted_before_reboot(tmp_path: Path, *, inode_offset: int = 0):
++def _grant(tmp_path: Path):
+     home = tmp_path / "home"
+     source = home / ".codebuddy" / "projects"
+     source.mkdir(parents=True)
+@@ -33,40 +27,83 @@ def _granted_before_reboot(tmp_path: Path, *, inode_offset: int = 0):
+         root=source,
+         candidate_kind=RootCandidateKind.DEFAULT,
+     )
+-    recorded = _identity_recorded_on_another_boot(source, inode_offset=inode_offset)
+-    with sqlite3.connect(database) as connection:
+-        connection.execute(
+-            "UPDATE source_grants SET root_identity=? WHERE source_id='workbuddy'",
+-            (recorded,),
+-        )
+-    return store, recorded
++    return store, source, database
++
++
++def _renumber_device(monkeypatch):
++    observed = []
++    if sys.platform == "linux":
++        real_statx = root_metadata._statx_function()
++
++        def renumbered(*args):
++            result = real_statx(*args)
++            details = ctypes.cast(args[-1], ctypes.POINTER(root_metadata._Statx)).contents
++            previous = details.dev_major
++            details.dev_major += 1
++            observed.append((previous, details.dev_major))
++            return result
++
++        monkeypatch.setattr(root_metadata, "_statx_function", lambda: renumbered)
++    else:
++        real_fstat = os.fstat
++
++        def renumbered(descriptor):
++            original = real_fstat(descriptor)
++            values = {
++                name: getattr(original, name) for name in dir(original) if name.startswith("st_")
++            }
++            values["st_dev"] += 1
++            observed.append((original.st_dev, values["st_dev"]))
++            return SimpleNamespace(**values)
++
++        monkeypatch.setattr(root_metadata.os, "fstat", renumbered)
++    return observed
+
+
+-def test_a_grant_survives_the_volume_being_renumbered_after_a_restart(tmp_path) -> None:
+-    store, recorded = _granted_before_reboot(tmp_path)
++def test_a_grant_survives_the_volume_being_renumbered_after_a_restart(tmp_path, monkeypatch):
++    store, source, database = _grant(tmp_path)
++    recorded = store.require_receipt(user_id="local", source_id="workbuddy").root_id
++    observed = _renumber_device(monkeypatch)
++    restarted = SourceGrantStore(database, home=store.home)
+
+-    assert store.authorized_root(user_id="local", source_id="workbuddy") is not None
+-    assert store.require_receipt(user_id="local", source_id="workbuddy").root_id == recorded
++    assert access.source_root_identity(source) == recorded
++    assert restarted.authorized_root(user_id="local", source_id="workbuddy") is not None
++    assert restarted.require_receipt(user_id="local", source_id="workbuddy").root_id == recorded
++    assert observed and all(before != after for before, after in observed)
+
+
+-def test_a_replaced_directory_is_still_refused_after_a_restart(tmp_path) -> None:
+-    store, _ = _granted_before_reboot(tmp_path, inode_offset=1)
++def test_a_replaced_directory_is_still_refused_after_a_restart(tmp_path, monkeypatch):
++    store, _, database = _grant(tmp_path)
++    real_metadata = access.root_metadata
+
++    def replacement(descriptor):
++        # Same inode, owner and permissions: a different creation is sufficient.
++        original = real_metadata(descriptor)
++        return replace(original, birth_ns=original.birth_ns + 1)
++
++    monkeypatch.setattr(access, "root_metadata", replacement)
++    restarted = SourceGrantStore(database, home=store.home)
+     with pytest.raises(SourceAccessError) as refused:
+-        store.authorized_root(user_id="local", source_id="workbuddy")
++        restarted.authorized_root(user_id="local", source_id="workbuddy")
+     assert refused.value.code is SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED
+
+
+-def test_the_identity_no_longer_depends_on_the_device_number(tmp_path) -> None:
+-    from one_memory.imports.access import source_root_identity
+-
+-    root = tmp_path / "root"
+-    root.mkdir()
+-    details = os.stat(root)
+-    with_device = (
+-        f"{root.resolve()}\0{details.st_dev}:{details.st_ino}:"
+-        f"{details.st_mode}:{details.st_uid}:{details.st_gid}"
+-    )
+-    assert source_root_identity(root) != (
+-        "root:v2:" + hashlib.sha256(with_device.encode()).hexdigest()
++def test_a_legacy_grant_is_refused_without_modifying_its_record(tmp_path):
++    store, source, database = _grant(tmp_path)
++    details = source.stat()
++    identity = (
++        f"{source.resolve()}\0{details.st_ino}:{details.st_mode}:{details.st_uid}:{details.st_gid}"
+     )
++    legacy = "root:v2:" + hashlib.sha256(identity.encode()).hexdigest()
++    with sqlite3.connect(database) as connection:
++        connection.execute(
++            "UPDATE source_grants SET root_identity=? WHERE source_id='workbuddy'", (legacy,)
++        )
++        before = connection.execute("SELECT * FROM source_grants").fetchall()
++
++    with pytest.raises(SourceAccessError) as refused:
++        store.authorized_root(user_id="local", source_id="workbuddy")
++    assert refused.value.code is SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED
++    with sqlite3.connect(database) as connection:
++        assert connection.execute("SELECT * FROM source_grants").fetchall() == before
++    assert not access.root_identity_matches(source, legacy)
+diff --git a/memhub/apps/core/tests/test_source_root_metadata.py b/memhub/apps/core/tests/test_source_root_metadata.py
+new file mode 100644
+index 0000000..c5d0731
+--- /dev/null
++++ b/memhub/apps/core/tests/test_source_root_metadata.py
+@@ -0,0 +1,157 @@
++import ctypes
++import errno
++import os
++import stat
++import sys
++from dataclasses import replace
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++from one_memory.imports import access, root_metadata
++from one_memory.imports.access import AuthorizedSourceRoot, SourceAccessError, SourceAccessErrorCode
++
++
++def _statx_reply(monkeypatch, *, mask=root_metadata._STATX_REQUIRED, error=0, nanoseconds=73):
++    calls = []
++
++    def read(descriptor, path, flags, requested, pointer):
++        calls.append((descriptor, path, flags, requested))
++        if error:
++            ctypes.set_errno(error)
++            return -1
++        details = ctypes.cast(pointer, ctypes.POINTER(root_metadata._Statx)).contents
++        details.mask = mask
++        details.inode = 35
++        details.mode = stat.S_IFDIR | 0o700
++        details.uid = 101
++        details.gid = 102
++        details.btime.seconds = 1700000000
++        details.btime.nanoseconds = nanoseconds
++        return 0
++
++    monkeypatch.setattr(root_metadata, "_statx_function", lambda: read)
++    return calls
++
++
++def test_linux_reads_metadata_once_from_the_open_descriptor(monkeypatch):
++    calls = _statx_reply(monkeypatch)
++    result = root_metadata._linux_metadata(71)
++
++    assert result == root_metadata.RootMetadata(
++        35, stat.S_IFDIR | 0o700, 101, 102, 1700000000000000073
++    )
++    assert calls == [(71, b"", 0x1000, 0xFFF)]
++    assert ctypes.sizeof(root_metadata._Statx) == 256
++    assert root_metadata._Statx.btime.offset == 80
++
++
++@pytest.mark.parametrize("missing", [0x1, 0x2, 0x8, 0x10, 0x100, 0x800])
++def test_linux_requires_every_identity_field_in_the_returned_mask(monkeypatch, missing):
++    _statx_reply(monkeypatch, mask=root_metadata._STATX_REQUIRED & ~missing)
++    with pytest.raises(OSError) as refused:
++        root_metadata._linux_metadata(71)
++    assert refused.value.errno == errno.ENOTSUP
++
++
++@pytest.mark.parametrize("error", [errno.ENOSYS, errno.EACCES, errno.EBADF])
++def test_linux_statx_failure_does_not_fall_back_to_stat(monkeypatch, error):
++    _statx_reply(monkeypatch, error=error)
++    monkeypatch.setattr(root_metadata.os, "fstat", lambda _: pytest.fail("No inode-only fallback"))
++    with pytest.raises(OSError) as refused:
++        root_metadata._linux_metadata(71)
++    assert refused.value.errno == error
++
++
++def test_linux_rejects_malformed_birth_time(monkeypatch):
++    _statx_reply(monkeypatch, nanoseconds=1_000_000_000)
++    with pytest.raises(OSError):
++        root_metadata._linux_metadata(71)
++
++
++def test_a_missing_libc_statx_function_is_unavailable(monkeypatch):
++    root_metadata._statx_function.cache_clear()
++    monkeypatch.setattr(root_metadata.ctypes, "CDLL", lambda *a, **kw: SimpleNamespace())
++    try:
++        with pytest.raises(OSError) as refused:
++            root_metadata._statx_function()
++        assert refused.value.errno == errno.ENOTSUP
++    finally:
++        root_metadata._statx_function.cache_clear()
++
++
++def test_non_linux_birth_time_is_required(monkeypatch):
++    monkeypatch.setattr(root_metadata.sys, "platform", "darwin")
++    monkeypatch.setattr(root_metadata.os, "fstat", lambda _: SimpleNamespace())
++    with pytest.raises(OSError) as refused:
++        root_metadata.root_metadata(71)
++    assert refused.value.errno == errno.ENOTSUP
++
++
++def test_root_identity_survives_child_changes_and_descriptor_reopen(tmp_path):
++    root = tmp_path / "source"
++    root.mkdir()
++    expected = access.source_root_identity(root)
++    assert expected.startswith("root:v3:")
++    for index in range(4):
++        child = root / str(index)
++        child.mkdir()
++        (child / "history").write_text("synthetic")
++        assert access.source_root_identity(root) == expected
++        (child / "history").unlink()
++        child.rmdir()
++        assert access.root_identity_matches(root, expected)
++
++
++def test_missing_root_metadata_fails_closed_and_closes_its_descriptor(tmp_path, monkeypatch):
++    root = tmp_path / "source"
++    root.mkdir()
++    opened = []
++
++    def unavailable(descriptor):
++        opened.append(descriptor)
++        raise OSError(errno.ENOTSUP, "birth time missing")
++
++    monkeypatch.setattr(access, "root_metadata", unavailable)
++    with pytest.raises(SourceAccessError) as refused:
++        access.source_root_identity(root)
++    assert refused.value.code is SourceAccessErrorCode.SOURCE_UNAVAILABLE
++    assert len(opened) == 1
++    with pytest.raises(OSError) as closed:
++        os.fstat(opened[0])
++    assert closed.value.errno == errno.EBADF
++
++
++def test_file_open_checks_the_open_root_generation_before_reading(tmp_path, monkeypatch):
++    root = tmp_path / "source"
++    root.mkdir()
++    (root / "history").write_bytes(b"private synthetic history")
++    authorized = AuthorizedSourceRoot.grant(
++        source_id="fixture", root=root, user_confirmed=True, home=tmp_path / "home"
++    ).authorize_file(Path("history"))
++    real_metadata = access.root_metadata
++    checked = []
++
++    def replaced(descriptor):
++        original = real_metadata(descriptor)
++        checked.append(descriptor)
++        return replace(original, birth_ns=original.birth_ns + 1)
++
++    monkeypatch.setattr(access, "root_metadata", replaced)
++    # The descriptor check must enforce the identity even if the later path
++    # lookup points back to the original directory (an ABA path race).
++    monkeypatch.setattr(access, "_check_root_identity", lambda *_: None)
++    with pytest.raises(SourceAccessError) as refused:
++        authorized.open_binary()
++    assert refused.value.code is SourceAccessErrorCode.SOURCE_IDENTITY_CHANGED
++    assert len(checked) == 1
++    with pytest.raises(OSError):
++        os.fstat(checked[0])
++
++
++@pytest.mark.skipif(sys.platform != "linux", reason="Requires a real Linux statx syscall")
++def test_linux_procfs_without_birth_time_refuses_authorization():
++    with pytest.raises(SourceAccessError) as refused:
++        access.source_root_identity(Path("/proc/self"))
++    assert refused.value.code is SourceAccessErrorCode.SOURCE_UNAVAILABLE
+diff --git a/memhub/apps/core/tests/test_source_sync_permissions.py b/memhub/apps/core/tests/test_source_sync_permissions.py
+index 7630f5f..705f077 100644
+--- a/memhub/apps/core/tests/test_source_sync_permissions.py
++++ b/memhub/apps/core/tests/test_source_sync_permissions.py
+@@ -86,7 +86,7 @@ def test_location_check_does_not_open_any_conversation_file(tmp_path, monkeypatc
+     assert opened == [secret]
+     opened.clear()
+     found = inspect_source_location("fixture", root)
+-    assert found.state == "found" and found.root_id.startswith("root:v2:")
++    assert found.state == "found" and found.root_id.startswith("root:v3:")
+     assert opened == []
+     assert inspect_source_location("fixture", root / "absent").state == "not_found"
+     assert inspect_source_location("fixture", secret).state == "invalid"

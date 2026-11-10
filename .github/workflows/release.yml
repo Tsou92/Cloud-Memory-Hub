@@ -7,6 +7,11 @@ on:
         description: Existing version tag; select this same tag as the workflow ref
         type: string
         required: true
+      publish:
+        description: Publish immediately after CI; leave disabled for NAS artifact acceptance
+        type: boolean
+        default: false
+        required: true
 
 permissions:
   contents: read
@@ -160,6 +165,7 @@ jobs:
 
   publish:
     needs: [preflight, assemble]
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

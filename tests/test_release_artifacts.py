@@ -136,6 +136,71 @@ class ReleaseFixture(unittest.TestCase):
         )
         return inspection
 
+    def oci_image(self, directory, *, index=True, change_manifest=None, change_index=None):
+        directory.mkdir(parents=True)
+        entries = {}
+
+        def blob(value, media_type):
+            data = json.dumps(value).encode()
+            checksum = hashlib.sha256(data).hexdigest()
+            entries["blobs/sha256/" + checksum] = data
+            return {"mediaType": media_type, "digest": "sha256:" + checksum, "size": len(data)}
+
+        labels = {"org.opencontainers.image.revision": self.commit}
+        config = blob(
+            {"os": "linux", "architecture": "amd64", "config": {"Labels": labels}},
+            "application/vnd.oci.image.config.v1+json",
+        )
+        manifest = {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": dict(config),
+            "layers": [],
+        }
+        if change_manifest:
+            change_manifest(manifest)
+        descriptor = blob(manifest, manifest["mediaType"])
+        if index:
+            attestation_config = blob(
+                {"os": "unknown", "architecture": "unknown"}, config["mediaType"]
+            )
+            attestation = blob({**manifest, "config": attestation_config}, manifest["mediaType"])
+            image_index = {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "manifests": [
+                    {**descriptor, "platform": {"os": "linux", "architecture": "amd64"}},
+                    {
+                        **attestation,
+                        "platform": {"os": "unknown", "architecture": "unknown"},
+                        "annotations": {"vnd.docker.reference.type": "attestation-manifest"},
+                    },
+                ],
+            }
+            if change_index:
+                change_index(image_index)
+            descriptor = blob(image_index, image_index["mediaType"])
+        entries["manifest.json"] = json.dumps(
+            [
+                {
+                    "Config": "blobs/sha256/" + config["digest"].removeprefix("sha256:"),
+                    "RepoTags": ["cloud-memory-hub:" + self.identity["tag"]],
+                    "Layers": [],
+                }
+            ]
+        ).encode()
+        self.tar(directory / release.names(self.identity)["image"], list(entries.items()))
+        inspection = [
+            {
+                "Id": descriptor["digest"],
+                "Descriptor": descriptor,
+                "Os": "linux",
+                "Architecture": "amd64",
+                "Config": {"Labels": labels},
+            }
+        ]
+        return inspection, entries, config["digest"]
+
     def bundle(self):
         inputs = self.root / "inputs"
         image = inputs / "release-linux"
@@ -206,10 +271,129 @@ class ArtifactTests(ReleaseFixture):
         inspection = self.image(directory)
         receipt = release.image_receipt(directory, self.identity, inspection)
         self.assertEqual(receipt["image_id"], inspection[0]["Id"])
+        self.assertEqual(receipt["config_digest"], inspection[0]["Id"])
+        self.assertNotIn("descriptor", receipt)
         self.assertEqual(receipt["commit"], self.commit)
         inspection[0]["Id"] = "sha256:" + "0" * 64
         with self.assertRaisesRegex(release.ReleaseError, "config_mismatch"):
             release.image_receipt(directory, self.identity, inspection)
+
+    def test_oci_index_and_direct_manifest_bind_the_tested_native_id(self):
+        for index in (True, False):
+            with self.subTest(index=index):
+                directory = self.root / ("oci-index" if index else "oci-manifest")
+                inspection, _, config_digest = self.oci_image(directory, index=index)
+                receipt = release.image_receipt(directory, self.identity, inspection)
+                self.assertNotEqual(inspection[0]["Id"], config_digest)
+                self.assertEqual(receipt["image_id"], inspection[0]["Id"])
+                self.assertEqual(receipt["config_digest"], config_digest)
+                self.assertEqual(receipt["descriptor"], inspection[0]["Descriptor"])
+
+    def test_oci_descriptor_identity_type_and_size_are_checked(self):
+        for field, value in (
+            ("digest", "sha256:" + "0" * 64),
+            ("mediaType", "application/unknown"),
+            ("size", True),
+            ("size", 2 * 1024**2 + 1),
+            ("size", 1),
+        ):
+            with self.subTest(field=field, value=value):
+                directory = self.root / f"descriptor-{field}-{value}"
+                inspection, _, _ = self.oci_image(directory)
+                inspection[0]["Descriptor"][field] = value
+                with self.assertRaises(release.ReleaseError):
+                    release.image_receipt(directory, self.identity, inspection)
+                self.assertFalse((directory / "image-receipt.json").exists())
+
+    def test_oci_missing_corrupt_and_duplicate_root_blobs_are_refused(self):
+        for damage in ("missing", "corrupt", "duplicate"):
+            with self.subTest(damage=damage):
+                directory = self.root / damage
+                inspection, entries, _ = self.oci_image(directory)
+                root = "blobs/sha256/" + inspection[0]["Id"].removeprefix("sha256:")
+                if damage == "missing":
+                    del entries[root]
+                elif damage == "corrupt":
+                    entries[root] = entries[root].replace(
+                        b'"schemaVersion": 2', b'"schemaVersion": 1'
+                    )
+                members = list(entries.items())
+                if damage == "duplicate":
+                    members.append((root, entries[root]))
+                self.tar(directory / release.names(self.identity)["image"], members)
+                with self.assertRaises(release.ReleaseError):
+                    release.image_receipt(directory, self.identity, inspection)
+
+    def test_oci_requires_one_matching_platform(self):
+        mutations = {
+            "missing": lambda index: index["manifests"].pop(0),
+            "ambiguous": lambda index: index["manifests"].append(dict(index["manifests"][0])),
+            "wrong": lambda index: index["manifests"][0]["platform"].update(architecture="arm64"),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name):
+                directory = self.root / name
+                inspection, _, _ = self.oci_image(directory, change_index=mutation)
+                with self.assertRaises(release.ReleaseError):
+                    release.image_receipt(directory, self.identity, inspection)
+
+    def test_oci_child_manifest_and_config_blobs_are_verified(self):
+        for node in ("manifest", "config"):
+            for damage in ("missing", "corrupt"):
+                with self.subTest(node=node, damage=damage):
+                    directory = self.root / (node + "-" + damage)
+                    inspection, entries, config_digest = self.oci_image(directory)
+                    root = "blobs/sha256/" + inspection[0]["Id"].removeprefix("sha256:")
+                    child = json.loads(entries[root])["manifests"][0]["digest"]
+                    target = "blobs/sha256/" + (
+                        child if node == "manifest" else config_digest
+                    ).removeprefix("sha256:")
+                    if damage == "missing":
+                        del entries[target]
+                    else:
+                        # Same size and JSON semantics: only digest validation detects this.
+                        changed = entries[target].replace(b", ", b",\t", 1)
+                        self.assertEqual(len(changed), len(entries[target]))
+                        self.assertNotEqual(changed, entries[target])
+                        entries[target] = changed
+                    self.tar(
+                        directory / release.names(self.identity)["image"], list(entries.items())
+                    )
+                    with self.assertRaises(release.ReleaseError):
+                        release.image_receipt(directory, self.identity, inspection)
+
+    def test_oci_valid_chain_to_another_config_with_same_labels_is_refused(self):
+        directory = self.root / "another-config"
+        inspection, entries, config_digest = self.oci_image(directory, index=False)
+
+        def add_blob(value, media_type):
+            encoded = json.dumps(value).encode()
+            digest = hashlib.sha256(encoded).hexdigest()
+            entries["blobs/sha256/" + digest] = encoded
+            return {"mediaType": media_type, "digest": "sha256:" + digest, "size": len(encoded)}
+
+        configuration = json.loads(entries["blobs/sha256/" + config_digest[7:]])
+        configuration["config"]["Env"] = ["SYNTHETIC_DIFFERENT_BUILD=1"]
+        manifest = json.loads(entries["blobs/sha256/" + inspection[0]["Id"][7:]])
+        manifest["config"] = add_blob(configuration, "application/vnd.oci.image.config.v1+json")
+        descriptor = add_blob(manifest, manifest["mediaType"])
+        inspection[0].update(Id=descriptor["digest"], Descriptor=descriptor)
+        self.tar(directory / release.names(self.identity)["image"], list(entries.items()))
+        with self.assertRaisesRegex(release.ReleaseError, "release_image_config_mismatch"):
+            release.image_receipt(directory, self.identity, inspection)
+
+    def test_oci_config_binding_cannot_be_replaced_by_same_revision_label(self):
+        for field, value in (("digest", "sha256:" + "0" * 64), ("size", 1)):
+            with self.subTest(field=field):
+                directory = self.root / field
+                inspection, _, _ = self.oci_image(
+                    directory,
+                    change_manifest=lambda manifest, field=field, value=value: manifest[
+                        "config"
+                    ].update({field: value}),
+                )
+                with self.assertRaises(release.ReleaseError):
+                    release.image_receipt(directory, self.identity, inspection)
 
     def test_wrong_image_revision_or_platform_fails(self):
         directory = self.root / "image"
