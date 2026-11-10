@@ -169,6 +169,11 @@
       "path": "patches/0033-core-sdk-boundary-and-cold-regressions.patch",
       "scope": "core_sdk_adapter_boundary_and_cold_environment_regressions",
       "digest": "sha256:c506d50ad4c63a229506893a196cefd4020c492d22cefd27c5629f95e2da90a2"
+    },
+    {
+      "path": "patches/0034-source-root-generation.patch",
+      "scope": "source_root_generation_identity_and_explicit_legacy_candidate_reconfirmation",
+      "digest": "sha256:d7f08e2c613f0156a58bc2239c86a5113b45da63951f05e0e627947dd37796e6"
     }
   ]
 }

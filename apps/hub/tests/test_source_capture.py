@@ -355,6 +355,42 @@ def test_source_root_replacement_and_symlink_refused(capture):
         collect(outbox, config)
 
 
+@pytest.mark.parametrize("operation", ["initialize", "collect"])
+def test_legacy_root_binding_stays_closed_without_changing_saved_capture(capture, operation):
+    outbox, config, path = capture
+    append(path, native(config))
+    assert collect(outbox, config)["queued"] == 1
+    root = path.parent.resolve()
+    details = root.stat()
+    legacy = (
+        "root:v2:"
+        + hashlib.sha256(
+            f"{root}\0{details.st_ino}:{details.st_mode}:{details.st_uid}:{details.st_gid}".encode()
+        ).hexdigest()
+    )
+    with sqlite3.connect(outbox.path) as db:
+        db.execute(
+            "UPDATE capture_sources SET root_identity=? WHERE source_id=?",
+            (legacy, config.source_id),
+        )
+    with sqlite3.connect(outbox.path) as db:
+        before = tuple(db.iterdump())
+    key_before = (outbox.path.parent / "capture-key").read_bytes()
+    append(path, native(config, "New content must wait for explicit source authorization."))
+    reopened = LocalOutbox(outbox.path, instance_id=outbox.instance_id, device_id=outbox.device_id)
+
+    with pytest.raises(CaptureError, match="capture_binding_mismatch"):
+        if operation == "initialize":
+            initialize_capture(reopened, config)
+        else:
+            collect(reopened, config)
+
+    with sqlite3.connect(outbox.path) as db:
+        assert tuple(db.iterdump()) == before
+    assert (outbox.path.parent / "capture-key").read_bytes() == key_before
+    assert reopened.status()["queued"] == 1
+
+
 def test_source_lock_and_old_sender_remain_compatible(capture):
     outbox, config, path = capture
     with capture_lock(outbox), pytest.raises(CaptureError, match="capture_already_running"):
