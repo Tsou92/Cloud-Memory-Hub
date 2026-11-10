@@ -154,6 +154,11 @@
       "path": "patches/0030-hub-console-governance.patch",
       "scope": "administrator_ordinary_memory_forget_preview_confirmation_and_idempotent_recovery",
       "digest": "sha256:f8d3f86358d3dd825290059f2be8a176c8145ea44156b74fc2c2dac4a6efde7b"
+    },
+    {
+      "path": "patches/0031-hub-self-service-pairing.patch",
+      "scope": "self_service_project_device_pairing_with_explicit_unknown_result_recovery",
+      "digest": "sha256:e478108b9d1bb9837d5dfb1b270338b71a350de5765bae2ea06b5cdc6c480f93"
     }
   ]
 }

@@ -22,7 +22,8 @@ RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
     src/MemorySpace.sdk-start.test.tsx src/MemorySpace.test.tsx \
     src/MemorySpace.library.test.tsx src/SdkMemoryLibrary.test.tsx src/SdkRawHistory.test.tsx \
     src/ModelSettings.test.tsx src/OnboardingModelStep.test.tsx src/R6Settings.test.tsx \
-    src/HubConsole.test.tsx src/HubQuestion.test.tsx src/hub-api.test.ts src/HubGovernance.test.tsx
+    src/HubConsole.test.tsx src/HubQuestion.test.tsx src/hub-api.test.ts src/HubGovernance.test.tsx \
+    src/HubConnections.test.tsx
 
 FROM source AS python-build
 RUN python -m pip install --no-cache-dir uv==0.12.5
@@ -48,6 +49,7 @@ COPY --from=web /workspace/apps/web/dist /opt/cmh/web
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/LICENSE /opt/cmh/licenses/MemHub-LICENSE
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/NOTICE /opt/cmh/licenses/MemHub-NOTICE
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/THIRD_PARTY_NOTICES.md /opt/cmh/licenses/THIRD_PARTY_NOTICES.md
+COPY LICENSE NOTICE /opt/cmh/licenses/
 COPY upstream/manifest.json /opt/cmh/upstream-manifest.json
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     CMH_DATA_DIR=/data CMH_CONFIG_DIR=/config CMH_GOVERNANCE_DIR=/governance \

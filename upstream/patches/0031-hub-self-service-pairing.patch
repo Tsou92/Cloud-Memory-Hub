@@ -1,0 +1,2446 @@
+diff --git a/memhub/apps/web/src/HubConnections.test.tsx b/memhub/apps/web/src/HubConnections.test.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..70f77ec762f731c098c696f08f4e501e2deb7b0f
+--- /dev/null
++++ b/memhub/apps/web/src/HubConnections.test.tsx
+@@ -0,0 +1,676 @@
++// @vitest-environment jsdom
++import {
++  act,
++  cleanup,
++  render,
++  screen,
++  waitFor,
++  within,
++} from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { HubConnections } from "./HubConnections";
++import {
++  agentAdapter,
++  type PairDevice,
++  type PairSource,
++  progressKey,
++  requiredPermissions,
++} from "./hub-pairing";
++
++const instance = "11111111-1111-4111-8111-111111111111";
++const scopeA = "33333333-3333-4333-8333-333333333333";
++const scopeB = "44444444-4444-4444-8444-444444444444";
++const deviceId = "22222222-2222-4222-8222-222222222222";
++const sourceId = "55555555-5555-4555-8555-555555555555";
++const project = { scope_id: scopeA, display_name: "合成项目 A" };
++const props = {
++  instance,
++  project,
++  onCreated: vi.fn(),
++  onRefreshProjects: vi.fn(),
++};
++const credentialFor = (letter = "a") =>
++  `cmhdev_v1_${deviceId}_${letter.repeat(43)}`;
++const device = (grants: PairDevice["grants"] = []): PairDevice => ({
++  device_id: deviceId,
++  display_name: "合成 Mac",
++  revision: 1,
++  status: "active",
++  created_at: "2026-11-10T00:00:00Z",
++  grants,
++});
++const source = (): PairSource => ({
++  source_id: sourceId,
++  scope_id: scopeA,
++  device_id: deviceId,
++  display_name: "合成 Agent",
++  adapter_id: agentAdapter,
++  revision: 1,
++  status: "active",
++});
++let devices: PairDevice[];
++let sources: PairSource[];
++let currentCredential: string;
++let fetcher: ReturnType<typeof vi.fn>;
++let downloaded: Blob | null;
++let click: ReturnType<typeof vi.spyOn>;
++let dropDevice: boolean;
++let dropSource: boolean;
++let conflictGrant: boolean;
++let wrongInstance: boolean;
++function response(value: unknown, status = 200) {
++  return Response.json(value, { status });
++}
++async function handler(url: string, init: RequestInit = {}): Promise<Response> {
++  const method = init.method ?? "GET",
++    body = init.body ? JSON.parse(String(init.body)) : null;
++  if (url.endsWith("/devices") && method === "GET")
++    return response({ devices });
++  if (url.endsWith("/sources") && method === "GET")
++    return response({ sources });
++  if (url.endsWith("/projects"))
++    return response(
++      {
++        project_id: scopeB,
++        display_name: body.display_name,
++        created_at: "2026-11-10T00:00:00Z",
++      },
++      201,
++    );
++  if (url.endsWith("/devices") && method === "POST") {
++    devices.push({ ...device(), display_name: body.display_name });
++    if (dropDevice) throw new TypeError("synthetic_lost_device_response");
++    return response({ device: devices[0], credential: currentCredential }, 201);
++  }
++  const current = devices.find((row) => row.device_id === deviceId);
++  if (url.endsWith("/grants") && current) {
++    if (conflictGrant) {
++      conflictGrant = false;
++      current.revision++;
++      current.grants = [{ scope_id: scopeB, permissions: ["memory:read"] }];
++      return response({ detail: "revision_conflict" }, 409);
++    }
++    if (body.expected_revision !== current.revision)
++      return response({ detail: "revision_conflict" }, 409);
++    current.grants = body.grants;
++    current.revision++;
++    return response(current);
++  }
++  if (url.endsWith("/rotate") && current) {
++    if (body.expected_revision !== current.revision)
++      return response({ detail: "revision_conflict" }, 409);
++    current.revision++;
++    currentCredential = credentialFor("b");
++    return response({ device: current, credential: currentCredential });
++  }
++  if (url.endsWith("/sources") && method === "POST") {
++    if (dropSource) throw new TypeError("synthetic_source_write_unknown");
++    const added = { ...source(), ...body };
++    sources.push(added);
++    return response(added, 201);
++  }
++  if (url.endsWith("/access") && current) {
++    expect((init.headers as Record<string, string>).Authorization).toBe(
++      `Bearer ${currentCredential}`,
++    );
++    return response({
++      protocol_version: 1,
++      instance_id: wrongInstance ? scopeB : instance,
++      device_id: deviceId,
++      device_revision: current.revision,
++      source_id: sourceId,
++      source_revision: sources[0].revision,
++      scope_id: scopeA,
++      allowed: true,
++    });
++  }
++  if (url.endsWith(`/devices/${deviceId}/revoke`) && current) {
++    current.revision++;
++    current.status = "revoked";
++    current.grants = [];
++    return response(current);
++  }
++  if (url.endsWith(`/sources/${sourceId}/revoke`)) {
++    sources[0].revision++;
++    sources[0].status = "revoked";
++    return response(sources[0]);
++  }
++  throw new Error("unexpected_test_route");
++}
++beforeEach(() => {
++  devices = [];
++  sources = [];
++  currentCredential = credentialFor();
++  downloaded = null;
++  dropDevice = false;
++  dropSource = false;
++  conflictGrant = false;
++  wrongInstance = false;
++  sessionStorage.clear();
++  localStorage.clear();
++  props.onCreated.mockClear();
++  props.onRefreshProjects.mockClear();
++  fetcher = vi.fn(handler);
++  vi.stubGlobal("fetch", fetcher);
++  const RealURL = URL;
++  vi.stubGlobal(
++    "URL",
++    class extends RealURL {
++      static createObjectURL(blob: Blob) {
++        downloaded = blob;
++        return "blob:synthetic-pairing";
++      }
++      static revokeObjectURL() {}
++    },
++  );
++  click = vi
++    .spyOn(HTMLAnchorElement.prototype, "click")
++    .mockImplementation(() => {});
++});
++afterEach(() => {
++  cleanup();
++  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
++});
++async function start() {
++  await waitFor(() =>
++    expect(
++      fetcher.mock.calls.filter(([url]) => String(url).endsWith("/devices"))
++        .length,
++    ).toBeGreaterThan(0),
++  );
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "设备名称" }),
++    "合成 Mac",
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "创建独立设备并配对" }),
++  );
++}
++async function blobText(blob: Blob): Promise<string> {
++  return new Promise((resolve, reject) => {
++    const reader = new FileReader();
++    reader.onload = () => resolve(String(reader.result));
++    reader.onerror = reject;
++    reader.readAsText(blob);
++  });
++}
++function postCount(suffix: string) {
++  return fetcher.mock.calls.filter(
++    ([url, init]) => String(url).endsWith(suffix) && init.method === "POST",
++  ).length;
++}
++
++it("creates an independent scoped identity, verifies access and downloads only the pairing contract", async () => {
++  render(<HubConnections {...props} />);
++  await start();
++  await userEvent.click(
++    await screen.findByRole("button", { name: "下载配对文件" }),
++  );
++  await waitFor(() => expect(click).toHaveBeenCalledOnce());
++  const file = JSON.parse(await blobText(downloaded as unknown as Blob));
++  expect(file).toEqual({
++    schema_version: 1,
++    kind: "cloud-memory-hub-pairing",
++    origin: window.location.origin,
++    instance_id: instance,
++    device_id: deviceId,
++    scope_id: scopeA,
++    source_id: sourceId,
++    credential: currentCredential,
++  });
++  expect(devices[0].grants).toEqual([
++    { scope_id: scopeA, permissions: requiredPermissions },
++  ]);
++  expect(sources[0].adapter_id).toBe(agentAdapter);
++  expect(JSON.stringify(sessionStorage)).not.toContain(currentCredential);
++  expect(JSON.stringify(localStorage)).not.toContain(currentCredential);
++  expect(document.body.textContent).not.toContain(currentCredential);
++  expect(postCount("/devices")).toBe(1);
++  expect(postCount("/sources")).toBe(1);
++  expect(
++    fetcher.mock.calls.filter(([url]) => String(url).endsWith("/access")),
++  ).toHaveLength(2);
++  await userEvent.click(
++    screen.getByRole("button", { name: "我已保存文件，清除此页凭据" }),
++  );
++  expect(screen.queryByRole("button", { name: "下载配对文件" })).toBeNull();
++  expect(sessionStorage.getItem(progressKey(instance, scopeA))).toBeNull();
++});
++
++it("does not repeat unknown device creation and requires an explicit existing device and rotation", async () => {
++  dropDevice = true;
++  render(<HubConnections {...props} />);
++  await start();
++  await screen.findByText(/设备创建响应未确认/);
++  expect(
++    screen.queryByRole("button", { name: "创建独立设备并配对" }),
++  ).toBeNull();
++  await userEvent.click(
++    screen.getByRole("button", { name: "刷新设备与来源并核对" }),
++  );
++  await waitFor(() =>
++    expect(screen.getByRole("option", { name: /合成 Mac/ })).toBeTruthy(),
++  );
++  await userEvent.selectOptions(
++    screen.getByRole("combobox", { name: "已有设备" }),
++    deviceId,
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "使用所选设备继续配对" }),
++  );
++  expect(postCount("/rotate")).toBe(0);
++  expect(
++    (
++      screen.getByRole("button", {
++        name: "重新签发并继续配对",
++      }) as HTMLButtonElement
++    ).disabled,
++  ).toBe(true);
++  await userEvent.click(
++    screen.getByRole("checkbox", { name: /我确认重新签发/ }),
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "重新签发并继续配对" }),
++  );
++  await screen.findByRole("button", { name: "下载配对文件" });
++  expect(postCount("/devices")).toBe(1);
++  expect(postCount("/rotate")).toBe(1);
++});
++
++it("retains source-write uncertainty across reload and rotation until a source is explicitly selected", async () => {
++  dropSource = true;
++  const first = render(<HubConnections {...props} />);
++  await start();
++  await screen.findByText(/核对来源登记结果/);
++  await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
++  const retained = JSON.parse(
++    sessionStorage.getItem(progressKey(instance, scopeA)) ?? "null",
++  );
++  expect(retained.source_creation_unknown).toBe(true);
++  expect(retained.device_id).toBe(deviceId);
++  first.unmount();
++  render(<HubConnections {...props} />);
++  await screen.findByRole("checkbox", { name: /我确认重新签发/ });
++  await userEvent.click(
++    screen.getByRole("checkbox", { name: /我确认重新签发/ }),
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "重新签发并继续配对" }),
++  );
++  await screen.findByText(/选择已登记来源/);
++  expect(postCount("/sources")).toBe(1);
++  expect(screen.queryByRole("button", { name: "下载配对文件" })).toBeNull();
++  sources.push(source());
++  dropSource = false;
++  await userEvent.click(
++    screen.getByRole("button", { name: "刷新设备与来源并核对" }),
++  );
++  await waitFor(() =>
++    expect(screen.getByRole("option", { name: /合成 Agent/ })).toBeTruthy(),
++  );
++  await userEvent.selectOptions(
++    screen.getByRole("combobox", { name: "已登记来源" }),
++    sourceId,
++  );
++  await userEvent.click(screen.getByRole("button", { name: "核对后继续配对" }));
++  await screen.findByRole("button", { name: "下载配对文件" });
++  expect(postCount("/sources")).toBe(1);
++});
++
++it("requires a fresh grant review after revision conflict and preserves another project's grants", async () => {
++  conflictGrant = true;
++  render(<HubConnections {...props} />);
++  await start();
++  await screen.findByText(/设备或来源已被其他操作修改/);
++  expect(
++    (
++      screen.getByRole("button", {
++        name: "核对后继续配对",
++      }) as HTMLButtonElement
++    ).disabled,
++  ).toBe(true);
++  await userEvent.click(
++    screen.getByRole("button", { name: "刷新设备与来源并核对" }),
++  );
++  await waitFor(() =>
++    expect(
++      (
++        screen.getByRole("button", {
++          name: "核对后继续配对",
++        }) as HTMLButtonElement
++      ).disabled,
++    ).toBe(false),
++  );
++  await userEvent.click(screen.getByRole("button", { name: "核对后继续配对" }));
++  await screen.findByRole("button", { name: "下载配对文件" });
++  expect(devices[0].grants).toContainEqual({
++    scope_id: scopeB,
++    permissions: ["memory:read"],
++  });
++  expect(devices[0].grants).toContainEqual({
++    scope_id: scopeA,
++    permissions: requiredPermissions,
++  });
++  const writes = fetcher.mock.calls.filter(([url]) =>
++    String(url).endsWith("/grants"),
++  );
++  expect(writes).toHaveLength(2);
++  expect(JSON.parse(String(writes[1][1].body)).expected_revision).toBe(2);
++});
++
++it("never offers a download when the actual source-access reply names another instance", async () => {
++  wrongInstance = true;
++  render(<HubConnections {...props} />);
++  await start();
++  await screen.findByRole("alert");
++  expect(screen.queryByRole("button", { name: "下载配对文件" })).toBeNull();
++  expect(downloaded).toBeNull();
++  expect(JSON.stringify(sessionStorage)).not.toContain(currentCredential);
++});
++
++it("makes the all-project device revocation explicit and waits for confirmation", async () => {
++  devices.push(
++    device([
++      { scope_id: scopeA, permissions: requiredPermissions },
++      { scope_id: scopeB, permissions: ["memory:read"] },
++    ]),
++  );
++  sources.push(source());
++  render(<HubConnections {...props} />);
++  await userEvent.click(
++    await screen.findByRole("button", { name: "撤销此设备" }),
++  );
++  const dialog = screen.getByRole("dialog");
++  expect(within(dialog).getByText(/不仅是当前项目/)).toBeTruthy();
++  expect(postCount("/revoke")).toBe(0);
++  await userEvent.click(within(dialog).getByRole("button", { name: "取消" }));
++  expect(postCount("/revoke")).toBe(0);
++  await userEvent.click(screen.getByRole("button", { name: "撤销此设备" }));
++  await userEvent.click(
++    within(screen.getByRole("dialog")).getByRole("button", {
++      name: "撤回授权",
++    }),
++  );
++  expect(await screen.findByText(/已撤销此设备在全部项目的访问/)).toBeTruthy();
++  expect(devices[0].status).toBe("revoked");
++});
++
++it("can stop one source without revoking its device or unrelated project grants", async () => {
++  devices.push(
++    device([
++      { scope_id: scopeA, permissions: requiredPermissions },
++      { scope_id: scopeB, permissions: ["memory:read"] },
++    ]),
++  );
++  sources.push(source());
++  render(<HubConnections {...props} />);
++  await userEvent.click(
++    await screen.findByRole("button", { name: "停止此来源" }),
++  );
++  expect(
++    within(screen.getByRole("dialog")).getByText(/同设备其他来源的授权不变/),
++  ).toBeTruthy();
++  await userEvent.click(
++    within(screen.getByRole("dialog")).getByRole("button", {
++      name: "撤回授权",
++    }),
++  );
++  await screen.findByText(/已停止此来源的上传与后续处理/);
++  expect(sources[0].status).toBe("revoked");
++  expect(devices[0].status).toBe("active");
++  expect(devices[0].grants).toHaveLength(2);
++});
++
++it("cancels an abandoned project flow and retains only identifiers for later review", async () => {
++  let finish: ((value: Response) => void) | undefined;
++  let signal: AbortSignal | null | undefined;
++  fetcher.mockImplementation((url: string, init: RequestInit) => {
++    if (url.endsWith("/devices") && init.method === "POST") {
++      devices.push(device());
++      signal = init.signal;
++      return new Promise<Response>((resolve) => {
++        finish = resolve;
++      });
++    }
++    return handler(url, init);
++  });
++  const view = render(<HubConnections key="a" {...props} />);
++  await start();
++  await waitFor(() => expect(finish).toBeTruthy());
++  view.rerender(
++    <HubConnections
++      key="b"
++      {...props}
++      project={{ scope_id: scopeB, display_name: "合成项目 B" }}
++    />,
++  );
++  expect(signal?.aborted).toBe(true);
++  await act(async () =>
++    finish?.(
++      response({ device: devices[0], credential: currentCredential }, 201),
++    ),
++  );
++  expect(
++    fetcher.mock.calls.some(([url]) => String(url).endsWith("/grants")),
++  ).toBe(false);
++  expect(
++    JSON.parse(sessionStorage.getItem(progressKey(instance, scopeA)) ?? "null")
++      .phase,
++  ).toBe("create_unknown");
++  expect(sessionStorage.getItem(progressKey(instance, scopeB))).toBeNull();
++});
++
++it("creates a project with normalized display text and exposes the returned project identity", async () => {
++  render(<HubConnections {...props} project={null} />);
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "项目名称" }),
++    " 新项目（工作） ",
++  );
++  await userEvent.click(screen.getByRole("button", { name: "创建项目" }));
++  await waitFor(() =>
++    expect(props.onCreated).toHaveBeenCalledWith({
++      scope_id: scopeB,
++      display_name: "新项目(工作)",
++    }),
++  );
++  expect(sessionStorage.getItem(`cmh-project-create:${instance}`)).toBeNull();
++});
++
++it("keeps an unknown project creation blocked until the user chooses an existing project", async () => {
++  fetcher.mockImplementation((url: string, init: RequestInit) =>
++    url.endsWith("/projects")
++      ? Promise.reject(new TypeError("lost"))
++      : handler(url, init),
++  );
++  const view = render(<HubConnections {...props} project={null} />);
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "项目名称" }),
++    "合成项目",
++  );
++  await userEvent.click(screen.getByRole("button", { name: "创建项目" }));
++  await screen.findByRole("alert");
++  expect(screen.queryByRole("button", { name: "创建项目" })).toBeNull();
++  await userEvent.click(
++    screen.getByRole("button", { name: "刷新项目列表并核对" }),
++  );
++  expect(props.onRefreshProjects).toHaveBeenCalledOnce();
++  view.rerender(<HubConnections {...props} />);
++  await userEvent.click(
++    screen.getByRole("button", { name: "使用当前项目并结束核对" }),
++  );
++  expect(screen.getByRole("button", { name: "创建项目" })).toBeTruthy();
++  expect(postCount("/projects")).toBe(1);
++});
++
++it.each([403, 422])(
++  "allows retry after a confirmed project rejection (%s) without trapping a first install",
++  async (status) => {
++    let reject = true;
++    fetcher.mockImplementation((url: string, init: RequestInit) =>
++      url.endsWith("/projects") && reject
++        ? Promise.resolve(
++            response(
++              {
++                detail:
++                  status === 403 ? "administrator_required" : "invalid_request",
++              },
++              status,
++            ),
++          )
++        : handler(url, init),
++    );
++    render(<HubConnections {...props} project={null} />);
++    await userEvent.type(
++      screen.getByRole("textbox", { name: "项目名称" }),
++      "合成项目",
++    );
++    await userEvent.click(screen.getByRole("button", { name: "创建项目" }));
++    await screen.findByRole("alert");
++    expect(sessionStorage.getItem(`cmh-project-create:${instance}`)).toBeNull();
++    reject = false;
++    await userEvent.click(screen.getByRole("button", { name: "创建项目" }));
++    await waitFor(() => expect(props.onCreated).toHaveBeenCalledOnce());
++  },
++);
++
++it.each(["/devices", "/sources"])(
++  "retries only the rejected creation stage (%s), retaining confirmed device identity",
++  async (path) => {
++    let reject = true;
++    fetcher.mockImplementation((url: string, init: RequestInit) =>
++      url.endsWith(path) && init.method === "POST" && reject
++        ? Promise.resolve(response({ detail: "invalid_request" }, 422))
++        : handler(url, init),
++    );
++    render(<HubConnections {...props} />);
++    await start();
++    await screen.findByText(/填写的名称或配对信息不符合要求/);
++    reject = false;
++    await userEvent.click(
++      screen.getByRole("button", {
++        name: path === "/devices" ? "创建独立设备并配对" : "核对后继续配对",
++      }),
++    );
++    await screen.findByRole("button", { name: "下载配对文件" });
++    expect(devices).toHaveLength(1);
++    expect(sources).toHaveLength(1);
++    expect(postCount(path)).toBe(2);
++    expect(postCount(path === "/devices" ? "/sources" : "/devices")).toBe(1);
++  },
++);
++
++it("allows an explicit end to unknown project creation with no matching project, without reposting", async () => {
++  fetcher.mockImplementation((url: string, init: RequestInit) =>
++    url.endsWith("/projects")
++      ? Promise.reject(new TypeError("lost"))
++      : handler(url, init),
++  );
++  render(<HubConnections {...props} project={null} />);
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "项目名称" }),
++    "合成项目",
++  );
++  await userEvent.click(screen.getByRole("button", { name: "创建项目" }));
++  await screen.findByRole("alert");
++  await userEvent.click(
++    screen.getByRole("button", { name: "刷新项目列表并核对" }),
++  );
++  await userEvent.click(
++    screen.getByRole("checkbox", { name: /我已刷新并核对项目列表/ }),
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "结束本次项目创建核对" }),
++  );
++  expect(screen.getByRole("button", { name: "创建项目" })).toBeTruthy();
++  expect(postCount("/projects")).toBe(1);
++});
++
++it.each(["/devices", "/sources"])(
++  "retains an unknown %s write until manual review ends it, without an automatic repost",
++  async (path) => {
++    let drop = true;
++    fetcher.mockImplementation((url: string, init: RequestInit) =>
++      url.endsWith(path) && init.method === "POST" && drop
++        ? Promise.reject(new TypeError("lost"))
++        : handler(url, init),
++    );
++    render(<HubConnections {...props} />);
++    await start();
++    await screen.findByRole("alert");
++    await userEvent.click(
++      screen.getByRole("button", { name: "刷新设备与来源并核对" }),
++    );
++    const confirm = screen.getByRole("checkbox", {
++      name: /我已刷新并核对列表/,
++    });
++    await waitFor(() =>
++      expect((confirm as HTMLInputElement).disabled).toBe(false),
++    );
++    await userEvent.click(confirm);
++    await userEvent.click(
++      screen.getByRole("button", { name: "结束本次未知尝试" }),
++    );
++    expect(postCount(path)).toBe(1);
++    if (path === "/sources") {
++      const retained = JSON.parse(
++        sessionStorage.getItem(progressKey(instance, scopeA)) ?? "null",
++      );
++      expect(retained.device_id).toBe(deviceId);
++      expect(retained.source_creation_unknown).toBe(false);
++    }
++    drop = false;
++    await userEvent.click(
++      screen.getByRole("button", {
++        name: path === "/devices" ? "创建独立设备并配对" : "核对后继续配对",
++      }),
++    );
++    await screen.findByRole("button", { name: "下载配对文件" });
++    expect(postCount(path)).toBe(2);
++  },
++);
++
++it("does not overwrite an unfinished known device with another and preserves its known source on reselection", async () => {
++  const other = "66666666-6666-4666-8666-666666666666";
++  devices.push(
++    device([{ scope_id: scopeA, permissions: requiredPermissions }]),
++    { ...device(), device_id: other, display_name: "另一设备" },
++  );
++  sources.push(source());
++  sessionStorage.setItem(
++    progressKey(instance, scopeA),
++    JSON.stringify({
++      version: 1,
++      instance,
++      scope: scopeA,
++      phase: "verify",
++      device_id: deviceId,
++      source_id: sourceId,
++      source_creation_unknown: false,
++    }),
++  );
++  render(<HubConnections {...props} />);
++  await screen.findByRole("option", { name: /另一设备/ });
++  await userEvent.selectOptions(
++    screen.getByRole("combobox", { name: "已有设备" }),
++    other,
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "使用所选设备继续配对" }),
++  );
++  await screen.findByText(/不能用其他设备覆盖未完成的操作/);
++  await userEvent.selectOptions(
++    screen.getByRole("combobox", { name: "已有设备" }),
++    deviceId,
++  );
++  await userEvent.click(
++    screen.getByRole("button", { name: "使用所选设备继续配对" }),
++  );
++  const retained = JSON.parse(
++    sessionStorage.getItem(progressKey(instance, scopeA)) ?? "null",
++  );
++  expect(retained.device_id).toBe(deviceId);
++  expect(retained.source_id).toBe(sourceId);
++  expect(postCount("/sources")).toBe(0);
++});
+diff --git a/memhub/apps/web/src/HubConnections.tsx b/memhub/apps/web/src/HubConnections.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7a672baf83ebb377da8b27b7353d0e59970c4df
+--- /dev/null
++++ b/memhub/apps/web/src/HubConnections.tsx
+@@ -0,0 +1,964 @@
++import { useCallback, useEffect, useRef, useState } from "react";
++import type { HubProject } from "./hub-api";
++import {
++  agentAdapter,
++  checkPairing,
++  createDevice,
++  createProject,
++  createSource,
++  downloadPairing,
++  getDevices,
++  getSources,
++  grantProject,
++  hasPermissions,
++  type IssuedDevice,
++  type PairDevice,
++  type PairingFile,
++  type PairProgress,
++  type PairSource,
++  pairingMessage,
++  pairingOrigin,
++  progressKey,
++  readProgress,
++  rejectedBeforeWrite,
++  revokeDevice,
++  revokeSource,
++  rotateDevice,
++  saveProgress,
++  validLabel,
++} from "./hub-pairing";
++import { R6Button } from "./R6Controls";
++import { SourceDisconnectDialog } from "./SourceDisconnectDialog";
++
++export function HubConnections({
++  instance,
++  project,
++  onCreated,
++  onRefreshProjects,
++}: {
++  instance: string;
++  project: HubProject | null;
++  onCreated(project: HubProject): void;
++  onRefreshProjects(): void;
++}) {
++  return (
++    <>
++      <h1>项目与设备接入</h1>
++      <HubCreateProject
++        instance={instance}
++        project={project}
++        onCreated={onCreated}
++        onRefresh={onRefreshProjects}
++      />
++      {project ? (
++        <HubDevicePairing
++          key={`${instance}:${project.scope_id}`}
++          instance={instance}
++          project={project}
++        />
++      ) : (
++        <p>先创建或选择一个项目，再为每台设备分别生成配对文件。</p>
++      )}
++    </>
++  );
++}
++function HubCreateProject({
++  instance,
++  project,
++  onCreated,
++  onRefresh,
++}: {
++  instance: string;
++  project: HubProject | null;
++  onCreated(project: HubProject): void;
++  onRefresh(): void;
++}) {
++  const [name, setName] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState("");
++  const [unknown, setUnknown] = useState(false);
++  const [endConfirmed, setEndConfirmed] = useState(false);
++  const [storageError, setStorageError] = useState(false);
++  const controller = useRef<AbortController | null>(null);
++  const key = `cmh-project-create:${instance}`;
++  useEffect(() => {
++    try {
++      setUnknown(sessionStorage.getItem(key) !== null);
++    } catch {
++      setStorageError(true);
++    }
++    return () => controller.current?.abort();
++  }, [key]);
++  async function create() {
++    if (busy || unknown || storageError) return;
++    let label: string;
++    try {
++      label = validLabel(name);
++    } catch (reason) {
++      setError(pairingMessage(reason));
++      return;
++    }
++    try {
++      sessionStorage.setItem(key, "unconfirmed");
++    } catch {
++      setStorageError(true);
++      return;
++    }
++    const current = new AbortController();
++    controller.current = current;
++    setBusy(true);
++    setError("");
++    setUnknown(true);
++    try {
++      const result = await createProject(label, current.signal);
++      if (current.signal.aborted) return;
++      sessionStorage.removeItem(key);
++      setUnknown(false);
++      setName("");
++      onCreated(result);
++    } catch (reason) {
++      if (!current.signal.aborted) {
++        if (rejectedBeforeWrite(reason)) {
++          sessionStorage.removeItem(key);
++          setUnknown(false);
++        }
++        setError(pairingMessage(reason));
++      }
++    } finally {
++      if (!current.signal.aborted) setBusy(false);
++    }
++  }
++  function acceptExisting() {
++    if (!project || project.scope_id === "global") return;
++    try {
++      sessionStorage.removeItem(key);
++      setUnknown(false);
++      setEndConfirmed(false);
++      setError("");
++    } catch {
++      setStorageError(true);
++    }
++  }
++  return (
++    <section className="hub-card" aria-label="创建项目">
++      <h2>创建项目</h2>
++      <p>同一个项目的设备共享记忆；全局偏好单独保存。</p>
++      {storageError ? (
++        <p role="alert">
++          当前浏览器不能保留操作阶段，暂不发起创建。请恢复站点会话存储后重试。
++        </p>
++      ) : unknown ? (
++        <>
++          <p role="status">
++            项目创建结果尚未核对。请刷新列表，明确选择要继续使用的项目，不会自动重复创建。
++          </p>
++          <R6Button disabled={busy} onClick={onRefresh}>
++            刷新项目列表并核对
++          </R6Button>
++          <R6Button
++            disabled={busy || !project || project.scope_id === "global"}
++            onClick={acceptExisting}
++          >
++            使用当前项目并结束核对
++          </R6Button>
++          <p>
++            如果刷新后没有找到目标项目，可以明确结束本次尝试。旧请求仍可能完成；再次创建前请核对，避免重复项目。
++          </p>
++          <label>
++            <input
++              type="checkbox"
++              checked={endConfirmed}
++              disabled={busy}
++              onChange={(event) => setEndConfirmed(event.target.checked)}
++            />
++            我已刷新并核对项目列表，决定结束这次未知尝试。
++          </label>
++          <R6Button
++            disabled={busy || !endConfirmed}
++            onClick={() => {
++              try {
++                sessionStorage.removeItem(key);
++                setUnknown(false);
++                setEndConfirmed(false);
++                setError("");
++              } catch {
++                setStorageError(true);
++              }
++            }}
++          >
++            结束本次项目创建核对
++          </R6Button>
++        </>
++      ) : (
++        <form
++          onSubmit={(event) => {
++            event.preventDefault();
++            void create();
++          }}
++        >
++          <label>
++            项目名称{" "}
++            <input
++              value={name}
++              maxLength={80}
++              onChange={(event) => setName(event.target.value)}
++              disabled={busy}
++            />
++          </label>
++          <R6Button type="submit" pending={busy} disabled={!name.trim()}>
++            创建项目
++          </R6Button>
++        </form>
++      )}
++      {error && <p role="alert">{error}</p>}
++    </section>
++  );
++}
++const phaseNames = {
++  create_unknown: "核对设备创建结果",
++  device: "设备已确认",
++  grants_unknown: "核对项目授权结果",
++  source_unknown: "核对来源登记结果",
++  choose_source: "选择已登记来源",
++  verify: "核对配对权限",
++  ready: "配对文件已准备",
++  rotate_unknown: "核对凭据重新签发结果",
++};
++function HubDevicePairing({
++  instance,
++  project,
++}: {
++  instance: string;
++  project: HubProject;
++}) {
++  const scope = project.scope_id;
++  const [devices, setDevices] = useState<PairDevice[]>([]);
++  const [sources, setSources] = useState<PairSource[]>([]);
++  const [loaded, setLoaded] = useState(false);
++  const [name, setName] = useState("");
++  const [progress, setProgress] = useState<PairProgress | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState("");
++  const [storageError, setStorageError] = useState(false);
++  const [notice, setNotice] = useState("");
++  const [chosenDevice, setChosenDevice] = useState("");
++  const [chosenSource, setChosenSource] = useState("");
++  const [rotateConfirmed, setRotateConfirmed] = useState(false);
++  const [endConfirmed, setEndConfirmed] = useState(false);
++  const [ready, setReady] = useState(false);
++  const [confirmation, setConfirmation] = useState<
++    | { kind: "device"; value: PairDevice }
++    | { kind: "source"; value: PairSource }
++    | null
++  >(null);
++  const credential = useRef<IssuedDevice | null>(null);
++  const pairing = useRef<PairingFile | null>(null);
++  const controller = useRef<AbortController | null>(null);
++  const listController = useRef<AbortController | null>(null);
++  const alive = useRef(true);
++  const sourceUncertain = useRef(false);
++  const updateProgress = (
++    phase: PairProgress["phase"],
++    deviceId: string | null,
++    sourceId: string | null = null,
++  ) => {
++    const next: PairProgress = {
++      version: 1,
++      instance,
++      scope,
++      phase,
++      device_id: deviceId,
++      source_id: sourceId,
++      source_creation_unknown: sourceUncertain.current,
++    };
++    try {
++      saveProgress(next);
++    } catch {
++      setStorageError(true);
++      throw new Error("pairing_progress_unavailable");
++    }
++    setProgress(next);
++    return next;
++  };
++  const refresh = useCallback(async () => {
++    listController.current?.abort();
++    const current = new AbortController();
++    listController.current = current;
++    setLoading(true);
++    setError("");
++    try {
++      const [nextDevices, nextSources] = await Promise.all([
++        getDevices(current.signal),
++        getSources(current.signal),
++      ]);
++      if (current.signal.aborted || !alive.current) return;
++      setDevices(nextDevices);
++      setSources(nextSources);
++      setLoaded(true);
++      const saved = readProgress(instance, scope);
++      if (
++        saved?.phase === "grants_unknown" &&
++        nextDevices.some(
++          (row) => row.device_id === saved.device_id && row.status === "active",
++        )
++      ) {
++        const next = { ...saved, phase: "device" as const };
++        saveProgress(next);
++        setProgress(next);
++      }
++      const issued = credential.current;
++      if (issued) {
++        const latest = nextDevices.find(
++          (row) => row.device_id === issued.device.device_id,
++        );
++        if (latest?.status === "active")
++          credential.current = { ...issued, device: latest };
++        else {
++          credential.current = null;
++          pairing.current = null;
++          setReady(false);
++        }
++      }
++    } catch (reason) {
++      if (!current.signal.aborted && alive.current)
++        setError(pairingMessage(reason));
++    } finally {
++      if (!current.signal.aborted && alive.current) setLoading(false);
++    }
++  }, [instance, scope]);
++  useEffect(() => {
++    alive.current = true;
++    try {
++      const saved = readProgress(instance, scope);
++      setProgress(saved);
++      sourceUncertain.current = saved?.source_creation_unknown ?? false;
++    } catch {
++      setStorageError(true);
++    }
++    void refresh();
++    return () => {
++      alive.current = false;
++      controller.current?.abort();
++      listController.current?.abort();
++      credential.current = null;
++      pairing.current = null;
++    };
++  }, [instance, scope, refresh]);
++  const run = async (task: (signal: AbortSignal) => Promise<void>) => {
++    if (busy || storageError) return;
++    const current = new AbortController();
++    controller.current = current;
++    setBusy(true);
++    setEndConfirmed(false);
++    setError("");
++    setNotice("");
++    try {
++      await task(current.signal);
++    } catch (reason) {
++      if (!current.signal.aborted && alive.current)
++        setError(pairingMessage(reason));
++    } finally {
++      if (!current.signal.aborted && alive.current) setBusy(false);
++    }
++  };
++  const currentDevice =
++    devices.find((row) => row.device_id === progress?.device_id) ??
++    credential.current?.device;
++  const candidates = sources.filter(
++    (row) =>
++      row.scope_id === scope &&
++      row.device_id === progress?.device_id &&
++      row.adapter_id === agentAdapter &&
++      row.status === "active",
++  );
++  async function finish(
++    current: IssuedDevice,
++    selected: PairSource,
++    signal: AbortSignal,
++  ) {
++    sourceUncertain.current = false;
++    updateProgress("verify", current.device.device_id, selected.source_id);
++    const file = await checkPairing(instance, scope, current, selected, signal);
++    if (signal.aborted || !alive.current) return;
++    pairing.current = file;
++    updateProgress("ready", current.device.device_id, selected.source_id);
++    setReady(true);
++    setNotice("配对权限已核对。请下载配对文件，并在对应设备上导入。");
++  }
++  async function advance(
++    current: IssuedDevice,
++    signal: AbortSignal,
++    recoverSource = false,
++    selectedId?: string | null,
++  ) {
++    pairingOrigin();
++    let next = current;
++    if (!hasPermissions(current.device, scope)) {
++      updateProgress(
++        "grants_unknown",
++        current.device.device_id,
++        selectedId ?? null,
++      );
++      const authorized = await grantProject(current.device, scope, signal);
++      if (signal.aborted || !alive.current) return;
++      next = { ...current, device: authorized };
++      credential.current = next;
++    }
++    updateProgress(
++      recoverSource ? "source_unknown" : "device",
++      next.device.device_id,
++      selectedId ?? null,
++    );
++    const available = await getSources(signal);
++    if (signal.aborted || !alive.current) return;
++    setSources(available);
++    setDevices((rows) => [
++      ...rows.filter((row) => row.device_id !== next.device.device_id),
++      next.device,
++    ]);
++    const matching = available.filter(
++      (row) =>
++        row.device_id === next.device.device_id &&
++        row.scope_id === scope &&
++        row.adapter_id === agentAdapter &&
++        row.status === "active",
++    );
++    let selected = selectedId
++      ? matching.find((row) => row.source_id === selectedId)
++      : undefined;
++    if (selectedId && !selected) {
++      setError("之前的来源已不可用，请刷新并明确选择有效来源。");
++      updateProgress("choose_source", next.device.device_id, selectedId);
++      return;
++    }
++    if (!selected && (recoverSource || matching.length > 1)) {
++      updateProgress("choose_source", next.device.device_id);
++      return;
++    }
++    if (!selected && matching.length === 1) selected = matching[0];
++    if (!selected) {
++      sourceUncertain.current = true;
++      updateProgress("source_unknown", next.device.device_id);
++      try {
++        selected = await createSource(next.device, scope, signal);
++      } catch (reason) {
++        if (!signal.aborted && rejectedBeforeWrite(reason)) {
++          sourceUncertain.current = false;
++          updateProgress("device", next.device.device_id);
++        }
++        throw reason;
++      }
++      if (signal.aborted || !alive.current) return;
++      setSources((rows) => [...rows, selected as PairSource]);
++    }
++    await finish(next, selected, signal);
++  }
++  async function create() {
++    if (progress) return;
++    let label: string;
++    try {
++      label = validLabel(name);
++      pairingOrigin();
++    } catch (reason) {
++      setError(pairingMessage(reason));
++      return;
++    }
++    await run(async (signal) => {
++      updateProgress("create_unknown", null);
++      let issued: IssuedDevice;
++      try {
++        issued = await createDevice(label, signal);
++      } catch (reason) {
++        if (!signal.aborted && rejectedBeforeWrite(reason)) {
++          sessionStorage.removeItem(progressKey(instance, scope));
++          setProgress(null);
++        }
++        throw reason;
++      }
++      if (signal.aborted || !alive.current) return;
++      sourceUncertain.current = false;
++      credential.current = issued;
++      setDevices((rows) => [...rows, issued.device]);
++      updateProgress("device", issued.device.device_id);
++      await advance(issued, signal);
++    });
++  }
++  function chooseExisting() {
++    const device = devices.find(
++      (row) => row.device_id === chosenDevice && row.status === "active",
++    );
++    if (!device || busy) return;
++    if (
++      progress?.device_id &&
++      device.device_id !== progress.device_id &&
++      currentDevice?.status !== "revoked"
++    ) {
++      setError("请先完成当前设备的核对，不能用其他设备覆盖未完成的操作。");
++      return;
++    }
++    if (device.device_id !== progress?.device_id)
++      sourceUncertain.current = false;
++    credential.current = null;
++    pairing.current = null;
++    setReady(false);
++    setRotateConfirmed(false);
++    setChosenSource("");
++    try {
++      updateProgress(
++        "device",
++        device.device_id,
++        device.device_id === progress?.device_id ? progress.source_id : null,
++      );
++      setError("");
++    } catch {
++      /* Retain current server state. */
++    }
++  }
++  async function rotate() {
++    if (!currentDevice || !rotateConfirmed) return;
++    const previous = progress;
++    await run(async (signal) => {
++      pairingOrigin();
++      credential.current = null;
++      pairing.current = null;
++      setReady(false);
++      setRotateConfirmed(false);
++      updateProgress(
++        "rotate_unknown",
++        currentDevice.device_id,
++        previous?.source_id ?? null,
++      );
++      const issued = await rotateDevice(currentDevice, signal);
++      if (signal.aborted || !alive.current) return;
++      credential.current = issued;
++      setDevices((rows) =>
++        rows.map((row) =>
++          row.device_id === issued.device.device_id ? issued.device : row,
++        ),
++      );
++      const sourceUnknown =
++        sourceUncertain.current ||
++        previous?.phase === "source_unknown" ||
++        previous?.phase === "choose_source";
++      updateProgress(
++        sourceUnknown ? "source_unknown" : "device",
++        issued.device.device_id,
++        previous?.source_id ?? null,
++      );
++      await advance(issued, signal, sourceUnknown, previous?.source_id);
++    });
++  }
++  function continuePairing() {
++    const issued = credential.current;
++    if (!issued || !progress) return;
++    const recoverSource =
++      sourceUncertain.current ||
++      ["source_unknown", "choose_source"].includes(progress.phase);
++    const selected = recoverSource ? chosenSource : progress.source_id;
++    if (recoverSource && !selected) return;
++    void run((signal) => advance(issued, signal, recoverSource, selected));
++  }
++  function clearCompleted() {
++    if (progress?.phase !== "ready") return;
++    try {
++      sessionStorage.removeItem(progressKey(instance, scope));
++    } catch {
++      setStorageError(true);
++      return;
++    }
++    credential.current = null;
++    pairing.current = null;
++    setReady(false);
++    setProgress(null);
++    setNotice("此页配对凭据已清除。设备授权仍保留。");
++    setName("");
++  }
++  function endUnknownAttempt() {
++    if (!endConfirmed || !progress || busy) return;
++    try {
++      if (progress.phase === "create_unknown") {
++        sessionStorage.removeItem(progressKey(instance, scope));
++        setProgress(null);
++      } else if (progress.source_creation_unknown && progress.device_id) {
++        sourceUncertain.current = false;
++        updateProgress("device", progress.device_id, progress.source_id);
++      } else return;
++      setEndConfirmed(false);
++      setError("");
++      setNotice(
++        "已结束此次未知尝试，没有发送新建请求。旧请求仍可能完成，请继续留意列表并停用重复来源或撤销重复设备。",
++      );
++    } catch {
++      setStorageError(true);
++    }
++  }
++  async function revoke() {
++    const selected = confirmation;
++    if (!selected) return;
++    setConfirmation(null);
++    await run(async (signal) => {
++      if (selected.kind === "device") {
++        const result = await revokeDevice(selected.value, signal);
++        if (signal.aborted || !alive.current) return;
++        setDevices((rows) =>
++          rows.map((row) =>
++            row.device_id === result.device_id ? result : row,
++          ),
++        );
++        if (progress?.device_id === result.device_id) {
++          credential.current = null;
++          pairing.current = null;
++          setReady(false);
++        }
++      } else {
++        const result = await revokeSource(selected.value, signal);
++        if (signal.aborted || !alive.current) return;
++        setSources((rows) =>
++          rows.map((row) =>
++            row.source_id === result.source_id ? result : row,
++          ),
++        );
++        if (progress?.source_id === result.source_id) {
++          pairing.current = null;
++          setReady(false);
++        }
++      }
++      setNotice(
++        selected.kind === "device"
++          ? "已撤销此设备在全部项目的访问，已有记忆保留。"
++          : "已停止此来源的上传与后续处理，已有记忆保留。",
++      );
++    });
++  }
++  const projectDevices = devices.filter(
++    (device) =>
++      device.grants.some((grant) => grant.scope_id === scope) ||
++      sources.some(
++        (source) =>
++          source.scope_id === scope && source.device_id === device.device_id,
++      ),
++  );
++  const sourceNeedsChoice =
++    progress &&
++    (progress.source_creation_unknown ||
++      ["source_unknown", "choose_source"].includes(progress.phase));
++  return (
++    <>
++      <section className="hub-card hub-pairing" aria-label="设备配对">
++        <h2>为「{project.display_name}」接入设备</h2>
++        <p>
++          每台设备使用独立身份。新设备会获得本项目的记忆读取、历史读取和上传权限。
++        </p>
++        {storageError && (
++          <p role="alert">
++            无法读取或保留配对阶段，暂不继续写入。请恢复当前站点的会话存储后核对设备列表。
++          </p>
++        )}
++        {!progress ? (
++          <form
++            onSubmit={(event) => {
++              event.preventDefault();
++              void create();
++            }}
++          >
++            <label>
++              设备名称{" "}
++              <input
++                value={name}
++                maxLength={80}
++                onChange={(event) => setName(event.target.value)}
++                disabled={busy || storageError}
++              />
++            </label>
++            <R6Button
++              type="submit"
++              pending={busy}
++              disabled={!name.trim() || storageError || !loaded}
++            >
++              创建独立设备并配对
++            </R6Button>
++          </form>
++        ) : (
++          <>
++            <p role="status">当前阶段：{phaseNames[progress.phase]}</p>
++            {progress.device_id && (
++              <p>
++                设备编号：<code>{progress.device_id}</code>
++              </p>
++            )}
++            {progress.source_id && (
++              <p>
++                来源编号：<code>{progress.source_id}</code>
++              </p>
++            )}
++            {progress.phase === "create_unknown" && (
++              <p>
++                设备创建响应未确认。先刷新列表，再明确选择已创建的设备；不会自动重新创建。
++              </p>
++            )}
++            {currentDevice &&
++              !credential.current &&
++              currentDevice.status === "active" && (
++                <>
++                  <p>
++                    此页已没有该设备凭据。重新签发会立即使该设备在所有项目的旧安装失效；需要重新导入配对文件。
++                  </p>
++                  <label>
++                    <input
++                      type="checkbox"
++                      checked={rotateConfirmed}
++                      disabled={busy}
++                      onChange={(event) =>
++                        setRotateConfirmed(event.target.checked)
++                      }
++                    />
++                    我确认重新签发此设备凭据，并使旧连接失效。
++                  </label>
++                  <R6Button
++                    disabled={!rotateConfirmed || busy || storageError}
++                    onClick={() => void rotate()}
++                  >
++                    重新签发并继续配对
++                  </R6Button>
++                </>
++              )}
++            {currentDevice?.status === "revoked" && (
++              <p role="alert">
++                此设备已撤销，不能继续配对。请在下方选择其他活动设备。
++              </p>
++            )}
++            {sourceNeedsChoice && (
++              <>
++                <p>
++                  请核对本设备在当前项目已登记的来源。没有找到时稍后刷新，不自动再次登记。
++                </p>
++                <label>
++                  已登记来源{" "}
++                  <select
++                    value={chosenSource}
++                    disabled={busy}
++                    onChange={(event) => setChosenSource(event.target.value)}
++                  >
++                    <option value="">请选择</option>
++                    {candidates.map((row) => (
++                      <option key={row.source_id} value={row.source_id}>
++                        {row.display_name} · {row.source_id.slice(-8)}
++                      </option>
++                    ))}
++                  </select>
++                </label>
++              </>
++            )}
++            {(progress.phase === "create_unknown" ||
++              progress.source_creation_unknown) && (
++              <>
++                <p>
++                  刷新仍找不到时，可人工结束这次未知尝试。旧请求仍可能完成；再次操作前请核对列表，并停用重复来源或撤销重复设备。
++                </p>
++                <label>
++                  <input
++                    type="checkbox"
++                    checked={endConfirmed}
++                    disabled={busy || loading}
++                    onChange={(event) => setEndConfirmed(event.target.checked)}
++                  />
++                  我已刷新并核对列表，决定结束这次未知尝试。
++                </label>
++                <R6Button
++                  disabled={busy || loading || !endConfirmed}
++                  onClick={endUnknownAttempt}
++                >
++                  结束本次未知尝试
++                </R6Button>
++              </>
++            )}
++            {credential.current &&
++              !ready &&
++              progress.phase !== "create_unknown" && (
++                <R6Button
++                  disabled={
++                    busy ||
++                    storageError ||
++                    progress.phase === "grants_unknown" ||
++                    Boolean(sourceNeedsChoice && !chosenSource)
++                  }
++                  onClick={continuePairing}
++                >
++                  核对后继续配对
++                </R6Button>
++              )}
++            {ready && (
++              <>
++                <p>
++                  这是长期设备凭据，不是一次性配对码。离开此页会清除页面内存中的凭据；你主动下载的文件仍保留凭据，请勿分享文件。
++                </p>
++                <R6Button
++                  variant="primary"
++                  disabled={busy}
++                  onClick={() =>
++                    void run(async (signal) => {
++                      const issued = credential.current;
++                      const selected = sources.find(
++                        (row) => row.source_id === pairing.current?.source_id,
++                      );
++                      if (!issued || !selected) {
++                        setReady(false);
++                        return;
++                      }
++                      const checked = await checkPairing(
++                        instance,
++                        scope,
++                        issued,
++                        selected,
++                        signal,
++                      );
++                      if (!signal.aborted && alive.current)
++                        downloadPairing(checked);
++                    })
++                  }
++                >
++                  下载配对文件
++                </R6Button>
++                <p>在目标 Mac 安装连接组件后运行：</p>
++                <pre>
++                  <code>
++                    cloud-memory-setup import --pairing-file '&lt;下载文件&gt;'
++                  </code>
++                </pre>
++              </>
++            )}
++            {progress.phase === "ready" && (
++              <R6Button
++                variant="quiet"
++                disabled={busy}
++                onClick={clearCompleted}
++              >
++                我已保存文件，清除此页凭据
++              </R6Button>
++            )}
++          </>
++        )}
++        <details>
++          <summary>恢复未完成配对或选择已有设备</summary>
++          <p>
++            按设备名称与编号核对，不会自动采用同名设备。选择后须明确重新签发凭据。
++          </p>
++          <label>
++            已有设备{" "}
++            <select
++              value={chosenDevice}
++              disabled={busy || loading}
++              onChange={(event) => setChosenDevice(event.target.value)}
++            >
++              <option value="">请选择活动设备</option>
++              {devices
++                .filter((row) => row.status === "active")
++                .map((row) => (
++                  <option key={row.device_id} value={row.device_id}>
++                    {row.display_name} · {row.device_id.slice(-8)}
++                  </option>
++                ))}
++            </select>
++          </label>
++          <R6Button
++            disabled={!chosenDevice || busy || storageError}
++            onClick={chooseExisting}
++          >
++            使用所选设备继续配对
++          </R6Button>
++        </details>
++        <R6Button
++          variant="quiet"
++          disabled={busy || loading}
++          onClick={() => void refresh()}
++        >
++          刷新设备与来源并核对
++        </R6Button>
++        {loading && <p role="status">正在读取设备与来源…</p>}
++        {error && <p role="alert">{error}</p>}
++        {notice && <p role="status">{notice}</p>}
++      </section>
++      <section className="hub-card" aria-label="项目设备授权">
++        <h2>本项目的设备与来源</h2>
++        <p>
++          下列是登记和授权状态，不代表设备在线、已安装客户端或本地队列已上传。
++        </p>
++        {!loaded ? (
++          <p>设备列表尚未读取成功。</p>
++        ) : !projectDevices.length ? (
++          <p>当前项目尚未接入设备。</p>
++        ) : (
++          <ul>
++            {projectDevices.map((device) => (
++              <li key={device.device_id}>
++                <strong>{device.display_name}</strong> ·{" "}
++                {device.device_id.slice(-8)} ·{" "}
++                {device.status === "revoked"
++                  ? "设备已撤销"
++                  : hasPermissions(device, scope)
++                    ? "本项目授权有效"
++                    : "本项目授权不完整"}
++                <ul>
++                  {sources
++                    .filter(
++                      (source) =>
++                        source.device_id === device.device_id &&
++                        source.scope_id === scope,
++                    )
++                    .map((source) => (
++                      <li key={source.source_id}>
++                        {source.display_name} · {source.source_id.slice(-8)} ·{" "}
++                        {source.status === "active"
++                          ? "来源已登记"
++                          : "来源已停用"}
++                        {source.status === "active" && (
++                          <R6Button
++                            variant="quiet"
++                            disabled={busy}
++                            onClick={() =>
++                              setConfirmation({ kind: "source", value: source })
++                            }
++                          >
++                            停止此来源
++                          </R6Button>
++                        )}
++                      </li>
++                    ))}
++                </ul>
++                {device.status === "active" && (
++                  <R6Button
++                    variant="quiet"
++                    disabled={busy}
++                    onClick={() =>
++                      setConfirmation({ kind: "device", value: device })
++                    }
++                  >
++                    撤销此设备
++                  </R6Button>
++                )}
++              </li>
++            ))}
++          </ul>
++        )}
++      </section>
++      {confirmation && (
++        <SourceDisconnectDialog
++          name={confirmation.value.display_name}
++          title={
++            confirmation.kind === "device"
++              ? "撤销此设备在全部项目的授权？"
++              : "停止此来源？"
++          }
++          description={
++            confirmation.kind === "device"
++              ? "此设备在全部项目的旧连接将立即失效，不仅是当前项目。已接纳的记忆和历史仍保留在 NAS，其他设备不受影响。"
++              : "停止此来源的上传与后续处理，同设备其他来源的授权不变。已接纳的记忆和历史仍保留在 NAS。"
++          }
++          onCancel={() => setConfirmation(null)}
++          onConfirm={() => void revoke()}
++        />
++      )}
++    </>
++  );
++}
+diff --git a/memhub/apps/web/src/HubConsole.test.tsx b/memhub/apps/web/src/HubConsole.test.tsx
+index d4f51b309d55b9fb3050b9aaa4090e255547cc9d..a79b4a129270828715b7114535a637e06888b126 100644
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -231,7 +231,9 @@ it("requires project selection and shows real scoped data and authorization word
+   await select();
+   await screen.findByText("project-a 的合成内容");
+   expect(screen.getByText(/总数尚未统计/)).toBeTruthy();
+-  expect(await screen.findByText(/已授权/)).toBeTruthy();
++  expect(
++    await screen.findByText(/已登记（访问权限见项目与设备接入）/),
++  ).toBeTruthy();
+   expect(local).not.toHaveBeenCalled();
+ });
+ it("reuses the library read-only and removes old mutation and lifecycle controls", async () => {
+@@ -501,3 +503,39 @@ it("refreshes history when a previous unknown forget is completed from the recov
+   ).toBeGreaterThanOrEqual(2);
+   expect(sessionStorage.getItem("cmh-forget:instance:project-a")).toBeNull();
+ });
++
++it("lets a fresh empty installation create and select its first project from the console", async () => {
++  const projectId = "77777777-7777-4777-8777-777777777777";
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (url.includes("bootstrap"))
++      return Promise.resolve(Response.json({ ...bootstrap, projects: [] }));
++    if (url.endsWith("/projects") && init?.method === "POST")
++      return Promise.resolve(
++        Response.json(
++          { project_id: projectId, display_name: "首个合成项目" },
++          { status: 201 },
++        ),
++      );
++    if (url.endsWith("/devices"))
++      return Promise.resolve(Response.json({ devices: [] }));
++    if (url.endsWith("/sources"))
++      return Promise.resolve(Response.json({ sources: [] }));
++    return handler(url, init);
++  });
++  render(<HubConsole />);
++  await userEvent.click(
++    await screen.findByRole("button", { name: "创建项目或接入设备" }),
++  );
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "项目名称" }),
++    "首个合成项目",
++  );
++  await userEvent.click(screen.getByRole("button", { name: "创建项目" }));
++  await screen.findByRole("heading", { name: "为「首个合成项目」接入设备" });
++  expect(
++    (screen.getByRole("combobox", { name: "当前项目" }) as HTMLSelectElement)
++      .value,
++  ).toBe(projectId);
++  expect(screen.getByRole("option", { name: "首个合成项目" })).toBeTruthy();
++  expect(local).not.toHaveBeenCalled();
++});
+diff --git a/memhub/apps/web/src/HubConsole.tsx b/memhub/apps/web/src/HubConsole.tsx
+index b73c9c9790b990d10bfbc766b3c38e9d5bdb1f50..01f107ecee28ed3fc67c17bf451c13fef0ff10a3 100644
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -1,4 +1,5 @@
+ import { useEffect, useMemo, useState } from "react";
++import { HubConnections } from "./HubConnections";
+ import { HubProvider, useHub } from "./HubContext";
+ import { HubGovernance } from "./HubGovernance";
+ import { HubQuestion } from "./HubQuestion";
+@@ -17,12 +18,13 @@ import { type MemoryLibraryReader, SdkMemoryLibrary } from "./SdkMemoryLibrary";
+ import { type RawHistoryReader, SdkRawHistory } from "./SdkRawHistory";
+ import "./hub-console.css";
+
+-type View = "home" | "library" | "history" | "ask" | "settings";
++type View = "home" | "library" | "history" | "ask" | "settings" | "connections";
+ const views: [View, string][] = [
+   ["home", "首页与设备"],
+   ["library", "记忆库"],
+   ["history", "历史原文"],
+   ["ask", "问记忆"],
++  ["connections", "项目与设备接入"],
+   ["settings", "模型与帮助"],
+ ];
+ const memory = (item: HubItem) => ({
+@@ -49,8 +51,16 @@ export function HubConsole() {
+   );
+ }
+ function Console() {
+-  const { bootstrap, project, select, moreProjects, refresh, loading, error } =
+-    useHub();
++  const {
++    bootstrap,
++    project,
++    select,
++    addProject,
++    moreProjects,
++    refresh,
++    loading,
++    error,
++  } = useHub();
+   const [view, setView] = useState<View>("home");
+   useEffect(() => {
+     document.title = "Cloud Memory Hub";
+@@ -120,7 +130,15 @@ function Console() {
+         ))}
+       </nav>
+       <main id="main-content" className="hub-content">
+-        {view === "settings" ? (
++        {view === "connections" ? (
++          <HubConnections
++            key={bootstrap.instance_id}
++            instance={bootstrap.instance_id}
++            project={project}
++            onCreated={addProject}
++            onRefreshProjects={refresh}
++          />
++        ) : view === "settings" ? (
+           <R6Settings
+             onDiagnostics={() => {}}
+             hub={{
+@@ -142,8 +160,11 @@ function Console() {
+             <p>
+               {bootstrap.projects.length
+                 ? "请选择一个项目，查看该项目的记忆、历史和设备。"
+-                : "创建项目并配对设备后，共享内容会出现在这里。网页创建和配对向导尚未接通；请按安装文档完成配置。"}
++                : "创建项目并为每台设备配对后，共享内容会出现在这里。"}
+             </p>
++            <R6Button onClick={() => setView("connections")}>
++              创建项目或接入设备
++            </R6Button>
+             <p>全局偏好是独立范围，不会混合显示各项目的内容。</p>
+           </section>
+         )}
+@@ -155,7 +176,7 @@ function ProjectContent({
+   view,
+   project,
+ }: {
+-  view: Exclude<View, "settings">;
++  view: Exclude<View, "settings" | "connections">;
+   project: HubProject;
+ }) {
+   const { bootstrap } = useHub();
+@@ -354,7 +375,9 @@ function HubHome({ project }: { project: HubProject }) {
+       </section>
+       <section className="hub-card">
+         <h2>此项目的设备与来源</h2>
+-        <p>这里只显示授权状态，不表示设备在线或本地队列已同步。</p>
++        <p>
++          这里只显示来源登记状态，不表示设备在线或本地队列已同步。访问权限可在项目与设备接入中核对。
++        </p>
+         {error ? (
+           <p role="alert">{error}</p>
+         ) : summary ? (
+@@ -373,7 +396,7 @@ function HubHome({ project }: { project: HubProject }) {
+                     ·{" "}
+                     {source.status === "active" &&
+                     source.device_status === "active"
+-                      ? "已授权"
++                      ? "已登记（访问权限见项目与设备接入）"
+                       : "已停用"}
+                   </span>
+                 </li>
+diff --git a/memhub/apps/web/src/HubContext.tsx b/memhub/apps/web/src/HubContext.tsx
+index f8a5976e6be2aad81d238b0bfaed12ef5282f45c..793de8d0e9708567f5fc4098973de1a2e25ab20e 100644
+--- a/memhub/apps/web/src/HubContext.tsx
++++ b/memhub/apps/web/src/HubContext.tsx
+@@ -17,6 +17,7 @@ interface HubState {
+   bootstrap: HubBootstrap;
+   project: HubProject | null;
+   select(scope: string): void;
++  addProject(project: HubProject): void;
+   moreProjects(): void;
+   refresh(): void;
+   loading: boolean;
+@@ -106,6 +107,22 @@ export function HubProvider({ children }: { children: ReactNode }) {
+         loading,
+         refresh,
+         select: setScope,
++        addProject: (project) => {
++          setBootstrap((previous) =>
++            previous
++              ? {
++                  ...previous,
++                  projects: [
++                    ...previous.projects.filter(
++                      (row) => row.scope_id !== project.scope_id,
++                    ),
++                    project,
++                  ],
++                }
++              : previous,
++          );
++          setScope(project.scope_id);
++        },
+         moreProjects: () => {
+           if (bootstrap.next_offset !== null) setOffset(bootstrap.next_offset);
+         },
+diff --git a/memhub/apps/web/src/SourceDisconnectDialog.tsx b/memhub/apps/web/src/SourceDisconnectDialog.tsx
+index 23a84fc9475a1e5d9d8cccc0e5338232bb9d8c49..54ac11717641a48ebd76b66e309948b6d57b2881 100644
+--- a/memhub/apps/web/src/SourceDisconnectDialog.tsx
++++ b/memhub/apps/web/src/SourceDisconnectDialog.tsx
+@@ -4,10 +4,14 @@ export function SourceDisconnectDialog({
+   name,
+   onCancel,
+   onConfirm,
++  title,
++  description,
+ }: {
+   name: string;
+   onCancel(): void;
+   onConfirm(): void;
++  title?: string;
++  description?: string;
+ }) {
+   const panel = useRef<HTMLElement>(null);
+   useEffect(() => {
+@@ -41,9 +45,10 @@ export function SourceDisconnectDialog({
+           }
+         }}
+       >
+-        <h2 id="disconnect-source-title">撤回 {name} 的授权？</h2>
++        <h2 id="disconnect-source-title">{title ?? `撤回 ${name} 的授权？`}</h2>
+         <p>
+-          停止同步与相关记忆的外部读取。已导入的原文和修改历史保留在本机，不修改来源应用中的对话。
++          {description ??
++            "停止同步与相关记忆的外部读取。已导入的原文和修改历史保留在本机，不修改来源应用中的对话。"}
+         </p>
+         <div className="consent-actions">
+           <button type="button" className="secondary" onClick={onCancel}>
+diff --git a/memhub/apps/web/src/hub-console.css b/memhub/apps/web/src/hub-console.css
+index 5990688155d24e4e24cfe4e9fd2dfc560697498f..cda2d7570a0f000e4346e4dd87acc3cc27facb5d 100644
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -126,3 +126,32 @@
+   padding: 1rem 0;
+   border-bottom: 1px solid var(--border, #d9e2e8);
+ }
++
++.hub-content > .hub-card + .hub-card {
++  margin-top: 20px;
++}
++.hub-content form,
++.hub-pairing label {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 10px;
++  margin: 16px 0;
++}
++.hub-content input:not([type="checkbox"]),
++.hub-content select {
++  min-width: 180px;
++  max-width: 100%;
++  padding: 9px;
++  border: 1px solid #d8dbd2;
++  border-radius: 8px;
++  font: inherit;
++}
++.hub-pairing pre,
++.hub-pairing code {
++  overflow-wrap: anywhere;
++  white-space: pre-wrap;
++}
++.hub-pairing details {
++  margin: 20px 0;
++}
+diff --git a/memhub/apps/web/src/hub-pairing.ts b/memhub/apps/web/src/hub-pairing.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..00a2aeec3d7cb63ec2ea80961731ff520320713e
+--- /dev/null
++++ b/memhub/apps/web/src/hub-pairing.ts
+@@ -0,0 +1,526 @@
++/** Administrator onboarding over existing Hub identities; never persist credentials. */
++import type { HubProject } from "./hub-api";
++export type Permission =
++  | "events:write"
++  | "memory:read"
++  | "history:read"
++  | "sync:read";
++export interface DeviceGrant {
++  scope_id: string;
++  permissions: Permission[];
++}
++export interface PairDevice {
++  device_id: string;
++  display_name: string;
++  revision: number;
++  status: "active" | "revoked";
++  grants: DeviceGrant[];
++  created_at: string;
++}
++export interface PairSource {
++  source_id: string;
++  device_id: string;
++  scope_id: string;
++  adapter_id: string;
++  display_name: string;
++  revision: number;
++  status: "active" | "revoked";
++}
++export interface IssuedDevice {
++  device: PairDevice;
++  credential: string;
++}
++export interface PairingFile {
++  schema_version: 1;
++  kind: "cloud-memory-hub-pairing";
++  origin: string;
++  instance_id: string;
++  device_id: string;
++  scope_id: string;
++  source_id: string;
++  credential: string;
++}
++export type PairPhase =
++  | "create_unknown"
++  | "device"
++  | "grants_unknown"
++  | "source_unknown"
++  | "choose_source"
++  | "verify"
++  | "ready"
++  | "rotate_unknown";
++export interface PairProgress {
++  version: 1;
++  instance: string;
++  scope: string;
++  phase: PairPhase;
++  device_id: string | null;
++  source_id: string | null;
++  source_creation_unknown: boolean;
++}
++export const requiredPermissions: Permission[] = [
++  "events:write",
++  "memory:read",
++  "history:read",
++];
++export const agentAdapter = "cloud-memory-hub.agent";
++const uuid =
++  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
++const phases = [
++  "create_unknown",
++  "device",
++  "grants_unknown",
++  "source_unknown",
++  "choose_source",
++  "verify",
++  "ready",
++  "rotate_unknown",
++];
++const messages: Record<string, string> = {
++  revision_conflict: "设备或来源已被其他操作修改，请刷新列表核对后再继续。",
++  device_revoked: "此设备已撤销，请选择其他设备或新增独立设备。",
++  device_not_active: "此设备不可用，请刷新设备列表。",
++  invalid_request: "填写的名称或配对信息不符合要求，请检查后重试。",
++  administrator_required: "管理员登录已失效，请重新登录。",
++  authentication_required: "管理员登录已失效，请重新登录。",
++  invalid_device_credential: "设备凭据已失效或被轮换，需要明确重新签发。",
++  source_not_allowed: "该设备目前没有此项目来源的访问权限，请核对授权。",
++  secure_origin_required:
++    "请使用 HTTPS 管理地址（或本机 localhost）生成可导入的配对文件。",
++  unknown_scope: "当前项目已不存在，请刷新项目列表。",
++};
++export class PairingError extends Error {
++  constructor(
++    readonly code: string,
++    readonly rejectedBeforeWrite = false,
++  ) {
++    super(
++      messages[code] ??
++        "请求结果尚未确认，请刷新列表核对当前阶段，不要重复创建对象。",
++    );
++  }
++}
++export function rejectedBeforeWrite(reason: unknown): boolean {
++  return reason instanceof PairingError && reason.rejectedBeforeWrite;
++}
++function invalid(): never {
++  throw new PairingError("invalid_response");
++}
++function object(value: unknown): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
++  return value as Record<string, unknown>;
++}
++function identity(value: unknown): value is string {
++  return typeof value === "string" && uuid.test(value);
++}
++function scope(value: unknown): value is string {
++  return value === "global" || identity(value);
++}
++function revision(value: unknown): value is number {
++  return Number.isSafeInteger(value) && Number(value) > 0;
++}
++function state(value: unknown): boolean {
++  return value === "active" || value === "revoked";
++}
++function device(value: unknown): PairDevice {
++  const row = object(value);
++  if (
++    !identity(row.device_id) ||
++    typeof row.display_name !== "string" ||
++    !revision(row.revision) ||
++    !state(row.status) ||
++    typeof row.created_at !== "string" ||
++    !Array.isArray(row.grants) ||
++    row.grants.length > 256
++  )
++    invalid();
++  const scopes = new Set<string>();
++  for (const raw of row.grants) {
++    const grant = object(raw);
++    if (
++      !scope(grant.scope_id) ||
++      scopes.has(grant.scope_id) ||
++      !Array.isArray(grant.permissions) ||
++      !grant.permissions.length ||
++      new Set(grant.permissions).size !== grant.permissions.length ||
++      !grant.permissions.every((p) =>
++        ["events:write", "memory:read", "history:read", "sync:read"].includes(
++          p,
++        ),
++      )
++    )
++      invalid();
++    scopes.add(grant.scope_id);
++  }
++  return row as unknown as PairDevice;
++}
++function source(value: unknown): PairSource {
++  const row = object(value);
++  if (
++    !identity(row.source_id) ||
++    !identity(row.device_id) ||
++    !scope(row.scope_id) ||
++    typeof row.display_name !== "string" ||
++    typeof row.adapter_id !== "string" ||
++    !revision(row.revision) ||
++    !state(row.status)
++  )
++    invalid();
++  return row as unknown as PairSource;
++}
++function issued(value: unknown): IssuedDevice {
++  const row = object(value),
++    record = device(row.device);
++  if (
++    record.status !== "active" ||
++    typeof row.credential !== "string" ||
++    !new RegExp(`^cmhdev_v1_${record.device_id}_[A-Za-z0-9_-]{43}$`).test(
++      row.credential,
++    )
++  )
++    invalid();
++  return { device: record, credential: row.credential };
++}
++async function request(
++  path: string,
++  method: string,
++  body?: unknown,
++  signal?: AbortSignal,
++  credential?: string,
++): Promise<unknown> {
++  const response = await fetch(`/hub/v1/${path}`, {
++    method,
++    credentials: "same-origin",
++    cache: "no-store",
++    signal,
++    headers: {
++      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
++      ...(credential ? { Authorization: `Bearer ${credential}` } : {}),
++    },
++    body: body === undefined ? undefined : JSON.stringify(body),
++  });
++  if (!response.ok) {
++    let code: unknown;
++    try {
++      code = object(await response.json()).detail;
++    } catch {
++      /* No response body is exposed. */
++    }
++    throw new PairingError(
++      typeof code === "string" && code in messages ? code : "request_failed",
++      (response.status === 403 && code === "administrator_required") ||
++        (response.status === 422 &&
++          (code === "invalid_request" || code === "unknown_scope")) ||
++        (response.status === 409 && code === "device_not_active"),
++    );
++  }
++  try {
++    const value = await response.json();
++    if (signal?.aborted) throw new DOMException("aborted", "AbortError");
++    return value;
++  } catch {
++    return invalid();
++  }
++}
++export function validLabel(value: string): string {
++  const text = value.normalize("NFKC").trim();
++  if (!text || [...text].length > 80 || /[\p{Cc}\p{Cf}]/u.test(text))
++    throw new PairingError("invalid_request");
++  return text;
++}
++export async function createProject(
++  name: string,
++  signal?: AbortSignal,
++): Promise<HubProject> {
++  const row = object(
++    await request(
++      "projects",
++      "POST",
++      { display_name: validLabel(name) },
++      signal,
++    ),
++  );
++  if (!identity(row.project_id) || typeof row.display_name !== "string")
++    invalid();
++  return { scope_id: row.project_id, display_name: row.display_name };
++}
++export async function getDevices(signal?: AbortSignal): Promise<PairDevice[]> {
++  const row = object(await request("devices", "GET", undefined, signal));
++  if (!Array.isArray(row.devices)) invalid();
++  const result = row.devices.map(device);
++  if (new Set(result.map((r) => r.device_id)).size !== result.length) invalid();
++  return result;
++}
++export async function getSources(signal?: AbortSignal): Promise<PairSource[]> {
++  const row = object(await request("sources", "GET", undefined, signal));
++  if (!Array.isArray(row.sources)) invalid();
++  const result = row.sources.map(source);
++  if (new Set(result.map((r) => r.source_id)).size !== result.length) invalid();
++  return result;
++}
++export async function createDevice(name: string, signal?: AbortSignal) {
++  return issued(
++    await request(
++      "devices",
++      "POST",
++      { display_name: validLabel(name) },
++      signal,
++    ),
++  );
++}
++export async function rotateDevice(current: PairDevice, signal?: AbortSignal) {
++  const result = issued(
++    await request(
++      `devices/${current.device_id}/rotate`,
++      "POST",
++      { expected_revision: current.revision },
++      signal,
++    ),
++  );
++  if (
++    result.device.device_id !== current.device_id ||
++    result.device.revision !== current.revision + 1
++  )
++    invalid();
++  return result;
++}
++export function hasPermissions(current: PairDevice, project: string): boolean {
++  return (
++    current.status === "active" &&
++    requiredPermissions.every((permission) =>
++      current.grants.some(
++        (g) => g.scope_id === project && g.permissions.includes(permission),
++      ),
++    )
++  );
++}
++export async function grantProject(
++  current: PairDevice,
++  project: string,
++  signal?: AbortSignal,
++) {
++  const grants = current.grants.map((g) => ({
++    scope_id: g.scope_id,
++    permissions: [...g.permissions],
++  }));
++  const existing = grants.find((g) => g.scope_id === project);
++  if (existing)
++    existing.permissions = [
++      ...new Set([...existing.permissions, ...requiredPermissions]),
++    ];
++  else
++    grants.push({ scope_id: project, permissions: [...requiredPermissions] });
++  const result = device(
++    await request(
++      `devices/${current.device_id}/grants`,
++      "PUT",
++      { expected_revision: current.revision, grants },
++      signal,
++    ),
++  );
++  if (
++    result.device_id !== current.device_id ||
++    result.revision !== current.revision + 1 ||
++    !hasPermissions(result, project) ||
++    grants.some(
++      (g) =>
++        !result.grants.some(
++          (next) =>
++            next.scope_id === g.scope_id &&
++            next.permissions.length === g.permissions.length &&
++            g.permissions.every((p) => next.permissions.includes(p)),
++        ),
++    )
++  )
++    invalid();
++  return result;
++}
++export async function createSource(
++  current: PairDevice,
++  project: string,
++  signal?: AbortSignal,
++) {
++  const result = source(
++    await request(
++      "sources",
++      "POST",
++      {
++        display_name: "Cloud Memory Hub Agent",
++        device_id: current.device_id,
++        scope_id: project,
++        adapter_id: agentAdapter,
++      },
++      signal,
++    ),
++  );
++  if (
++    result.device_id !== current.device_id ||
++    result.scope_id !== project ||
++    result.adapter_id !== agentAdapter ||
++    result.status !== "active"
++  )
++    invalid();
++  return result;
++}
++export async function revokeDevice(current: PairDevice, signal?: AbortSignal) {
++  const result = device(
++    await request(
++      `devices/${current.device_id}/revoke`,
++      "POST",
++      { expected_revision: current.revision },
++      signal,
++    ),
++  );
++  if (
++    result.device_id !== current.device_id ||
++    result.status !== "revoked" ||
++    result.revision !== current.revision + 1
++  )
++    invalid();
++  return result;
++}
++export async function revokeSource(current: PairSource, signal?: AbortSignal) {
++  const result = source(
++    await request(
++      `sources/${current.source_id}/revoke`,
++      "POST",
++      { expected_revision: current.revision },
++      signal,
++    ),
++  );
++  if (
++    result.source_id !== current.source_id ||
++    result.device_id !== current.device_id ||
++    result.scope_id !== current.scope_id ||
++    result.status !== "revoked" ||
++    result.revision !== current.revision + 1
++  )
++    invalid();
++  return result;
++}
++export function pairingOrigin(): string {
++  const url = new URL(window.location.origin);
++  if (
++    url.protocol !== "https:" &&
++    !(
++      url.protocol === "http:" &&
++      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
++    )
++  )
++    throw new PairingError("secure_origin_required");
++  return url.origin;
++}
++export async function checkPairing(
++  instance: string,
++  project: string,
++  current: IssuedDevice,
++  selected: PairSource,
++  signal?: AbortSignal,
++): Promise<PairingFile> {
++  const origin = pairingOrigin();
++  if (
++    !hasPermissions(current.device, project) ||
++    selected.device_id !== current.device.device_id ||
++    selected.scope_id !== project ||
++    selected.status !== "active" ||
++    selected.adapter_id !== agentAdapter
++  )
++    invalid();
++  const row = object(
++    await request(
++      `sources/${selected.source_id}/access`,
++      "GET",
++      undefined,
++      signal,
++      current.credential,
++    ),
++  );
++  if (
++    row.protocol_version !== 1 ||
++    row.allowed !== true ||
++    row.instance_id !== instance ||
++    row.device_id !== current.device.device_id ||
++    row.scope_id !== project ||
++    row.source_id !== selected.source_id ||
++    row.device_revision !== current.device.revision ||
++    row.source_revision !== selected.revision
++  )
++    invalid();
++  return {
++    schema_version: 1,
++    kind: "cloud-memory-hub-pairing",
++    origin,
++    instance_id: instance,
++    device_id: current.device.device_id,
++    scope_id: project,
++    source_id: selected.source_id,
++    credential: current.credential,
++  };
++}
++export function downloadPairing(pairing: PairingFile) {
++  const url = URL.createObjectURL(
++    new Blob([`${JSON.stringify(pairing, null, 2)}\n`], {
++      type: "application/json",
++    }),
++  );
++  const revokeURL = URL.revokeObjectURL.bind(URL);
++  try {
++    const anchor = document.createElement("a");
++    anchor.href = url;
++    anchor.download = "cloud-memory-hub-pairing.json";
++    document.body.append(anchor);
++    anchor.click();
++    anchor.remove();
++  } finally {
++    setTimeout(() => revokeURL(url), 1000);
++  }
++}
++export const progressKey = (instance: string, project: string) =>
++  `cmh-pairing:${instance}:${project}`;
++export function readProgress(
++  instance: string,
++  project: string,
++): PairProgress | null {
++  const raw = sessionStorage.getItem(progressKey(instance, project));
++  if (!raw) return null;
++  const value = object(JSON.parse(raw));
++  if (
++    typeof value.source_creation_unknown !== "boolean" ||
++    value.version !== 1 ||
++    value.instance !== instance ||
++    value.scope !== project ||
++    !phases.includes(String(value.phase)) ||
++    !(value.device_id === null || identity(value.device_id)) ||
++    !(value.source_id === null || identity(value.source_id))
++  )
++    invalid();
++  return {
++    version: 1,
++    instance,
++    scope: project,
++    phase: value.phase as PairPhase,
++    device_id: value.device_id as string | null,
++    source_id: value.source_id as string | null,
++    source_creation_unknown: value.source_creation_unknown,
++  };
++}
++export function saveProgress(value: PairProgress) {
++  // Explicit whitelist: never spread an issued credential or pairing-file object.
++  sessionStorage.setItem(
++    progressKey(value.instance, value.scope),
++    JSON.stringify({
++      version: 1,
++      instance: value.instance,
++      scope: value.scope,
++      phase: value.phase,
++      device_id: value.device_id,
++      source_id: value.source_id,
++      source_creation_unknown: value.source_creation_unknown,
++    }),
++  );
++}
++export function pairingMessage(error: unknown): string {
++  return error instanceof PairingError
++    ? error.message
++    : "连接中断，结果尚未确认。请刷新列表核对当前阶段。";
++}
