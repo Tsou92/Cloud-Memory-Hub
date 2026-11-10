@@ -2,6 +2,8 @@
 
 状态：接受；关联 FR-01、FR-02、FR-03、FR-06、FR-07、FR-12、ENG-01。
 
+2026-11-10 补充：本文的 JSON v1 导入和本地补传保留为高级路径；默认接入改为 [ADR-0065](0065-one-link-remote-agent-onboarding.md) 的一次性链接、轻量配置器和 NAS 远程 MCP。无需独立图形 App。下文的服务器生成秘密仍适用于旧设备创建接口；新 claim 使用客户端先持久生成的随机秘密以恢复丢失回执。
+
 ## 问题与复用
 
 发布版本需要让用户自行创建项目、授权设备并安装客户端，无需开发者生成私有配置。继续使用既有项目、设备、授权、来源、轮换和撤销 API，以及 `RemoteConnection`、`AgentSettings`、`LocalOutbox`、`watch_delivery` 和上游隐私过滤／HTTP 客户端。没有新身份数据库或新的鉴权协议。

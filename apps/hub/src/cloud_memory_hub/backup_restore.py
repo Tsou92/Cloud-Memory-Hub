@@ -21,6 +21,7 @@ from cloud_memory_hub.config import HubConfig, read_private_file
 from cloud_memory_hub.governance_authority import open_authority
 from cloud_memory_hub.remote_access import DeviceAccessStore
 from cloud_memory_hub.remote_ingest import RemoteIngest
+from cloud_memory_hub.remote_pairing import cancel_restored_pairings
 from cloud_memory_hub.storage_lease import (
     LOCK_NAME,
     RESTORE_MARKER,
@@ -247,6 +248,12 @@ def _merge_security(payload, current):
     return missing_sources
 
 
+def _cancel_pairings(payload):
+    staged = DeviceAccessStore(payload / "config/remote-access.sqlite3", require_existing=True)
+    with staged._connection(writing=True) as db:
+        cancel_restored_pairings(db)
+
+
 def _queue_safe(payload, admissions):
     path = payload / "data/one-memory.sqlite3"
     with (
@@ -421,6 +428,7 @@ def restore_backup(config: HubConfig, backup_path: Path, backup_root: Path) -> d
             current_config = _from_stage(protected)
             current, _ = _prefix(_from_stage(payload), current_config)
             missing_sources = _merge_security(payload, current)
+            _cancel_pairings(payload)
             shutil.rmtree(payload / "governance")
             _copy_tree(protected / "governance", payload / "governance")
             store._normalize_databases(payload)
@@ -465,6 +473,7 @@ def import_backup(
                 if any(child.name != LOCK_NAME for child in path.iterdir()):
                     _refuse("backup_import_target_not_empty")
             stage, payload = _stage(root, selected, manifest, operation_id)
+            _cancel_pairings(payload)
             _, admissions = _authority(_from_stage(payload))
             _queue_safe(payload, admissions)
             marker = _result(manifest, operation_id, None, 0)
