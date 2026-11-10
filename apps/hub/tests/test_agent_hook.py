@@ -13,7 +13,7 @@ import test_transport
 from cloud_memory_hub.agent_access import AgentAccessError
 from cloud_memory_hub.agent_hook import MAX_HOOK_BYTES, SILENT, process_message, visible_message
 from cloud_memory_hub.privacy import CredentialFilter
-from cloud_memory_hub.read_contract import ReadReply
+from cloud_memory_hub.read_contract import ReadItem, ReadReply
 from cloud_memory_hub.transport import RemoteConnection, TransportError
 from test_agent_access import access_for, read_grants
 from test_transport import bind_live, connection_data
@@ -211,7 +211,7 @@ def test_unexpected_network_failure_preserves_capture_without_error_text(tmp_pat
     assert "private synthetic" not in json.dumps([output, status])
 
 
-def test_recent_empty_and_paging_keep_originals_not_search_semantics(tmp_path, monkeypatch):
+def test_combined_empty_and_original_paging_remain_explicit(tmp_path, monkeypatch):
     service = service_for(tmp_path)
     calls = []
 
@@ -225,9 +225,9 @@ def test_recent_empty_and_paging_keep_originals_not_search_semantics(tmp_path, m
             device_id=service.connection.device_id,
             device_revision=1,
             scope_id=service.scope_id,
-            operation="history-list",
+            operation=operation,
             items=(),
-            next_offset=5,
+            next_offset=5 if operation == "history-list" else None,
         )
 
     monkeypatch.setattr(service, "_deliver", offline)
@@ -236,9 +236,225 @@ def test_recent_empty_and_paging_keep_originals_not_search_semantics(tmp_path, m
         process_message(service, ("UserPromptSubmit", "user", "visible", "session", "turn"))
     )
     text = output["hookSpecificOutput"]["additionalContext"]
-    assert "recent-history list returned no records" in text and "search returned" not in text
+    assert "recent-history list and relevant-memory search returned no records" in text
+    assert "Do not infer that no memories exist" in text
     assert status["capture"] == "queued" and status["recall"] == "empty" and status["truncated"]
-    assert calls == [("history-list", {"limit": 5, "offset": 0})]
+    assert [operation for operation, _ in calls] == ["memory-search", "history-list"]
+    assert calls[0][1]["query"] == "visible"
+    assert calls[0][1]["scope_id"] == service.scope_id
+    assert calls[1][1] == {"limit": 5, "offset": 0}
+
+
+def read_reply(service, operation, texts=("SYNTHETIC_REFERENCE",), **updates):
+    return ReadReply(
+        instance_id=service.connection.instance_id,
+        device_id=service.connection.device_id,
+        device_revision=1,
+        scope_id=service.scope_id,
+        operation=operation,
+        items=tuple(
+            ReadItem(
+                record_id=f"{operation}:{index}",
+                kind="history" if operation == "history-list" else "memory",
+                content=text,
+                content_offset=0,
+                agent_id="synthetic",
+                source_raw_ids=("synthetic-source",),
+            )
+            for index, text in enumerate(texts)
+        ),
+    ).model_copy(update=updates)
+
+
+def test_current_question_recalls_older_decision_outside_recent_five_in_parallel(
+    tmp_path, monkeypatch
+):
+    service = service_for(tmp_path)
+    calls = {}
+
+    async def scenario():
+        both_started = asyncio.Event()
+
+        async def reader(operation, request):
+            calls[operation] = request
+            if len(calls) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), 1)
+            texts = (
+                ("OLDER_DECISION: navigation uses green.",)
+                if operation == "memory-search"
+                else tuple(f"unrelated recent {index}" for index in range(5))
+            )
+            return read_reply(service, operation, texts)
+
+        monkeypatch.setattr(service, "_read", reader)
+        output, status = await process_message(
+            service, ("UserPromptSubmit", "user", "What navigation color?", "session", "turn")
+        )
+        text = output["hookSpecificOutput"]["additionalContext"]
+        records = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+        assert status["recall"] == "retrieved" and status["records"] == 5
+        assert records[0]["content"] == "OLDER_DECISION: navigation uses green."
+        assert records[1]["content"] == "unrelated recent 0"
+        assert "unrelated recent 4" not in text
+        assert status["truncated"]
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    asyncio.run(scenario())
+    assert calls["memory-search"]["query"] == "What navigation color?"
+
+
+async def no_delivery():
+    return None
+
+
+@pytest.mark.parametrize("failed_operation", ["memory-search", "history-list"])
+@pytest.mark.parametrize("empty", [True, False])
+def test_one_temporary_failure_has_explicit_partial_context(
+    tmp_path, monkeypatch, failed_operation, empty
+):
+    service = service_for(tmp_path)
+
+    async def reader(operation, request):
+        if operation == failed_operation:
+            raise AgentAccessError("transport_unavailable", retryable=True)
+        return read_reply(service, operation, () if empty else ("AVAILABLE_REFERENCE",))
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    monkeypatch.setattr(service, "_read", reader)
+    output, status = asyncio.run(
+        process_message(service, ("UserPromptSubmit", "user", "visible", "session", "turn"))
+    )
+    text = output["hookSpecificOutput"]["additionalContext"]
+    assert status["recall"] == "partial"
+    assert status["records"] == (0 if empty else 1)
+    assert "is unavailable for this turn" in text and "context is incomplete" in text
+    if empty:
+        assert "available authorized read returned no records" in text
+    else:
+        assert "AVAILABLE_REFERENCE" in text
+
+
+@pytest.mark.parametrize(
+    "code,retryable,state",
+    [
+        ("scope_permission_required", False, "denied"),
+        ("device_authentication_required", True, "denied"),
+        ("remote_read_invalid", False, "unavailable"),
+    ],
+)
+def test_permanent_or_permission_error_discards_other_read(
+    tmp_path, monkeypatch, code, retryable, state
+):
+    service = service_for(tmp_path)
+
+    async def reader(operation, request):
+        if operation == "memory-search":
+            raise AgentAccessError(code, retryable=retryable)
+        return read_reply(service, operation)
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    monkeypatch.setattr(service, "_read", reader)
+    output, status = asyncio.run(
+        process_message(service, ("UserPromptSubmit", "user", "visible", "session", "turn"))
+    )
+    assert status["recall"] == state and status["recall_error"] == code
+    assert "SYNTHETIC_REFERENCE" not in json.dumps(output)
+
+
+@pytest.mark.parametrize("field", ["instance_id", "device_id", "scope_id", "device_revision"])
+def test_authority_mismatch_discards_both_read_results(tmp_path, monkeypatch, field):
+    service = service_for(tmp_path)
+
+    async def reader(operation, request):
+        updates = {field: 2 if field == "device_revision" else str(uuid4())}
+        return read_reply(service, operation, **(updates if operation == "memory-search" else {}))
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    monkeypatch.setattr(service, "_read", reader)
+    output, status = asyncio.run(
+        process_message(service, ("UserPromptSubmit", "user", "visible", "session", "turn"))
+    )
+    assert status["recall"] == "denied" and status["recall_error"] == "recall_authority_changed"
+    assert "SYNTHETIC_REFERENCE" not in json.dumps(output)
+
+
+def test_wrong_operation_discards_successful_other_read(tmp_path, monkeypatch):
+    service = service_for(tmp_path)
+
+    async def reader(operation, request):
+        return read_reply(service, "history-list")
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    monkeypatch.setattr(service, "_read", reader)
+    output, status = asyncio.run(
+        process_message(service, ("UserPromptSubmit", "user", "visible", "session", "turn"))
+    )
+    assert status["recall"] == "unavailable" and status["recall_error"] == "recall_response_invalid"
+    assert "SYNTHETIC_REFERENCE" not in json.dumps(output)
+
+
+def test_both_temporary_read_failures_are_unavailable_without_partial_claim(tmp_path, monkeypatch):
+    service = service_for(tmp_path)
+
+    async def reader(operation, request):
+        raise AgentAccessError("transport_unavailable", retryable=True)
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    monkeypatch.setattr(service, "_read", reader)
+    output, status = asyncio.run(
+        process_message(service, ("UserPromptSubmit", "user", "visible", "session", "turn"))
+    )
+    assert status["recall"] == "unavailable" and status["recall_error"] == "transport_unavailable"
+    assert "partial" not in json.dumps([output, status])
+    assert "cmh_memory_context" not in json.dumps(output)
+
+
+def test_search_query_filters_full_prompt_before_cutting_and_never_logs_it(tmp_path, monkeypatch):
+    secret = uuid4().hex
+    service = service_for(tmp_path, privacy=CredentialFilter((secret,)))
+    requests = []
+
+    async def reader(operation, request):
+        requests.append(request)
+        return read_reply(service, operation, ())
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    monkeypatch.setattr(service, "_read", reader)
+    output, status = asyncio.run(
+        process_message(
+            service,
+            ("UserPromptSubmit", "user", "x" * 4080 + secret + " tail" * 100, "session", "turn"),
+        )
+    )
+    assert len(requests[0]["query"]) == 4096 and status["truncated"]
+    assert secret[:12] not in json.dumps([requests, output, status])
+    assert "x" * 100 not in json.dumps([output, status])
+
+
+def test_read_deadline_discards_finished_context_and_cancels_other_read(tmp_path, monkeypatch):
+    service = service_for(tmp_path)
+    cancelled = []
+    monkeypatch.setattr("cloud_memory_hub.agent_hook.HOOK_NETWORK_DEADLINE", 0.02)
+
+    async def reader(operation, request):
+        if operation == "history-list":
+            return read_reply(service, operation)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(operation)
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    monkeypatch.setattr(service, "_read", reader)
+    output, status = asyncio.run(
+        process_message(service, ("UserPromptSubmit", "user", "visible", "session", "turn"))
+    )
+    assert cancelled == ["memory-search"]
+    assert status["recall"] == "unavailable"
+    assert status["recall_error"] == "hook_network_deadline_exceeded"
+    assert "SYNTHETIC_REFERENCE" not in json.dumps(output)
+    assert status["capture"] == "queued"
 
 
 def test_real_http_visible_turn_replay_recent_update_and_revocation(live_hub, tmp_path):
