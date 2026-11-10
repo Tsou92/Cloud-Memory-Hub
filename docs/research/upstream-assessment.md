@@ -136,3 +136,5 @@ Hub 后续接线复用已有归档、产出索引与图预算，以及上游 `Ch
 | `data/logs` 下的两个 Core 文件族 | `core.log`、`diagnostic-core.jsonl` 及各自 `.1/.2/.3` 与现有 SDK 日期轮转不同。扫描白名单、文件键、manifest、完成验证须共同版本化扩展，旧两域 verified 不升级为全部输出已覆盖。 |
 
 可继续原样复用无符号链接目录遍历、文件身份快照、总预算、原字节保留、临时文件证明、同步替换、原处理器重绑定，以及本轮实际 Core 写者维护。新合同的重点是分类/分帧、物理授权、覆盖域版本和父操作归属；跨项目混合旧内容仍按未确认范围拒绝。
+
+2026-11-10 公开发布准备：新增 Hub 管理员 scope 适配，复用现有 SDK 记忆库、原文组件和模型设置，不新建记忆存储或整套网页。问答继续复用 SdkMemoryAnswerer，并以现有 Anthropic Messages 转换器补 provider 分支；设计与接口边界见 [ADR-0057](../adr/0057-administrator-console-reads.md) 和 [ADR-0058](../adr/0058-anthropic-memory-question-answering.md)。本地验证不等于 NAS 或公开发行通过。

@@ -30,6 +30,8 @@
 
 接纳原文也通过 history/list 和 history/get 提供，ID 为 `cmhe:<receipt UUID>`，见 [ADR-0017](adr/0017-accepted-original-archive.md)。其 content 为完整的已过滤 Event JSON，source 为注册的 adapter_id，session_id 为原始 conversation_id；解析 JSON 可得到完整正文和元数据，读取过滤器可能重新格式化空白，不保证输出的序列化字节与存储完全一致。列表先按接纳顺序倒序列原文，再列 SDK 原生 raw，两者可能内容重叠，不是全局去重／时间排序视图。原文 ID 不能用 memories/get 读取；`memory:read` 也不授予正文访问权。已核验的直接 SDK 产出可引用该归档，但尚未完成所有演化／共享派生的关系闭包，不能据此宣称所有提炼结果均可完整追溯。
 
+`history/list` 同时服务 Agent 的 recent 和自动召回，因此排除当前项目中已忘记或彻底删除的原文，包括接纳原文与 SDK raw。主动查阅已忘记原文须使用 `history/get` 并提供精确 record_id；该入口仍检查 `history:read` 和作用域，已彻底删除的原文继续返回 404。此收紧由服务端执行，不增加协议字段；旧服务端尚不具备该列表过滤，见 [ADR-0056](adr/0056-forgotten-history-recall.md)。
+
 每个文本块最多 4096 字符；完整文本先过滤，再分块。需要后续内容时以同一 ID 和 next_content_offset 再次 get。references 最多 32 个，超出时明确 references_truncated；搜索最多核对 64 个成员，达到上限时 candidate_limit_reached=true。响应上限 120 KiB。当前分页是实时视图，列表页可能因记录已失效而为空；只要 next_offset 非空仍可继续。分页不构成变更同步游标，也不保证跨请求快照一致。
 
 读取前后都会检查当前授权，查询期间 device revision 改变即拒绝结果。来源撤销仅停止写入，已有内容仍按项目读权限访问；这不代替忘记和彻底删除。客户端若已经拿到内容，服务端无法撤回它。

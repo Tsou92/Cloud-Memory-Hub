@@ -12,7 +12,7 @@ RUN npm install --global pnpm@11.24.0
 WORKDIR /workspace
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/ ./
 RUN pnpm --filter @one-memory/web... install --frozen-lockfile --ignore-scripts
-ENV VITE_CORE_URL=/
+ENV VITE_CORE_URL=/ VITE_CMH_CONSOLE=true
 RUN pnpm --filter @one-memory/web... -r build
 
 FROM web AS web-tests
@@ -20,7 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
 RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
     src/MemorySpace.sdk-start.test.tsx src/MemorySpace.test.tsx \
-    src/MemorySpace.library.test.tsx src/SdkMemoryLibrary.test.tsx src/SdkRawHistory.test.tsx
+    src/MemorySpace.library.test.tsx src/SdkMemoryLibrary.test.tsx src/SdkRawHistory.test.tsx \
+    src/ModelSettings.test.tsx src/OnboardingModelStep.test.tsx src/R6Settings.test.tsx \
+    src/HubConsole.test.tsx src/HubQuestion.test.tsx src/hub-api.test.ts
 
 FROM source AS python-build
 RUN python -m pip install --no-cache-dir uv==0.12.5
@@ -52,6 +54,7 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     ONE_MEMORY_WEB_DIR=/opt/cmh/web XDG_CACHE_HOME=/data/cache \
     HF_HOME=/data/cache/huggingface HF_HUB_DISABLE_TELEMETRY=1 ANONYMIZED_TELEMETRY=False
 ARG CMH_REVISION=development
+ENV CMH_REVISION=$CMH_REVISION
 LABEL org.opencontainers.image.title="Cloud Memory Hub" \
     org.opencontainers.image.revision=$CMH_REVISION
 USER 1000:1000

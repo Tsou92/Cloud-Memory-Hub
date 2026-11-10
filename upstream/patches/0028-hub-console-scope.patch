@@ -1,0 +1,2549 @@
+diff --git a/memhub/apps/web/src/R6Settings.test.tsx b/memhub/apps/web/src/R6Settings.test.tsx
+index 77eec8e..be2422a 100644
+--- a/memhub/apps/web/src/R6Settings.test.tsx
++++ b/memhub/apps/web/src/R6Settings.test.tsx
+@@ -82,6 +82,24 @@
+   expect(screen.queryByRole("button", { name: "帮助与诊断" })).toBeNull();
+ });
+ 
++it("shows NAS build metadata without desktop-only controls in Hub mode", async () => {
++  render(
++    <R6Settings
++      onDiagnostics={vi.fn()}
++      hub={{ version: "0.1.0", revision: null }}
++    />,
++  );
++  expect(screen.queryByRole("button", { name: "连接其他应用" })).toBeNull();
++  await userEvent.click(screen.getByRole("button", { name: "帮助与诊断" }));
++  expect(screen.getByText("0.1.0")).toBeTruthy();
++  expect(screen.getByText("服务未提供构建编号")).toBeTruthy();
++  expect(
++    screen.queryByRole("switch", { name: "登录后启动后台服务" }),
++  ).toBeNull();
++  expect(screen.queryByRole("button", { name: "导出日志" })).toBeNull();
++  expect(screen.queryByText("development")).toBeNull();
++});
++
+ it("stops model sedimentation on one switch flip without touching the model config", async () => {
+   const user = userEvent.setup();
+   vi.mocked(setSedimentation).mockResolvedValue({
+diff --git a/memhub/apps/web/src/R6Settings.tsx b/memhub/apps/web/src/R6Settings.tsx
+index 3c33e51..9f77290 100644
+--- a/memhub/apps/web/src/R6Settings.tsx
++++ b/memhub/apps/web/src/R6Settings.tsx
+@@ -48,16 +48,20 @@
+   active = true,
+   onDiagnostics: _onDiagnostics,
+   showDiagnostics = import.meta.env.VITE_ENABLE_DIAGNOSTICS !== "false",
++  hub,
+ }: {
+   onDiagnostics(): void;
+   active?: boolean;
+   /** Shown by default; a release build may still opt out with VITE_ENABLE_DIAGNOSTICS=false. */
+   showDiagnostics?: boolean;
++  hub?: { version: string | null; revision: string | null };
+ }) {
+   const id = useId();
+-  const groups = showDiagnostics
+-    ? [...primaryGroups, "help" as const]
+-    : primaryGroups;
++  const groups: Group[] = hub
++    ? ["model", "help"]
++    : showDiagnostics
++      ? [...primaryGroups, "help" as const]
++      : primaryGroups;
+   const [group, setGroup] = useState<Group>("model");
+   const [profiles, setProfiles] = useState<ModelProfile[] | null>(null);
+   const [modelError, setModelError] = useState(false);
+@@ -180,9 +184,9 @@
+   }, []);
+ 
+   useEffect(() => {
+-    if (!active) return;
++    if (!active || hub) return;
+     void readData();
+-  }, [active, readData]);
++  }, [active, readData, hub]);
+ 
+   async function changeLogin(enabled: boolean) {
+     if (!window.oneMemory?.setLoginPreference) {
+@@ -339,7 +343,9 @@
+                   <div>
+                     <h3>用模型沉淀记忆</h3>
+                     <p>
+-                      开启后，导入和同步到本机的会话会交给当前模型整理成记忆，会产生模型调用。
++                      {hub
++                        ? "开启后，同步到 NAS 的会话会交给当前模型整理成记忆，会产生模型调用。"
++                        : "开启后，导入和同步到本机的会话会交给当前模型整理成记忆，会产生模型调用。"}
+                       停止后不再调用模型、不再整理记忆，但会话仍会照常导入和保存；已排队的内容会留着，重新开启后继续。
+                       模型配置始终保留，重新开启不需要重新填写。
+                     </p>
+@@ -382,16 +388,18 @@
+               />
+             </section>
+           </section>
+-          <section
+-            id={`${id}-panel-connections`}
+-            aria-labelledby={`${id}-nav-connections`}
+-            hidden={group !== "connections"}
+-            className="r6-settings-connections"
+-          >
+-            <h2>连接其他应用</h2>
+-            <ConnectionFallback />
+-          </section>
+-          {showDiagnostics && (
++          {!hub && (
++            <section
++              id={`${id}-panel-connections`}
++              aria-labelledby={`${id}-nav-connections`}
++              hidden={group !== "connections"}
++              className="r6-settings-connections"
++            >
++              <h2>连接其他应用</h2>
++              <ConnectionFallback />
++            </section>
++          )}
++          {(showDiagnostics || hub) && (
+             <section
+               id={`${id}-panel-help`}
+               aria-labelledby={`${id}-nav-help`}
+@@ -399,63 +407,90 @@
+               className="r6-settings-help"
+             >
+               <h2>帮助与诊断</h2>
+-              <div className="r6-setting-row">
+-                <div>
+-                  <h3>登录后启动后台服务</h3>
+-                  <p>无需打开界面，持续同步、整理和提供记忆。</p>
+-                </div>
+-                <R6Switch
+-                  label="登录后启动后台服务"
+-                  checked={login?.enabled === true}
+-                  disabled={
+-                    !dataReady ||
+-                    loginPending ||
+-                    loginReadFailed ||
+-                    login?.supported !== true
+-                  }
+-                  onCheckedChange={(enabled) => void changeLogin(enabled)}
+-                />
+-              </div>
+-              {(dataError || readError) && (
+-                <p role="alert" className="r6-settings-error">
+-                  {dataError || readError}
+-                </p>
++              {!hub && (
++                <>
++                  <div className="r6-setting-row">
++                    <div>
++                      <h3>登录后启动后台服务</h3>
++                      <p>无需打开界面，持续同步、整理和提供记忆。</p>
++                    </div>
++                    <R6Switch
++                      label="登录后启动后台服务"
++                      checked={login?.enabled === true}
++                      disabled={
++                        !dataReady ||
++                        loginPending ||
++                        loginReadFailed ||
++                        login?.supported !== true
++                      }
++                      onCheckedChange={(enabled) => void changeLogin(enabled)}
++                    />
++                  </div>
++                  {(dataError || readError) && (
++                    <p role="alert" className="r6-settings-error">
++                      {dataError || readError}
++                    </p>
++                  )}
++                  <div className="r6-setting-row">
++                    <div>
++                      <h3>导出日志</h3>
++                      <p>
++                        {exportMessage ||
++                          "把本机运行日志打包成一个文件，发给开发排查。"}
++                      </p>
++                    </div>
++                    <R6Button
++                      variant="quiet"
++                      pending={exportingLogs}
++                      onClick={() => void handleExportLogs()}
++                    >
++                      <Download size={16} aria-hidden="true" />
++                      导出日志
++                    </R6Button>
++                  </div>
++                </>
+               )}
+-              <div className="r6-setting-row">
+-                <div>
+-                  <h3>导出日志</h3>
+-                  <p>
+-                    {exportMessage ||
+-                      "把本机运行日志打包成一个文件，发给开发排查。"}
+-                  </p>
++              {hub && (
++                <div className="r6-setting-row">
++                  <div>
++                    <h3>Cloud Memory Hub</h3>
++                    <p>
++                      记忆保存在 NAS。设备连接请按安装文档配置 MCP 或
++                      Skill，已打开的 Agent 需要重连或新会话。
++                    </p>
++                  </div>
+                 </div>
+-                <R6Button
+-                  variant="quiet"
+-                  pending={exportingLogs}
+-                  onClick={() => void handleExportLogs()}
+-                >
+-                  <Download size={16} aria-hidden="true" />
+-                  导出日志
+-                </R6Button>
+-              </div>
++              )}
+               <div className="r6-setting-row r6-settings-about">
+                 <div>
+                   <h3>关于</h3>
+                   <dl>
+                     <div>
+                       <dt>版本</dt>
+-                      <dd>{buildInfo.version}</dd>
+-                    </div>
+-                    <div>
+-                      <dt>Build</dt>
+-                      <dd>{buildInfo.buildNumber}</dd>
++                      <dd>
++                        {hub
++                          ? (hub.version ?? "服务未提供版本")
++                          : buildInfo.version}
++                      </dd>
+                     </div>
++                    {!hub && (
++                      <div>
++                        <dt>Build</dt>
++                        <dd>{buildInfo.buildNumber}</dd>
++                      </div>
++                    )}
+                     <div>
+                       <dt>Commit</dt>
+-                      <dd title={buildInfo.commit}>
+-                        {buildInfo.commit === "unknown"
+-                          ? "unknown"
+-                          : buildInfo.commit.slice(0, 12)}
++                      <dd
++                        title={
++                          hub ? (hub.revision ?? undefined) : buildInfo.commit
++                        }
++                      >
++                        {hub
++                          ? (hub.revision?.slice(0, 12) ?? "服务未提供构建编号")
++                          : buildInfo.commit === "unknown"
++                            ? "unknown"
++                            : buildInfo.commit.slice(0, 12)}
+                       </dd>
+                     </div>
+                   </dl>
+diff --git a/memhub/apps/web/src/SdkMemoryLibrary.tsx b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+index 1cc5648..60d89a3 100644
+--- a/memhub/apps/web/src/SdkMemoryLibrary.tsx
++++ b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+@@ -1,5 +1,5 @@
+ import type { SdkMemoryRecord, SdkMemoryStatus } from "@one-memory/contracts";
+-import { useCallback, useEffect, useState } from "react";
++import { useCallback, useEffect, useRef, useState } from "react";
+ import {
+   deleteSdkMemory,
+   getSdkMemory,
+@@ -8,70 +8,129 @@
+ } from "./api";
+ import { R6Button } from "./R6Controls";
+ 
++export type LibraryMemory = Pick<
++  SdkMemoryRecord,
++  "memory_id" | "content" | "layer" | "status"
++> & {
++  next_content_offset?: number | null;
++};
++export interface MemoryLibraryReader {
++  list(
++    offset: number,
++  ): Promise<{ memories: LibraryMemory[]; next_offset: number | null }>;
++  get(
++    id: string,
++    offset?: number,
++    signal?: AbortSignal,
++  ): Promise<LibraryMemory>;
++  errorMessage?(reason: unknown): string;
++}
++
+ export function SdkMemoryLibrary({
+   active,
+   onChanged,
+   focusedMemoryId,
++  reader,
++  detailOnly = false,
+ }: {
+   active: boolean;
+   onChanged?(): void;
+   focusedMemoryId?: string | null;
++  /** Scope-bound, read-only Hub adapter. The owner remounts on project changes. */
++  reader?: MemoryLibraryReader;
++  detailOnly?: boolean;
+ }) {
+   const [status, setStatus] = useState<SdkMemoryStatus>("active");
+   const [offset, setOffset] = useState(0);
+-  const [rows, setRows] = useState<SdkMemoryRecord[]>([]);
+-  const [total, setTotal] = useState(0);
+-  const [selected, setSelected] = useState<SdkMemoryRecord | null>(null);
++  const [rows, setRows] = useState<LibraryMemory[]>([]);
++  const [total, setTotal] = useState<number | null>(null);
++  const [nextOffset, setNextOffset] = useState<number | null>(null);
++  const [selected, setSelected] = useState<LibraryMemory | null>(null);
+   const [draft, setDraft] = useState("");
+   const [busy, setBusy] = useState(false);
+   const [error, setError] = useState("");
+-  const limit = 100;
++  const limit = reader ? 10 : 100;
++  const alive = useRef(true);
++  const request = useRef(0);
++  const detailRequest = useRef<AbortController | null>(null);
++  useEffect(() => {
++    alive.current = true;
++    return () => {
++      alive.current = false;
++      request.current++;
++      detailRequest.current?.abort();
++    };
++  }, []);
+ 
+   const refresh = useCallback(async () => {
+-    if (!active) return;
++    if (!active || detailOnly) return;
++    const ticket = ++request.current;
+     setBusy(true);
+     setError("");
++    setRows([]);
++    setTotal(null);
++    if (reader) setSelected(null);
+     try {
++      if (reader) {
++        const page = await reader.list(offset);
++        if (!alive.current || ticket !== request.current) return;
++        setRows(page.memories);
++        setNextOffset(page.next_offset);
++        return;
++      }
+       const page = await getSdkMemoryLibrary({
+         statuses: [status],
+         offset,
+         limit,
+       });
++      if (!alive.current || ticket !== request.current) return;
+       setRows(page.memories);
+       setTotal(page.total);
+       if (offset >= page.total && offset > 0)
+         setOffset(Math.max(0, offset - limit));
+-    } catch {
+-      setError("记忆库读取失败，请重试。");
++    } catch (reason) {
++      if (alive.current && ticket === request.current)
++        setError(reader?.errorMessage?.(reason) ?? "记忆库读取失败，请重试。");
+     } finally {
+-      setBusy(false);
++      if (alive.current && ticket === request.current) setBusy(false);
+     }
+-  }, [active, offset, status]);
++  }, [active, offset, status, reader, limit, detailOnly]);
+ 
+   useEffect(() => {
+     void refresh();
+   }, [refresh]);
+ 
+-  const open = useCallback(async (memoryId: string) => {
+-    setBusy(true);
+-    setError("");
+-    try {
+-      const memory = await getSdkMemory(memoryId);
+-      setSelected(memory);
+-      setDraft(memory.content);
+-    } catch {
+-      setError("记忆详情读取失败。");
+-    } finally {
+-      setBusy(false);
+-    }
+-  }, []);
++  const open = useCallback(
++    async (memoryId: string) => {
++      detailRequest.current?.abort();
++      const controller = new AbortController();
++      detailRequest.current = controller;
++      setBusy(true);
++      setError("");
++      if (reader) setSelected(null);
++      try {
++        const memory = await (reader
++          ? reader.get(memoryId, 0, controller.signal)
++          : getSdkMemory(memoryId));
++        if (!alive.current || controller.signal.aborted) return;
++        setSelected(memory);
++        setDraft(memory.content);
++      } catch (reason) {
++        if (alive.current && !controller.signal.aborted)
++          setError(reader?.errorMessage?.(reason) ?? "记忆详情读取失败。");
++      } finally {
++        if (alive.current && !controller.signal.aborted) setBusy(false);
++      }
++    },
++    [reader],
++  );
+ 
+   useEffect(() => {
+     if (active && focusedMemoryId) void open(focusedMemoryId);
+   }, [active, focusedMemoryId, open]);
+ 
+   async function save() {
+-    if (!selected || !draft.trim()) return;
++    if (reader || !selected || !draft.trim()) return;
+     setBusy(true);
+     setError("");
+     try {
+@@ -87,7 +146,7 @@
+   }
+ 
+   async function remove() {
+-    if (!selected) return;
++    if (reader || !selected) return;
+     setBusy(true);
+     setError("");
+     try {
+@@ -102,62 +161,129 @@
+     }
+   }
+ 
++  async function more() {
++    if (!reader || !selected || selected.next_content_offset == null) return;
++    detailRequest.current?.abort();
++    const controller = new AbortController();
++    detailRequest.current = controller;
++    setBusy(true);
++    setError("");
++    try {
++      const next = await reader.get(
++        selected.memory_id,
++        selected.next_content_offset,
++        controller.signal,
++      );
++      if (alive.current && !controller.signal.aborted)
++        setSelected({ ...next, content: selected.content + next.content });
++    } catch {
++      if (alive.current && !controller.signal.aborted)
++        setError("后续内容读取失败，请重试。");
++    } finally {
++      if (alive.current && !controller.signal.aborted) setBusy(false);
++    }
++  }
++
+   return (
+     <section className="sdk-memory-library" aria-label="SDK 记忆库">
+-      <nav aria-label="记忆状态">
+-        {(
+-          [
+-            ["active", "已可用"],
+-            ["superseded", "已被取代"],
+-          ] as const
+-        ).map(([value, label]) => (
+-          <button
+-            key={value}
+-            type="button"
+-            aria-current={status === value ? "page" : undefined}
+-            disabled={busy}
+-            onClick={() => {
+-              setStatus(value);
+-              setOffset(0);
+-              setSelected(null);
+-            }}
+-          >
+-            {label}
+-          </button>
+-        ))}
+-      </nav>
+-      <p aria-live="polite">共 {total} 条</p>
+-      {error && <p role="alert">{error}</p>}
+-      {busy && !rows.length ? <p role="status">正在读取记忆库…</p> : null}
+-      <ul>
+-        {rows.map((memory) => (
+-          <li key={memory.memory_id}>
+-            <button type="button" onClick={() => void open(memory.memory_id)}>
+-              {memory.content}
++      {!reader && !detailOnly && (
++        <nav aria-label="记忆状态">
++          {(
++            [
++              ["active", "已可用"],
++              ["superseded", "已被取代"],
++            ] as const
++          ).map(([value, label]) => (
++            <button
++              key={value}
++              type="button"
++              aria-current={status === value ? "page" : undefined}
++              disabled={busy}
++              onClick={() => {
++                setStatus(value);
++                setOffset(0);
++                setSelected(null);
++              }}
++            >
++              {label}
+             </button>
+-          </li>
+-        ))}
+-      </ul>
+-      <nav aria-label="SDK 记忆库分页">
+-        <R6Button
+-          variant="quiet"
+-          disabled={busy || offset === 0}
+-          onClick={() => setOffset(Math.max(0, offset - limit))}
+-        >
+-          上一页
+-        </R6Button>
++          ))}
++        </nav>
++      )}
++      {reader && (
++        <p>
++          当前项目的可用记忆。修改和删除尚未接入此网页，请使用已授权的管理流程。
++        </p>
++      )}
++      {!detailOnly && !busy && !error && (
++        <p aria-live="polite">
++          {reader
++            ? `本页 ${rows.length} 条`
++            : total === null
++              ? ""
++              : `共 ${total} 条`}
++        </p>
++      )}
++      {error && <p role="alert">{error}</p>}
++      {error && (
+         <R6Button
+-          variant="quiet"
+-          disabled={busy || offset + limit >= total}
+-          onClick={() => setOffset(offset + limit)}
++          onClick={() => {
++            if (detailOnly && focusedMemoryId) void open(focusedMemoryId);
++            else void refresh();
++          }}
+         >
+-          下一页
++          重试
+         </R6Button>
+-      </nav>
++      )}
++      {busy && !rows.length ? (
++        <p role="status">
++          {detailOnly ? "正在读取引用详情…" : "正在读取记忆库…"}
++        </p>
++      ) : null}
++      {!detailOnly && (
++        <>
++          <ul>
++            {rows.map((memory) => (
++              <li key={memory.memory_id}>
++                <button
++                  type="button"
++                  onClick={() => void open(memory.memory_id)}
++                >
++                  {memory.content}
++                </button>
++              </li>
++            ))}
++          </ul>
++          <nav aria-label="SDK 记忆库分页">
++            <R6Button
++              variant="quiet"
++              disabled={busy || offset === 0}
++              onClick={() => setOffset(Math.max(0, offset - limit))}
++            >
++              上一页
++            </R6Button>
++            <R6Button
++              variant="quiet"
++              disabled={
++                busy ||
++                !!error ||
++                (reader
++                  ? nextOffset === null
++                  : total === null || offset + limit >= total)
++              }
++              onClick={() =>
++                setOffset(reader ? (nextOffset ?? offset) : offset + limit)
++              }
++            >
++              下一页
++            </R6Button>
++          </nav>
++        </>
++      )}
+       {selected ? (
+         <aside aria-label="SDK 记忆详情">
+           <p>{selected.layer}</p>
+-          {selected.status === "active" ? (
++          {!reader && selected.status === "active" ? (
+             <>
+               <textarea
+                 aria-label="记忆内容"
+@@ -180,6 +306,11 @@
+           ) : (
+             <p>{selected.content}</p>
+           )}
++          {reader && selected.next_content_offset != null && (
++            <R6Button disabled={busy} onClick={() => void more()}>
++              继续读取
++            </R6Button>
++          )}
+         </aside>
+       ) : null}
+     </section>
+diff --git a/memhub/apps/web/src/SdkRawHistory.tsx b/memhub/apps/web/src/SdkRawHistory.tsx
+index 5942c2d..21e7cce 100644
+--- a/memhub/apps/web/src/SdkRawHistory.tsx
++++ b/memhub/apps/web/src/SdkRawHistory.tsx
+@@ -1,32 +1,69 @@
+ import type { SdkRawContextItem, SdkRawRecord } from "@one-memory/contracts";
+-import { type FormEvent, useEffect, useState } from "react";
++import { type FormEvent, useEffect, useRef, useState } from "react";
+ import { getSdkRaw, searchSdkRaw } from "./api";
+ 
+-export function SdkRawHistory() {
+-  const [recent, setRecent] = useState<SdkRawRecord[]>([]);
++export type HistoryRecord = Pick<
++  SdkRawRecord,
++  "raw_id" | "content" | "source" | "session_id" | "memory_at"
++> & {
++  next_content_offset?: number | null;
++};
++export interface RawHistoryReader {
++  list(
++    offset: number,
++  ): Promise<{ items: HistoryRecord[]; next_offset: number | null }>;
++  get(id: string, offset: number): Promise<HistoryRecord>;
++  errorMessage?(reason: unknown): string;
++}
++export function SdkRawHistory({ reader }: { reader?: RawHistoryReader } = {}) {
++  const [recent, setRecent] = useState<HistoryRecord[]>([]);
+   const [results, setResults] = useState<SdkRawContextItem[] | null>(null);
+   const [query, setQuery] = useState("");
+   const [error, setError] = useState("");
+   const [busy, setBusy] = useState(false);
++  const [offset, setOffset] = useState(0);
++  const [nextOffset, setNextOffset] = useState<number | null>(null);
++  const [revision, setRevision] = useState(0);
++  const alive = useRef(true);
++  useEffect(() => {
++    alive.current = true;
++    return () => {
++      alive.current = false;
++    };
++  }, []);
+ 
+   useEffect(() => {
+     let current = true;
+-    void getSdkRaw({ limit: 100 }).then(
+-      (page) => {
+-        if (current) setRecent(page.items);
+-      },
+-      () => {
+-        if (current) setError("原始对话暂时无法读取。");
+-      },
+-    );
++    void revision; // Explicit refresh retries the current page.
++    setBusy(true);
++    setError("");
++    setRecent([]);
++    void (reader ? reader.list(offset) : getSdkRaw({ limit: 100 }))
++      .then(
++        (page) => {
++          if (current) {
++            setRecent(page.items);
++            setNextOffset("next_offset" in page ? page.next_offset : null);
++          }
++        },
++        (reason) => {
++          if (current)
++            setError(
++              reader?.errorMessage?.(reason) ?? "原始对话暂时无法读取。",
++            );
++        },
++      )
++      .finally(() => {
++        if (current) setBusy(false);
++      });
+     return () => {
+       current = false;
+     };
+-  }, []);
++  }, [reader, offset, revision]);
+ 
+   async function submit(event: FormEvent) {
+     event.preventDefault();
+-    if (!query.trim()) return;
++    if (reader || !query.trim()) return;
+     setBusy(true);
+     setError("");
+     try {
+@@ -38,25 +75,61 @@
+     }
+   }
+ 
++  async function more(item: HistoryRecord) {
++    if (!reader || item.next_content_offset == null) return;
++    setBusy(true);
++    setError("");
++    try {
++      const next = await reader.get(item.raw_id, item.next_content_offset);
++      if (alive.current)
++        setRecent((rows) =>
++          rows.map((row) =>
++            row.raw_id === item.raw_id
++              ? { ...next, content: row.content + next.content }
++              : row,
++          ),
++        );
++    } catch {
++      if (alive.current) setError("后续原文读取失败，请重试。");
++    } finally {
++      if (alive.current) setBusy(false);
++    }
++  }
++
+   const items = results ?? recent.map(asContextItem);
+   return (
+     <section aria-label="SDK 原始对话">
+-      <form onSubmit={(event) => void submit(event)}>
+-        <label>
+-          搜索原始对话
+-          <input
+-            value={query}
+-            onChange={(event) => setQuery(event.target.value)}
+-          />
+-        </label>
+-        <button type="submit" disabled={busy || !query.trim()}>
+-          {busy ? "搜索中…" : "搜索"}
+-        </button>
+-      </form>
++      {!reader && (
++        <form onSubmit={(event) => void submit(event)}>
++          <label>
++            搜索原始对话
++            <input
++              value={query}
++              onChange={(event) => setQuery(event.target.value)}
++            />
++          </label>
++          <button type="submit" disabled={busy || !query.trim()}>
++            {busy ? "搜索中…" : "搜索"}
++          </button>
++        </form>
++      )}
++      {reader && <p>当前项目中可浏览的历史原文；本页暂不提供历史全文搜索。</p>}
+       {error ? <p role="alert">{error}</p> : null}
+-      <p aria-live="polite">
+-        {results === null ? "最近原始对话" : `找到 ${items.length} 条`}
+-      </p>
++      {error && (
++        <button type="button" onClick={() => setRevision((v) => v + 1)}>
++          重试
++        </button>
++      )}
++      {busy && <p role="status">正在读取历史原文…</p>}
++      {!busy && !error && (
++        <p aria-live="polite">
++          {reader
++            ? `本页 ${items.length} 条`
++            : results === null
++              ? "最近原始对话"
++              : `找到 ${items.length} 条`}
++        </p>
++      )}
+       <ol>
+         {items.map((item) => (
+           <li key={item.raw_id}>
+@@ -67,14 +140,48 @@
+                 ? ` · ${new Date(item.memory_at).toLocaleString("zh-CN")}`
+                 : ""}
+             </small>
++            {reader &&
++              recent.find((row) => row.raw_id === item.raw_id)
++                ?.next_content_offset != null && (
++                <button
++                  type="button"
++                  disabled={busy}
++                  onClick={() => {
++                    const row = recent.find(
++                      (row) => row.raw_id === item.raw_id,
++                    );
++                    if (row) void more(row);
++                  }}
++                >
++                  继续读取原文
++                </button>
++              )}
+           </li>
+         ))}
+       </ol>
++      {reader && (
++        <nav aria-label="历史原文分页">
++          <button
++            type="button"
++            disabled={busy || offset === 0}
++            onClick={() => setOffset(Math.max(0, offset - 10))}
++          >
++            上一页
++          </button>
++          <button
++            type="button"
++            disabled={busy || !!error || nextOffset === null}
++            onClick={() => setOffset(nextOffset ?? offset)}
++          >
++            下一页
++          </button>
++        </nav>
++      )}
+     </section>
+   );
+ }
+ 
+-function asContextItem(item: SdkRawRecord): SdkRawContextItem {
++function asContextItem(item: HistoryRecord): SdkRawContextItem {
+   return {
+     kind: "raw",
+     raw_id: item.raw_id,
+diff --git a/memhub/apps/web/src/main.tsx b/memhub/apps/web/src/main.tsx
+index 9ddb540..aa93536 100644
+--- a/memhub/apps/web/src/main.tsx
++++ b/memhub/apps/web/src/main.tsx
+@@ -2,6 +2,7 @@
+ import { createRoot } from "react-dom/client";
+ 
+ import { App } from "./App";
++import { HubConsole } from "./HubConsole";
+ import { installNativeDisplayStyles } from "./native-display-styles";
+ import { installRendererDebugLogCapture } from "./renderer-debug-log";
+ import "./native-display-styles.css";
+@@ -20,6 +21,6 @@
+ 
+ createRoot(root).render(
+   <StrictMode>
+-    <App />
++    {import.meta.env.VITE_CMH_CONSOLE === "true" ? <HubConsole /> : <App />}
+   </StrictMode>,
+ );
+diff --git a/memhub/apps/web/src/HubContext.tsx b/memhub/apps/web/src/HubContext.tsx
+new file mode 100644
+index 0000000..f8a5976
+--- /dev/null
++++ b/memhub/apps/web/src/HubContext.tsx
+@@ -0,0 +1,117 @@
++import {
++  createContext,
++  type ReactNode,
++  useContext,
++  useEffect,
++  useRef,
++  useState,
++} from "react";
++import {
++  getHubBootstrap,
++  type HubBootstrap,
++  type HubProject,
++  hubErrorMessage,
++} from "./hub-api";
++
++interface HubState {
++  bootstrap: HubBootstrap;
++  project: HubProject | null;
++  select(scope: string): void;
++  moreProjects(): void;
++  refresh(): void;
++  loading: boolean;
++  error: string;
++}
++const Context = createContext<HubState | null>(null);
++export function useHub() {
++  const value = useContext(Context);
++  if (!value) throw new Error("hub_context_required");
++  return value;
++}
++export function HubProvider({ children }: { children: ReactNode }) {
++  const [bootstrap, setBootstrap] = useState<HubBootstrap | null>(null);
++  const [scope, setScope] = useState("");
++  const [offset, setOffset] = useState(0);
++  const [revision, setRevision] = useState(0);
++  const [loading, setLoading] = useState(true);
++  const [error, setError] = useState("");
++  const instance = useRef<string | null>(null);
++  useEffect(() => {
++    void revision; // Explicit refresh retries an unchanged endpoint.
++    const controller = new AbortController();
++    setLoading(true);
++    setError("");
++    void getHubBootstrap(offset, controller.signal)
++      .then(
++        (next) => {
++          if (controller.signal.aborted) return;
++          if (offset > 0 && instance.current !== next.instance_id) {
++            setScope("");
++            setBootstrap(null);
++            setError("服务实例已改变，请刷新项目列表后重新选择。");
++            return;
++          }
++          instance.current = next.instance_id;
++          setBootstrap((previous) => {
++            if (offset === 0 || !previous) return next;
++            const projects = new Map(
++              previous.projects.map((row) => [row.scope_id, row]),
++            );
++            for (const row of next.projects) projects.set(row.scope_id, row);
++            return { ...next, projects: [...projects.values()] };
++          });
++        },
++        (reason) => {
++          if (!controller.signal.aborted) setError(hubErrorMessage(reason));
++        },
++      )
++      .finally(() => {
++        if (!controller.signal.aborted) setLoading(false);
++      });
++    return () => controller.abort();
++  }, [offset, revision]);
++  const refresh = () => {
++    setScope("");
++    setBootstrap(null);
++    setOffset(0);
++    setRevision((v) => v + 1);
++  };
++  if (!bootstrap)
++    return (
++      <main className="hub-start" aria-label="Cloud Memory Hub">
++        <h1>Cloud Memory Hub</h1>
++        {error ? (
++          <>
++            <p role="alert">{error}</p>
++            <button type="button" onClick={refresh}>
++              重试连接
++            </button>
++            <a href="/hub/login">重新登录</a>
++          </>
++        ) : (
++          <p role="status">正在连接 NAS 记忆服务…</p>
++        )}
++      </main>
++    );
++  const project =
++    [...bootstrap.projects, bootstrap.global_scope].find(
++      (row) => row.scope_id === scope,
++    ) ?? null;
++  return (
++    <Context.Provider
++      value={{
++        bootstrap,
++        project,
++        error,
++        loading,
++        refresh,
++        select: setScope,
++        moreProjects: () => {
++          if (bootstrap.next_offset !== null) setOffset(bootstrap.next_offset);
++        },
++      }}
++    >
++      {children}
++    </Context.Provider>
++  );
++}
+diff --git a/memhub/apps/web/src/HubConsole.tsx b/memhub/apps/web/src/HubConsole.tsx
+new file mode 100644
+index 0000000..14dd8b3
+--- /dev/null
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -0,0 +1,375 @@
++import { useEffect, useMemo, useState } from "react";
++import { HubProvider, useHub } from "./HubContext";
++import { HubQuestion } from "./HubQuestion";
++import {
++  getHubSummary,
++  type HubItem,
++  type HubPage,
++  type HubProject,
++  type HubSummary,
++  hubErrorMessage,
++  readHub,
++} from "./hub-api";
++import { R6Button } from "./R6Controls";
++import { R6Settings } from "./R6Settings";
++import { type MemoryLibraryReader, SdkMemoryLibrary } from "./SdkMemoryLibrary";
++import { type RawHistoryReader, SdkRawHistory } from "./SdkRawHistory";
++import "./hub-console.css";
++
++type View = "home" | "library" | "history" | "ask" | "settings";
++const views: [View, string][] = [
++  ["home", "首页与设备"],
++  ["library", "记忆库"],
++  ["history", "历史原文"],
++  ["ask", "问记忆"],
++  ["settings", "模型与帮助"],
++];
++const memory = (item: HubItem) => ({
++  memory_id: item.record_id,
++  content: item.content,
++  layer: item.layer ?? "",
++  status: "active" as const,
++  next_content_offset: item.next_content_offset,
++});
++const history = (item: HubItem) => ({
++  raw_id: item.record_id,
++  content: item.content,
++  source: item.source ?? "",
++  session_id: item.session_id ?? "",
++  memory_at: item.memory_at,
++  next_content_offset: item.next_content_offset,
++});
++
++export function HubConsole() {
++  return (
++    <HubProvider>
++      <Console />
++    </HubProvider>
++  );
++}
++function Console() {
++  const { bootstrap, project, select, moreProjects, refresh, loading, error } =
++    useHub();
++  const [view, setView] = useState<View>("home");
++  useEffect(() => {
++    document.title = "Cloud Memory Hub";
++  }, []);
++  return (
++    <div className="hub-console">
++      <a className="skip-link" href="#main-content">
++        跳到主要内容
++      </a>
++      <header className="hub-header">
++        <div>
++          <strong>Cloud Memory Hub</strong>
++          <p>NAS 上的共享记忆</p>
++        </div>
++        <a
++          href="/api/v1/ui/session/logout"
++          onClick={(event) => {
++            event.preventDefault();
++            void fetch("/api/v1/ui/session/logout", {
++              method: "POST",
++              credentials: "same-origin",
++            }).then((response) => {
++              if (response.ok) window.location.assign("/hub/login");
++            });
++          }}
++        >
++          退出登录
++        </a>
++      </header>
++      <div className="hub-project-select">
++        <label>
++          当前项目{" "}
++          <select
++            aria-label="当前项目"
++            value={project?.scope_id ?? ""}
++            onChange={(event) => select(event.target.value)}
++          >
++            <option value="">请选择一个项目</option>
++            {bootstrap.projects.map((row) => (
++              <option key={row.scope_id} value={row.scope_id}>
++                {row.display_name}
++              </option>
++            ))}
++            <option value="global">全局偏好（独立范围）</option>
++          </select>
++        </label>
++        <R6Button variant="quiet" disabled={loading} onClick={refresh}>
++          刷新项目
++        </R6Button>
++        {bootstrap.next_offset !== null && (
++          <R6Button disabled={loading} onClick={moreProjects}>
++            更多项目
++          </R6Button>
++        )}
++        {error && <p role="alert">{error}</p>}
++      </div>
++      <nav className="hub-navigation" aria-label="主要导航">
++        {views.map(([id, label]) => (
++          <R6Button
++            key={id}
++            variant={view === id ? "primary" : "quiet"}
++            aria-current={view === id ? "page" : undefined}
++            onClick={() => setView(id)}
++          >
++            {label}
++          </R6Button>
++        ))}
++      </nav>
++      <main id="main-content" className="hub-content">
++        {view === "settings" ? (
++          <R6Settings
++            onDiagnostics={() => {}}
++            hub={{
++              version: bootstrap.version,
++              revision: bootstrap.build_revision,
++            }}
++          />
++        ) : project ? (
++          <ProjectContent
++            key={`${bootstrap.instance_id}:${project.scope_id}:${view}`}
++            view={view}
++            project={project}
++          />
++        ) : (
++          <section className="hub-card">
++            <h1>
++              {bootstrap.projects.length ? "选择要查看的项目" : "还没有项目"}
++            </h1>
++            <p>
++              {bootstrap.projects.length
++                ? "请选择一个项目，查看该项目的记忆、历史和设备。"
++                : "创建项目并配对设备后，共享内容会出现在这里。网页创建和配对向导尚未接通；请按安装文档完成配置。"}
++            </p>
++            <p>全局偏好是独立范围，不会混合显示各项目的内容。</p>
++          </section>
++        )}
++      </main>
++    </div>
++  );
++}
++function ProjectContent({
++  view,
++  project,
++}: {
++  view: Exclude<View, "settings">;
++  project: HubProject;
++}) {
++  const { bootstrap } = useHub();
++  const scope = project.scope_id;
++  const instance = bootstrap.instance_id;
++  const [citationId, setCitationId] = useState<string | null>(null);
++  const readers = useMemo(
++    () => ({
++      memory: {
++        errorMessage: hubErrorMessage,
++        async list(offset: number) {
++          const page = await readHub(instance, scope, "memory-list", {
++            limit: 10,
++            offset,
++          });
++          return {
++            memories: page.items.map(memory),
++            next_offset: page.next_offset,
++          };
++        },
++        async get(id: string, offset = 0, signal?: AbortSignal) {
++          const page = await readHub(
++            instance,
++            scope,
++            "memory-get",
++            {
++              record_id: id,
++              content_offset: offset,
++            },
++            signal,
++          );
++          return memory(page.items[0]);
++        },
++      } satisfies MemoryLibraryReader,
++      history: {
++        errorMessage: hubErrorMessage,
++        async list(offset: number) {
++          const page = await readHub(instance, scope, "history-list", {
++            limit: 10,
++            offset,
++          });
++          return {
++            items: page.items.map(history),
++            next_offset: page.next_offset,
++          };
++        },
++        async get(id: string, offset: number) {
++          const page = await readHub(instance, scope, "history-get", {
++            record_id: id,
++            content_offset: offset,
++          });
++          return history(page.items[0]);
++        },
++      } satisfies RawHistoryReader,
++    }),
++    [instance, scope],
++  );
++  return (
++    <>
++      <h1>{project.display_name}</h1>
++      {view === "home" && <HubHome project={project} />}
++      {view === "library" && (
++        <SdkMemoryLibrary active reader={readers.memory} />
++      )}
++      {view === "history" && <SdkRawHistory reader={readers.history} />}
++      {view === "ask" && (
++        <>
++          <HubQuestion
++            instance={instance}
++            scope={scope}
++            enabled={bootstrap.features.includes("scoped_console_ask")}
++            onOpenMemory={setCitationId}
++          />
++          {citationId && (
++            <section className="hub-card" aria-label="引用记忆详情">
++              <h2>引用记忆详情</h2>
++              <R6Button variant="quiet" onClick={() => setCitationId(null)}>
++                关闭引用详情
++              </R6Button>
++              <SdkMemoryLibrary
++                key={citationId}
++                active
++                detailOnly
++                reader={readers.memory}
++                focusedMemoryId={citationId}
++              />
++            </section>
++          )}
++        </>
++      )}
++    </>
++  );
++}
++function HubHome({ project }: { project: HubProject }) {
++  const { bootstrap } = useHub();
++  const [summary, setSummary] = useState<HubSummary | null>(null);
++  const [page, setPage] = useState<HubPage | null>(null);
++  const [error, setError] = useState("");
++  const [memoryError, setMemoryError] = useState("");
++  const [offset, setOffset] = useState(0);
++  const [revision, setRevision] = useState(0);
++  useEffect(() => {
++    void revision; // Explicit refresh reloads both project panels.
++    const controller = new AbortController();
++    setSummary(null);
++    setPage(null);
++    setError("");
++    setMemoryError("");
++    void getHubSummary(
++      bootstrap.instance_id,
++      project.scope_id,
++      offset,
++      controller.signal,
++    ).then(
++      (value) => {
++        if (!controller.signal.aborted) setSummary(value);
++      },
++      (reason) => {
++        if (!controller.signal.aborted) setError(hubErrorMessage(reason));
++      },
++    );
++    void readHub(
++      bootstrap.instance_id,
++      project.scope_id,
++      "memory-list",
++      { limit: 3, offset: 0 },
++      controller.signal,
++    ).then(
++      (value) => {
++        if (!controller.signal.aborted) setPage(value);
++      },
++      (reason) => {
++        if (!controller.signal.aborted) setMemoryError(hubErrorMessage(reason));
++      },
++    );
++    return () => controller.abort();
++  }, [bootstrap.instance_id, project, offset, revision]);
++  return (
++    <div className="hub-overview">
++      <section className="hub-card">
++        <h2>项目记忆</h2>
++        {memoryError ? (
++          <p role="alert">{memoryError}</p>
++        ) : page ? (
++          <>
++            <p>已加载 {page.items.length} 条记忆预览 · 总数尚未统计</p>
++            <ul>
++              {page.items.map((item) => (
++                <li key={item.record_id}>{item.content}</li>
++              ))}
++            </ul>
++            {!page.items.length && (
++              <p>
++                {page.next_offset !== null
++                  ? "本批内容已被过滤，请在记忆库继续翻页。"
++                  : "当前项目尚无可显示的记忆。"}
++              </p>
++            )}
++          </>
++        ) : (
++          <p role="status">正在读取记忆…</p>
++        )}
++      </section>
++      <section className="hub-card">
++        <h2>此项目的设备与来源</h2>
++        <p>这里只显示授权状态，不表示设备在线或本地队列已同步。</p>
++        {error ? (
++          <p role="alert">{error}</p>
++        ) : summary ? (
++          <>
++            <p>
++              本页 {summary.sources.length} 个来源 · 共 {summary.sources_total}{" "}
++              个
++            </p>
++            <ul>
++              {summary.sources.map((source) => (
++                <li key={source.source_id}>
++                  <strong>{source.device_display_name}</strong> ·{" "}
++                  {source.display_name} · {source.adapter_id}
++                  <span>
++                    {" "}
++                    ·{" "}
++                    {source.status === "active" &&
++                    source.device_status === "active"
++                      ? "已授权"
++                      : "已停用"}
++                  </span>
++                </li>
++              ))}
++            </ul>
++            {!summary.sources.length && (
++              <p>此项目还没有注册来源，请按安装文档配对设备。</p>
++            )}
++            <nav aria-label="设备来源分页">
++              <R6Button
++                disabled={offset === 0}
++                onClick={() => setOffset(Math.max(0, offset - 10))}
++              >
++                上一页
++              </R6Button>
++              <R6Button
++                disabled={summary.next_offset === null}
++                onClick={() => setOffset(summary.next_offset ?? offset)}
++              >
++                下一页
++              </R6Button>
++            </nav>
++          </>
++        ) : (
++          <p role="status">正在读取设备…</p>
++        )}
++      </section>
++      <R6Button variant="quiet" onClick={() => setRevision((v) => v + 1)}>
++        刷新当前项目
++      </R6Button>
++    </div>
++  );
++}
+diff --git a/memhub/apps/web/src/HubQuestion.tsx b/memhub/apps/web/src/HubQuestion.tsx
+new file mode 100644
+index 0000000..4bbbe05
+--- /dev/null
++++ b/memhub/apps/web/src/HubQuestion.tsx
+@@ -0,0 +1,185 @@
++import type { SdkAskMemoryResponse } from "@one-memory/contracts";
++import { type FormEvent, useEffect, useRef, useState } from "react";
++import { HubError, hubErrorMessage } from "./hub-api";
++import { R6Button } from "./R6Controls";
++
++/** Uses the existing recall/delta/final SSE contract, on the Hub-only route. */
++export async function askHub(
++  scope: string,
++  question: string,
++  signal: AbortSignal,
++): Promise<SdkAskMemoryResponse> {
++  const response = await fetch("/hub/v1/console/ask-stream", {
++    method: "POST",
++    credentials: "same-origin",
++    cache: "no-store",
++    signal,
++    headers: { "Content-Type": "application/json" },
++    body: JSON.stringify({ scope_id: scope, question }),
++  });
++  if (
++    !response.ok ||
++    !response.body ||
++    !response.headers.get("content-type")?.includes("text/event-stream")
++  ) {
++    throw new HubError(
++      response.status === 404
++        ? "网页问答尚未接通，请升级 Hub 后重试。"
++        : "问答请求未完成，请检查登录状态和模型设置后重试。",
++    );
++  }
++  const reader = response.body.getReader();
++  const decoder = new TextDecoder();
++  let buffer = "";
++  let answer: SdkAskMemoryResponse | null = null;
++  try {
++    while (true) {
++      const { done, value } = await reader.read();
++      buffer = (buffer + decoder.decode(value, { stream: !done })).replace(
++        /\r\n/g,
++        "\n",
++      );
++      if (buffer.length > 256_000)
++        throw new HubError("问答内容超过显示上限，请缩短问题后重试。");
++      const frames = buffer.split("\n\n");
++      buffer = frames.pop() ?? "";
++      for (const frame of frames) {
++        const data = frame
++          .split("\n")
++          .filter((line) => line.startsWith("data:"))
++          .map((line) => line.slice(5).trim())
++          .join("\n");
++        if (!data) continue;
++        const event = JSON.parse(data);
++        if (event.type === "error")
++          throw new HubError(
++            "问答未完成，请检查模型设置或稍后重试。已有记忆仍可在记忆库查看。",
++          );
++        if (event.type === "final") {
++          if (
++            answer ||
++            event.schema_version !== 2 ||
++            typeof event.answer !== "string" ||
++            !["empty", "extractive", "generated"].includes(event.mode) ||
++            !Array.isArray(event.memories) ||
++            !event.memories.every(
++              (item: Record<string, unknown>) =>
++                typeof item?.memory_id === "string" &&
++                typeof item?.content === "string",
++            )
++          ) {
++            throw new HubError("问答返回的数据无法确认，请重试。");
++          }
++          answer = event;
++        } else if (!["recall", "delta"].includes(event.type)) {
++          throw new HubError("问答返回的数据无法确认，请重试。");
++        }
++      }
++      if (done) break;
++    }
++    if (!answer || buffer.trim())
++      throw new HubError("问答连接提前结束，请重试。");
++    return answer;
++  } finally {
++    await reader.cancel();
++    reader.releaseLock();
++  }
++}
++
++export function HubQuestion({
++  scope,
++  enabled,
++  onOpenMemory,
++}: {
++  instance: string;
++  scope: string;
++  enabled: boolean;
++  onOpenMemory?(id: string | null): void;
++}) {
++  const [question, setQuestion] = useState("");
++  const [answer, setAnswer] = useState<SdkAskMemoryResponse | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [error, setError] = useState("");
++  const controller = useRef<AbortController | null>(null);
++  useEffect(() => () => controller.current?.abort(), []);
++  async function submit(event: FormEvent) {
++    event.preventDefault();
++    if (!enabled || busy || !question.trim()) return;
++    const next = new AbortController();
++    controller.current?.abort();
++    controller.current = next;
++    setAnswer(null);
++    onOpenMemory?.(null);
++    setError("");
++    setBusy(true);
++    try {
++      const result = await askHub(scope, question.trim(), next.signal);
++      if (!next.signal.aborted) setAnswer(result);
++    } catch (reason) {
++      if (!next.signal.aborted) setError(hubErrorMessage(reason));
++    } finally {
++      if (!next.signal.aborted) setBusy(false);
++    }
++  }
++  return (
++    <section className="hub-card">
++      <h2>问当前项目的记忆</h2>
++      <p>仅使用当前项目的可见记忆回答；提问会调用已配置的模型。</p>
++      {!enabled ? (
++        <p role="status">
++          当前服务尚未接通网页问答，可先在记忆库查看内容。升级后请刷新页面。
++        </p>
++      ) : (
++        <>
++          <form onSubmit={(event) => void submit(event)}>
++            <label>
++              你的问题
++              <textarea
++                aria-label="你的问题"
++                value={question}
++                maxLength={4096}
++                onChange={(event) => setQuestion(event.target.value)}
++              />
++            </label>
++            <R6Button
++              type="submit"
++              variant="primary"
++              pending={busy}
++              disabled={!question.trim()}
++            >
++              提问
++            </R6Button>
++          </form>
++          {busy && <p role="status">正在检索当前项目并生成回答…</p>}
++          {error && <p role="alert">{error}</p>}
++          {answer && (
++            <div className="hub-answer">
++              <p>{answer.answer}</p>
++              <h3>引用记忆</h3>
++              {answer.memories.length ? (
++                <ul>
++                  {answer.memories.map((item) => (
++                    <li key={item.memory_id}>
++                      {onOpenMemory ? (
++                        <button
++                          type="button"
++                          onClick={() => onOpenMemory(item.memory_id)}
++                        >
++                          {item.content}
++                        </button>
++                      ) : (
++                        item.content
++                      )}
++                    </li>
++                  ))}
++                </ul>
++              ) : (
++                <p>没有引用记忆。</p>
++              )}
++            </div>
++          )}
++        </>
++      )}
++    </section>
++  );
++}
+diff --git a/memhub/apps/web/src/hub-api.ts b/memhub/apps/web/src/hub-api.ts
+new file mode 100644
+index 0000000..c210fb6
+--- /dev/null
++++ b/memhub/apps/web/src/hub-api.ts
+@@ -0,0 +1,255 @@
++/** Administrator console transport. Never falls back to Core's local namespace. */
++export interface HubProject {
++  scope_id: string;
++  display_name: string;
++}
++export interface HubBootstrap {
++  schema_version: 1;
++  mode: "hub";
++  product: "Cloud Memory Hub";
++  instance_id: string;
++  version: string | null;
++  build_revision: string | null;
++  features: string[];
++  projects: HubProject[];
++  next_offset: number | null;
++  global_scope: HubProject;
++}
++export interface HubSource {
++  source_id: string;
++  device_id: string;
++  scope_id: string;
++  display_name: string;
++  adapter_id: string;
++  status: string;
++  device_display_name: string;
++  device_status: string;
++}
++export interface HubSummary {
++  scope: HubProject;
++  sources: HubSource[];
++  sources_total: number;
++  next_offset: number | null;
++  visible_memory_total: number | null;
++  visible_history_total: number | null;
++}
++export interface HubItem {
++  record_id: string;
++  kind: "memory" | "history";
++  content: string;
++  content_offset: number;
++  next_content_offset: number | null;
++  layer: string | null;
++  agent_id: string;
++  session_id: string | null;
++  source: string | null;
++  source_raw_ids: string[];
++  memory_at: number | null;
++}
++export type HubReadOperation =
++  | "memory-list"
++  | "memory-get"
++  | "memory-search"
++  | "history-list"
++  | "history-get";
++export interface HubPage {
++  items: HubItem[];
++  next_offset: number | null;
++  candidate_limit_reached: boolean;
++}
++
++export class HubError extends Error {}
++const errors: Record<string, string> = {
++  administrator_required: "登录已失效，请重新登录管理网页。",
++  authentication_required: "登录已失效，请重新登录管理网页。",
++  console_scope_not_found: "这个项目已不存在，请刷新项目列表后重新选择。",
++  record_not_found: "这条内容已不可读取，请刷新当前项目。",
++  read_busy: "记忆服务正在处理其他请求，请稍后重试。",
++  read_unavailable: "记忆服务暂时不可用，请稍后重试。",
++  query_requires_refiltering: "问题中含有需要保护的内容，请移除凭证后重试。",
++  memory_answer_provider_unsupported:
++    "当前模型尚不支持网页问答，请检查模型配置。",
++  memory_answer_model_unavailable: "无法连接问答模型，请检查模型设置后重试。",
++  memory_answer_model_failed: "问答模型未能完成请求，请检查模型设置后重试。",
++};
++export function hubErrorMessage(error: unknown): string {
++  return error instanceof HubError
++    ? error.message
++    : "读取未完成，请检查连接后重试。";
++}
++function invalid(): never {
++  throw new HubError("服务返回的数据与当前项目不一致，请刷新后重试。");
++}
++function object(value: unknown): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
++  return value as Record<string, unknown>;
++}
++function cursor(value: unknown): value is number | null {
++  return value === null || (Number.isSafeInteger(value) && Number(value) >= 0);
++}
++function project(value: unknown): HubProject {
++  const row = object(value);
++  if (
++    typeof row.scope_id !== "string" ||
++    !row.scope_id ||
++    typeof row.display_name !== "string"
++  )
++    invalid();
++  return row as unknown as HubProject;
++}
++async function request(
++  path: string,
++  body?: unknown,
++  signal?: AbortSignal,
++): Promise<unknown> {
++  const response = await fetch(`/hub/v1/console/${path}`, {
++    method: body === undefined ? "GET" : "POST",
++    credentials: "same-origin",
++    cache: "no-store",
++    headers:
++      body === undefined ? undefined : { "Content-Type": "application/json" },
++    body: body === undefined ? undefined : JSON.stringify(body),
++    signal,
++  });
++  if (!response.ok) {
++    let code: unknown;
++    try {
++      code = object(await response.json()).detail;
++    } catch {
++      /* Never echo a server body. */
++    }
++    throw new HubError(
++      typeof code === "string" && errors[code]
++        ? errors[code]
++        : response.status === 404
++          ? "当前服务尚不支持这个网页接口，请升级 Hub 后重试。"
++          : response.status === 401 || response.status === 403
++            ? "当前请求未获授权，请重新登录后重试。"
++            : "读取未完成，请检查服务状态后重试。",
++    );
++  }
++  try {
++    return await response.json();
++  } catch {
++    return invalid();
++  }
++}
++export async function getHubBootstrap(
++  offset = 0,
++  signal?: AbortSignal,
++): Promise<HubBootstrap> {
++  const value = object(
++    await request(`bootstrap?limit=50&offset=${offset}`, undefined, signal),
++  );
++  if (
++    value.schema_version !== 1 ||
++    value.mode !== "hub" ||
++    value.product !== "Cloud Memory Hub" ||
++    typeof value.instance_id !== "string" ||
++    !Array.isArray(value.projects) ||
++    !Array.isArray(value.features) ||
++    !value.features.every((v) => typeof v === "string") ||
++    !cursor(value.next_offset) ||
++    !(value.version === null || typeof value.version === "string") ||
++    !(value.build_revision === null || typeof value.build_revision === "string")
++  )
++    invalid();
++  value.projects.forEach(project);
++  if (project(value.global_scope).scope_id !== "global") invalid();
++  return value as unknown as HubBootstrap;
++}
++export async function getHubSummary(
++  instance: string,
++  scope: string,
++  offset = 0,
++  signal?: AbortSignal,
++): Promise<HubSummary> {
++  const value = object(
++    await request("summary", { scope_id: scope, limit: 10, offset }, signal),
++  );
++  if (
++    value.schema_version !== 1 ||
++    value.instance_id !== instance ||
++    project(value.scope).scope_id !== scope ||
++    !Array.isArray(value.sources) ||
++    !cursor(value.next_offset) ||
++    !Number.isSafeInteger(value.sources_total) ||
++    !cursor(value.visible_memory_total) ||
++    !cursor(value.visible_history_total)
++  )
++    invalid();
++  for (const raw of value.sources) {
++    const row = object(raw);
++    if (
++      row.scope_id !== scope ||
++      ![
++        "source_id",
++        "device_id",
++        "display_name",
++        "adapter_id",
++        "status",
++        "device_display_name",
++        "device_status",
++      ].every((key) => typeof row[key] === "string")
++    )
++      invalid();
++  }
++  return value as unknown as HubSummary;
++}
++export async function readHub(
++  instance: string,
++  scope: string,
++  operation: HubReadOperation,
++  parameters: Record<string, unknown> = {},
++  signal?: AbortSignal,
++): Promise<HubPage> {
++  const value = object(
++    await request(
++      `read/${operation}`,
++      { ...parameters, scope_id: scope },
++      signal,
++    ),
++  );
++  if (
++    value.schema_version !== 1 ||
++    value.authority !== "administrator" ||
++    value.instance_id !== instance ||
++    value.scope_id !== scope ||
++    value.operation !== operation ||
++    value.content_trust !== "untrusted_history" ||
++    !Array.isArray(value.items) ||
++    value.items.length > 10 ||
++    value.returned_count !== value.items.length ||
++    !cursor(value.next_offset) ||
++    typeof value.candidate_limit_reached !== "boolean"
++  )
++    invalid();
++  const kind = operation.startsWith("history-") ? "history" : "memory";
++  for (const raw of value.items) {
++    const item = object(raw);
++    if (
++      item.kind !== kind ||
++      typeof item.record_id !== "string" ||
++      typeof item.content !== "string" ||
++      !cursor(item.content_offset) ||
++      item.content_offset === null ||
++      !cursor(item.next_content_offset) ||
++      typeof item.agent_id !== "string" ||
++      !(item.layer === null || typeof item.layer === "string") ||
++      !(item.source === null || typeof item.source === "string") ||
++      !(item.session_id === null || typeof item.session_id === "string") ||
++      !Array.isArray(item.source_raw_ids) ||
++      !item.source_raw_ids.every((v) => typeof v === "string") ||
++      !cursor(item.memory_at)
++    )
++      invalid();
++    if (
++      operation.endsWith("-get") &&
++      (item.record_id !== parameters.record_id ||
++        item.content_offset !== (parameters.content_offset ?? 0))
++    )
++      invalid();
++  }
++  if (operation.endsWith("-get") && value.items.length !== 1) invalid();
++  return value as unknown as HubPage;
++}
+diff --git a/memhub/apps/web/src/hub-console.css b/memhub/apps/web/src/hub-console.css
+new file mode 100644
+index 0000000..2a0cc04
+--- /dev/null
++++ b/memhub/apps/web/src/hub-console.css
+@@ -0,0 +1,116 @@
++.hub-console,
++.hub-start {
++  color: var(--text-primary, #252722);
++  max-width: 1120px;
++  margin: 0 auto;
++  padding: 28px;
++}
++.hub-header {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 16px;
++}
++.hub-header strong {
++  font-size: 24px;
++  letter-spacing: -0.5px;
++}
++.hub-header p {
++  margin: 6px 0 0;
++  color: var(--text-muted, #62665c);
++}
++.hub-project-select {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 10px;
++  margin: 28px 0 18px;
++}
++.hub-project-select select {
++  margin-left: 8px;
++  min-width: 220px;
++  padding: 9px;
++  border: 1px solid #d8dbd2;
++  border-radius: 8px;
++  background: var(--surface, #fff);
++  color: inherit;
++}
++.hub-navigation {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 8px;
++  padding-bottom: 20px;
++  border-bottom: 1px solid #d8dbd2;
++}
++.hub-content {
++  padding: 20px 0;
++}
++.hub-content h1 {
++  font-size: 24px;
++  margin-bottom: 24px;
++}
++.hub-content h2 {
++  font-size: 19px;
++}
++.hub-overview {
++  display: grid;
++  gap: 18px;
++}
++.hub-card {
++  padding: 22px;
++  border: 1px solid #d8dbd2;
++  border-radius: 12px;
++  background: var(--surface, #fff);
++}
++.hub-card ul,
++.hub-content .sdk-memory-library ul {
++  padding-left: 22px;
++}
++.hub-card li {
++  margin: 12px 0;
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++}
++.hub-content p {
++  line-height: 1.65;
++}
++.hub-content [role="alert"] {
++  color: #a52a25;
++}
++.hub-content nav {
++  display: flex;
++  gap: 10px;
++  margin: 16px 0;
++}
++.hub-content textarea {
++  display: block;
++  width: 100%;
++  min-height: 100px;
++  margin: 12px 0;
++  padding: 10px;
++  font: inherit;
++  border: 1px solid #d8dbd2;
++  border-radius: 8px;
++}
++.hub-answer,
++.hub-content aside p,
++.hub-content [aria-label="SDK 原始对话"] li p {
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++}
++.hub-content .r6-settings {
++  min-height: auto;
++}
++@media (max-width: 640px) {
++  .hub-console,
++  .hub-start {
++    padding: 16px;
++  }
++  .hub-project-select label,
++  .hub-project-select select {
++    width: 100%;
++  }
++  .hub-project-select select {
++    margin: 8px 0 0;
++  }
++}
+diff --git a/memhub/apps/web/src/HubConsole.test.tsx b/memhub/apps/web/src/HubConsole.test.tsx
+new file mode 100644
+index 0000000..cf17df8
+--- /dev/null
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -0,0 +1,372 @@
++// @vitest-environment jsdom
++import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { HubConsole } from "./HubConsole";
++
++const local = vi.hoisted(() =>
++  vi.fn(() => {
++    throw new Error("local_api_must_not_run");
++  }),
++);
++vi.mock("./api", () => ({
++  getSdkMemory: local,
++  getSdkMemoryLibrary: local,
++  updateSdkMemory: local,
++  deleteSdkMemory: local,
++  getSdkRaw: local,
++  searchSdkRaw: local,
++}));
++vi.mock("./R6Settings", () => ({ R6Settings: () => <p>模型设置</p> }));
++const bootstrap = {
++  schema_version: 1,
++  product: "Cloud Memory Hub",
++  mode: "hub",
++  instance_id: "instance",
++  version: "0.1.0",
++  build_revision: null,
++  features: ["scoped_console_reads"],
++  next_offset: null,
++  projects: [
++    { scope_id: "project-a", display_name: "项目 A" },
++    { scope_id: "project-b", display_name: "项目 B" },
++  ],
++  global_scope: { scope_id: "global", display_name: "Global preferences" },
++};
++function page(scope: string, operation: string, extra = {}) {
++  return {
++    schema_version: 1,
++    authority: "administrator",
++    instance_id: "instance",
++    scope_id: scope,
++    operation,
++    content_trust: "untrusted_history",
++    returned_count: 1,
++    next_offset: null,
++    candidate_limit_reached: false,
++    items: [
++      {
++        record_id: `${scope}-item`,
++        kind: operation.startsWith("history") ? "history" : "memory",
++        content: `${scope} 的合成内容`,
++        content_offset: 0,
++        next_content_offset: null,
++        layer: "fact",
++        agent_id: "agent",
++        session_id: "session",
++        source: "source",
++        source_raw_ids: [],
++        memory_at: null,
++      },
++    ],
++    ...extra,
++  };
++}
++function handler(url: string, init?: RequestInit): Promise<Response> {
++  if (url.includes("bootstrap"))
++    return Promise.resolve(Response.json(bootstrap));
++  const body = JSON.parse(String(init?.body));
++  if (url.endsWith("summary"))
++    return Promise.resolve(
++      Response.json({
++        schema_version: 1,
++        instance_id: "instance",
++        scope: { scope_id: body.scope_id, display_name: body.scope_id },
++        next_offset: null,
++        visible_memory_total: null,
++        visible_history_total: null,
++        sources_total: 1,
++        sources: [
++          {
++            source_id: "source",
++            device_id: "device",
++            scope_id: body.scope_id,
++            display_name: "Claude",
++            adapter_id: "claude",
++            status: "active",
++            device_display_name: "测试 Mac",
++            device_status: "active",
++          },
++        ],
++      }),
++    );
++  return Promise.resolve(
++    Response.json(page(body.scope_id, url.split("/").at(-1) ?? "invalid")),
++  );
++}
++function withAsk(url: string, init?: RequestInit): Promise<Response> {
++  if (url.includes("bootstrap"))
++    return Promise.resolve(
++      Response.json({
++        ...bootstrap,
++        features: ["scoped_console_reads", "scoped_console_ask"],
++      }),
++    );
++  if (url.endsWith("ask-stream")) {
++    const { scope_id } = JSON.parse(String(init?.body));
++    return Promise.resolve(
++      new Response(
++        `data: ${JSON.stringify({
++          type: "final",
++          schema_version: 2,
++          answer: "合成回答",
++          mode: "generated",
++          memories: [
++            { memory_id: `${scope_id}-item`, content: `${scope_id}引用预览` },
++          ],
++        })}\n\n`,
++        { headers: { "Content-Type": "text/event-stream" } },
++      ),
++    );
++  }
++  return handler(url, init);
++}
++let fetcher: ReturnType<typeof vi.fn>;
++beforeEach(() => {
++  fetcher = vi.fn(handler);
++  vi.stubGlobal("fetch", fetcher);
++  local.mockClear();
++});
++afterEach(() => {
++  cleanup();
++  vi.unstubAllGlobals();
++});
++async function select(scope = "project-a") {
++  await userEvent.selectOptions(
++    await screen.findByRole("combobox", { name: "当前项目" }),
++    scope,
++  );
++}
++async function askAndOpen(scope = "project-a") {
++  await userEvent.click(screen.getByRole("button", { name: "问记忆" }));
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "你的问题" }),
++    "测试问题",
++  );
++  await userEvent.click(screen.getByRole("button", { name: "提问" }));
++  await userEvent.click(
++    await screen.findByRole("button", { name: `${scope}引用预览` }),
++  );
++}
++
++it("opens a citation through current-project memory-get without loading another library", async () => {
++  fetcher.mockImplementation(withAsk);
++  render(<HubConsole />);
++  await select();
++  await askAndOpen();
++  await screen.findByText("project-a 的合成内容");
++  expect(screen.getByRole("region", { name: "引用记忆详情" })).toBeTruthy();
++  expect(
++    screen.queryByRole("navigation", { name: "SDK 记忆库分页" }),
++  ).toBeNull();
++  expect(fetcher).toHaveBeenCalledWith(
++    "/hub/v1/console/read/memory-get",
++    expect.objectContaining({
++      body: JSON.stringify({
++        record_id: "project-a-item",
++        content_offset: 0,
++        scope_id: "project-a",
++      }),
++    }),
++  );
++  expect(local).not.toHaveBeenCalled();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await userEvent.click(screen.getByRole("button", { name: "问记忆" }));
++  expect(screen.queryByRole("region", { name: "引用记忆详情" })).toBeNull();
++});
++
++it("rejects a citation detail for another project and retries the same scoped record", async () => {
++  let attempts = 0;
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (url.endsWith("memory-get") && attempts++ === 0)
++      return Promise.resolve(Response.json(page("project-b", "memory-get")));
++    return withAsk(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await askAndOpen();
++  await screen.findByRole("alert");
++  expect(screen.queryByText("project-b 的合成内容")).toBeNull();
++  await userEvent.click(screen.getByRole("button", { name: "重试" }));
++  await screen.findByText("project-a 的合成内容");
++  expect(attempts).toBe(2);
++  expect(screen.queryByRole("button", { name: "删除记忆" })).toBeNull();
++});
++
++it("cancels old citation reads on project change and does not render their late result", async () => {
++  let resolveOld: ((response: Response) => void) | undefined;
++  let signal: AbortSignal | undefined;
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (
++      url.endsWith("memory-get") &&
++      JSON.parse(String(init?.body)).scope_id === "project-a"
++    ) {
++      signal = init?.signal as AbortSignal;
++      return new Promise<Response>((resolve) => {
++        resolveOld = resolve;
++      });
++    }
++    return withAsk(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await askAndOpen();
++  await screen.findByText("正在读取引用详情…");
++  await select("project-b");
++  expect(signal?.aborted).toBe(true);
++  expect(screen.queryByRole("region", { name: "引用记忆详情" })).toBeNull();
++  await act(async () => {
++    resolveOld?.(Response.json(page("project-a", "memory-get")));
++  });
++  expect(screen.queryByText("project-a 的合成内容")).toBeNull();
++  await askAndOpen("project-b");
++  await screen.findByText("project-b 的合成内容");
++  expect(local).not.toHaveBeenCalled();
++});
++it("requires project selection and shows real scoped data and authorization wording", async () => {
++  render(<HubConsole />);
++  await screen.findByText("选择要查看的项目");
++  expect(fetcher).toHaveBeenCalledTimes(1);
++  await select();
++  await screen.findByText("project-a 的合成内容");
++  expect(screen.getByText(/总数尚未统计/)).toBeTruthy();
++  expect(await screen.findByText(/已授权/)).toBeTruthy();
++  expect(local).not.toHaveBeenCalled();
++});
++it("reuses the library read-only and removes old mutation and lifecycle controls", async () => {
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await userEvent.click(
++    await screen.findByRole("button", { name: "project-a 的合成内容" }),
++  );
++  expect(await screen.findByLabelText("SDK 记忆详情")).toBeTruthy();
++  expect(screen.queryByRole("button", { name: "删除记忆" })).toBeNull();
++  expect(screen.queryByRole("button", { name: "保存修改" })).toBeNull();
++  expect(screen.queryByRole("button", { name: "已被取代" })).toBeNull();
++  expect(local).not.toHaveBeenCalled();
++});
++it("does not display failures as zero memories or leak a mismatched scope", async () => {
++  fetcher.mockImplementation((url: string, init?: RequestInit) =>
++    url.endsWith("memory-list")
++      ? Promise.resolve(Response.json(page("wrong-scope", "memory-list")))
++      : handler(url, init),
++  );
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await screen.findByRole("alert");
++  expect(screen.queryByText("本页 0 条")).toBeNull();
++  expect(screen.queryByText(/wrong-scope/)).toBeNull();
++});
++it("discards a late response when switching project", async () => {
++  let resolveA!: (response: Response) => void;
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (
++      url.endsWith("memory-list") &&
++      JSON.parse(String(init?.body)).scope_id === "project-a"
++    ) {
++      return new Promise<Response>((resolve) => {
++        resolveA = resolve;
++      });
++    }
++    return handler(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await waitFor(() => expect(resolveA).toBeTypeOf("function"));
++  await select("project-b");
++  await screen.findByRole("button", { name: "project-b 的合成内容" });
++  await act(async () =>
++    resolveA(Response.json(page("project-a", "memory-list"))),
++  );
++  expect(screen.queryByText("project-a 的合成内容")).toBeNull();
++});
++it("reads history from the selected project without the local search entry", async () => {
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "历史原文" }));
++  await screen.findByText("project-a 的合成内容");
++  expect(screen.queryByRole("textbox", { name: "搜索原始对话" })).toBeNull();
++  expect(local).not.toHaveBeenCalled();
++});
++
++it("reads remaining memory blocks with the same project and record identity", async () => {
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (!url.endsWith("memory-get")) return handler(url, init);
++    const body = JSON.parse(String(init?.body));
++    const result = page(body.scope_id, "memory-get");
++    return Promise.resolve(
++      Response.json({
++        ...result,
++        items: [
++          {
++            ...result.items[0],
++            content: body.content_offset === 0 ? "第一段" : "第二段",
++            content_offset: body.content_offset,
++            next_content_offset: body.content_offset === 0 ? 3 : null,
++          },
++        ],
++      }),
++    );
++  });
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await userEvent.click(
++    await screen.findByRole("button", { name: "project-a 的合成内容" }),
++  );
++  await userEvent.click(
++    await screen.findByRole("button", { name: "继续读取" }),
++  );
++  await screen.findByText("第一段第二段");
++  expect(fetcher).toHaveBeenCalledWith(
++    "/hub/v1/console/read/memory-get",
++    expect.objectContaining({
++      body: JSON.stringify({
++        record_id: "project-a-item",
++        content_offset: 3,
++        scope_id: "project-a",
++      }),
++    }),
++  );
++});
++
++it("explains an empty project inventory without selecting global automatically", async () => {
++  fetcher.mockResolvedValue(Response.json({ ...bootstrap, projects: [] }));
++  render(<HubConsole />);
++  await screen.findByText("还没有项目");
++  expect(
++    (screen.getByRole("combobox", { name: "当前项目" }) as HTMLSelectElement)
++      .value,
++  ).toBe("");
++  expect(fetcher).toHaveBeenCalledTimes(1);
++});
++it("keeps an empty filtered page pageable and explains unavailable ask", async () => {
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (url.endsWith("memory-list"))
++      return Promise.resolve(
++        Response.json(
++          page("project-a", "memory-list", {
++            items: [],
++            returned_count: 0,
++            next_offset: 10,
++          }),
++        ),
++      );
++    return handler(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await screen.findByText("本页 0 条");
++  expect(
++    (screen.getByRole("button", { name: "下一页" }) as HTMLButtonElement)
++      .disabled,
++  ).toBe(false);
++  await userEvent.click(screen.getByRole("button", { name: "问记忆" }));
++  await screen.findByText(/尚未接通网页问答/);
++  expect(screen.queryByRole("textbox", { name: "你的问题" })).toBeNull();
++  expect(local).not.toHaveBeenCalled();
++});
+diff --git a/memhub/apps/web/src/HubQuestion.test.tsx b/memhub/apps/web/src/HubQuestion.test.tsx
+new file mode 100644
+index 0000000..543833a
+--- /dev/null
++++ b/memhub/apps/web/src/HubQuestion.test.tsx
+@@ -0,0 +1,111 @@
++// @vitest-environment jsdom
++import { cleanup, render, screen } from "@testing-library/react";
++import userEvent from "@testing-library/user-event";
++import { afterEach, expect, it, vi } from "vitest";
++import { askHub, HubQuestion } from "./HubQuestion";
++
++afterEach(() => {
++  cleanup();
++  vi.unstubAllGlobals();
++});
++function stream(events: unknown[]) {
++  return new Response(
++    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
++    { headers: { "Content-Type": "text/event-stream" } },
++  );
++}
++const final = {
++  type: "final",
++  schema_version: 2,
++  answer: "合成回答",
++  mode: "generated",
++  memories: [{ memory_id: "memory-1", content: "合成依据" }],
++};
++it("posts the explicit scope and displays only a completed answer with references", async () => {
++  const fetcher = vi
++    .fn()
++    .mockResolvedValue(
++      stream([
++        { type: "recall", memories: [] },
++        { type: "delta", text: "片段" },
++        final,
++      ]),
++    );
++  vi.stubGlobal("fetch", fetcher);
++  render(<HubQuestion scope="project-a" instance="instance" enabled />);
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "你的问题" }),
++    "测试问题",
++  );
++  await userEvent.click(screen.getByRole("button", { name: "提问" }));
++  await screen.findByText("合成回答");
++  expect(screen.getByText("合成依据")).toBeTruthy();
++  expect(fetcher).toHaveBeenCalledWith(
++    "/hub/v1/console/ask-stream",
++    expect.objectContaining({
++      body: JSON.stringify({ scope_id: "project-a", question: "测试问题" }),
++    }),
++  );
++});
++it("does not convert truncated or error streams into successful answers", async () => {
++  vi.stubGlobal(
++    "fetch",
++    vi
++      .fn()
++      .mockResolvedValueOnce(stream([{ type: "delta", text: "未完成" }]))
++      .mockResolvedValueOnce(
++        stream([final, { type: "error", code: "private text" }]),
++      ),
++  );
++  await expect(
++    askHub("project", "question", new AbortController().signal),
++  ).rejects.toThrow("提前结束");
++  await expect(
++    askHub("project", "question", new AbortController().signal),
++  ).rejects.toThrow("问答未完成");
++});
++it("aborts in-flight question work on project unmount", async () => {
++  let signal: AbortSignal | undefined;
++  vi.stubGlobal(
++    "fetch",
++    vi.fn((_url, init: RequestInit) => {
++      signal = init.signal as AbortSignal;
++      return new Promise(() => {});
++    }),
++  );
++  const view = render(
++    <HubQuestion scope="project-a" instance="instance" enabled />,
++  );
++  await userEvent.type(
++    screen.getByRole("textbox", { name: "你的问题" }),
++    "测试问题",
++  );
++  await userEvent.click(screen.getByRole("button", { name: "提问" }));
++  view.unmount();
++  expect(signal?.aborted).toBe(true);
++});
++
++it("accepts CRLF SSE frames split between network chunks", async () => {
++  const encoded = new TextEncoder();
++  const body = new ReadableStream({
++    start(controller) {
++      controller.enqueue(encoded.encode(`data: ${JSON.stringify(final)}\r`));
++      controller.enqueue(encoded.encode("\n\r"));
++      controller.enqueue(encoded.encode("\n"));
++      controller.close();
++    },
++  });
++  vi.stubGlobal(
++    "fetch",
++    vi
++      .fn()
++      .mockResolvedValue(
++        new Response(body, {
++          headers: { "Content-Type": "text/event-stream" },
++        }),
++      ),
++  );
++  expect(
++    await askHub("project", "question", new AbortController().signal),
++  ).toMatchObject({ answer: "合成回答" });
++});
+diff --git a/memhub/apps/web/src/hub-api.test.ts b/memhub/apps/web/src/hub-api.test.ts
+new file mode 100644
+index 0000000..6b85f43
+--- /dev/null
++++ b/memhub/apps/web/src/hub-api.test.ts
+@@ -0,0 +1,128 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { getHubBootstrap, getHubSummary, readHub } from "./hub-api";
++
++const item = {
++  record_id: "memory-1",
++  kind: "memory",
++  content: "合成内容",
++  content_offset: 0,
++  next_content_offset: null,
++  agent_id: "agent",
++  layer: "fact",
++  session_id: null,
++  source: null,
++  source_raw_ids: [],
++  memory_at: null,
++};
++const page = {
++  schema_version: 1,
++  authority: "administrator",
++  instance_id: "instance",
++  scope_id: "project-a",
++  operation: "memory-list",
++  content_trust: "untrusted_history",
++  items: [item],
++  returned_count: 1,
++  next_offset: null,
++  candidate_limit_reached: false,
++};
++afterEach(() => vi.unstubAllGlobals());
++describe("Hub administrator read transport", () => {
++  it("uses only the same-origin Hub route and explicit project", async () => {
++    const fetcher = vi.fn().mockResolvedValue(Response.json(page));
++    vi.stubGlobal("fetch", fetcher);
++    expect(
++      (await readHub("instance", "project-a", "memory-list", { limit: 10 }))
++        .items,
++    ).toEqual([item]);
++    expect(fetcher).toHaveBeenCalledWith(
++      "/hub/v1/console/read/memory-list",
++      expect.objectContaining({
++        credentials: "same-origin",
++        body: JSON.stringify({ limit: 10, scope_id: "project-a" }),
++      }),
++    );
++    expect(fetcher.mock.calls[0][1].headers.Authorization).toBeUndefined();
++  });
++  it.each([
++    { scope_id: "project-b" },
++    { instance_id: "another" },
++    { operation: "history-list" },
++    { items: [{ ...item, kind: "history" }] },
++    { returned_count: 8 },
++  ])("rejects a mismatched envelope %j", async (change) => {
++    vi.stubGlobal(
++      "fetch",
++      vi.fn().mockResolvedValue(Response.json({ ...page, ...change })),
++    );
++    await expect(
++      readHub("instance", "project-a", "memory-list"),
++    ).rejects.toThrow("不一致");
++  });
++  it("rejects a get response for another record or content block", async () => {
++    vi.stubGlobal(
++      "fetch",
++      vi
++        .fn()
++        .mockResolvedValue(Response.json({ ...page, operation: "memory-get" })),
++    );
++    await expect(
++      readHub("instance", "project-a", "memory-get", { record_id: "memory-2" }),
++    ).rejects.toThrow();
++  });
++  it("keeps a filtered empty page pageable without inventing a total", async () => {
++    vi.stubGlobal(
++      "fetch",
++      vi.fn().mockResolvedValue(
++        Response.json({
++          ...page,
++          items: [],
++          returned_count: 0,
++          next_offset: 10,
++        }),
++      ),
++    );
++    expect(await readHub("instance", "project-a", "memory-list")).toMatchObject(
++      { items: [], next_offset: 10 },
++    );
++  });
++  it("does not expose a server error body or use a local fallback", async () => {
++    const fetcher = vi
++      .fn()
++      .mockResolvedValue(
++        Response.json({ detail: "private diagnostic" }, { status: 503 }),
++      );
++    vi.stubGlobal("fetch", fetcher);
++    await expect(
++      readHub("instance", "project-a", "memory-list"),
++    ).rejects.toThrow("服务状态");
++    expect(fetcher).toHaveBeenCalledTimes(1);
++  });
++  it("rejects a missing bootstrap instead of switching to local data", async () => {
++    vi.stubGlobal(
++      "fetch",
++      vi.fn().mockResolvedValue(new Response("", { status: 404 })),
++    );
++    await expect(getHubBootstrap()).rejects.toThrow("升级 Hub");
++  });
++  it("rejects summary sources belonging to another project", async () => {
++    vi.stubGlobal(
++      "fetch",
++      vi.fn().mockResolvedValue(
++        Response.json({
++          schema_version: 1,
++          instance_id: "instance",
++          scope: { scope_id: "project-a", display_name: "A" },
++          sources: [{ scope_id: "project-b" }],
++          sources_total: 1,
++          next_offset: null,
++          visible_memory_total: null,
++          visible_history_total: null,
++        }),
++      ),
++    );
++    await expect(getHubSummary("instance", "project-a")).rejects.toThrow(
++      "不一致",
++    );
++  });
++});

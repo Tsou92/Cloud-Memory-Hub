@@ -14,6 +14,9 @@ def create_hub(config: HubConfig):
     from pydantic import SecretStr
 
     from cloud_memory_hub.boundary import CloudBoundary
+    from cloud_memory_hub.console_api import console_routes
+    from cloud_memory_hub.console_qa import ConsoleQuestions, console_question_routes
+    from cloud_memory_hub.console_read import ConsoleRead
     from cloud_memory_hub.governance_authority import open_authority
     from cloud_memory_hub.governance_execution import GovernanceExecutor
     from cloud_memory_hub.governance_inflight import InflightGovernance
@@ -146,12 +149,24 @@ def create_hub(config: HubConfig):
             yield state
 
     core.router.lifespan_context = governed_lifespan
+    console = ConsoleRead(
+        devices,
+        ingest,
+        reads,
+        CredentialFilter((config.admin_token, config.encryption_key.decode())),
+    )
+    core.state.cmh_console = console
+    remote_api = create_remote_api(
+        devices, ingest, reads, previews, executor, admission=sdk_admission
+    )
+    remote_api.routes.extend(console_routes(console))
+    questions = ConsoleQuestions(core, console)
+    core.state.cmh_questions = questions
+    remote_api.routes.extend(console_question_routes(questions))
     return CloudBoundary(
         core,
         config,
         internal_token,
-        remote_api=create_remote_api(
-            devices, ingest, reads, previews, executor, admission=sdk_admission
-        ),
+        remote_api=remote_api,
         governance=governance,
     )

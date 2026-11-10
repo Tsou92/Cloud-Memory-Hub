@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from one_memory.hy_memory_bridge import HyMemoryBridge, HySdkMemoryRecord
 from starlette.concurrency import run_in_threadpool
@@ -9,6 +10,7 @@ from starlette.concurrency import run_in_threadpool
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
 from cloud_memory_hub.productivity_read import ProductivityMemory
 from cloud_memory_hub.read_contract import (
+    READ_OPERATIONS,
     READ_RESPONSE_BYTES,
     TEXT_BLOCK,
     GetRequest,
@@ -20,6 +22,15 @@ from cloud_memory_hub.read_contract import (
 from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
 
 MEMBER_BUDGET = 64
+
+
+@dataclass(frozen=True)
+class ScopedReadPage:
+    """Content shared by device and administrator replies, without caller identity."""
+
+    items: tuple[ReadItem, ...]
+    next_offset: int | None
+    candidate_limit_reached: bool
 
 
 class RemoteRead:
@@ -41,6 +52,30 @@ class RemoteRead:
             self.access.require_permission, credential, request.scope_id, permission
         )
         privacy = CredentialFilter((credential,))
+        page = await self.query(operation, request, privacy=privacy)
+        result = self.response(
+            ReadReply,
+            page,
+            privacy,
+            scope_id=request.scope_id,
+            instance_id=self.access.instance_id,
+            device_id=before["device_id"],
+            device_revision=before["revision"],
+            operation=operation,
+        )
+        after = await run_in_threadpool(
+            self.access.require_permission, credential, request.scope_id, permission
+        )
+        if after["revision"] != before["revision"]:
+            raise AccessError("read_authorization_changed", 409)
+        return result
+
+    async def query(self, operation, request, *, privacy):
+        """Run the common bounded read after the caller's own authorization checks."""
+        if operation not in READ_OPERATIONS or not isinstance(
+            request, READ_OPERATIONS[operation][1]
+        ):
+            raise AccessError("invalid_request", 422)
         if isinstance(request, SearchRequest):
             try:
                 if privacy.protect({"query": request.query}).value["query"] != request.query:
@@ -53,7 +88,7 @@ class RemoteRead:
         except TimeoutError:
             raise AccessError("read_busy", 503) from None
         try:
-            result = await self._read(operation, request, privacy, before)
+            return await self._read(operation, request, privacy)
         except AccessError:
             raise
         except Exception:
@@ -61,14 +96,8 @@ class RemoteRead:
             raise AccessError("read_unavailable", 503) from None
         finally:
             self._slots.release()
-        after = await run_in_threadpool(
-            self.access.require_permission, credential, request.scope_id, permission
-        )
-        if after["revision"] != before["revision"]:
-            raise AccessError("read_authorization_changed", 409)
-        return result
 
-    async def _read(self, operation, request, privacy, device):
+    async def _read(self, operation, request, privacy):
         namespace = f"cmh:{self.access.instance_id}:{request.scope_id}"
         bridge = self.bridge()
         hidden = await run_in_threadpool(self.suppressed, request.scope_id)
@@ -77,9 +106,9 @@ class RemoteRead:
             if record is None:
                 return False
             identity = record.raw_id if history else record.memory_id
-            # A forgotten original stays readable on explicit history access;
-            # a purged one is gone (and its row deleted) - hide it while purging.
-            if identity in hidden and (not history or hidden[identity] == "purged"):
+            # Only an exact history-get may read a forgotten original. Lists
+            # also feed automatic recall; purged records stay hidden everywhere.
+            if identity in hidden and (operation != "history-get" or hidden[identity] == "purged"):
                 return False
             return self._visible(record, namespace, history=history)
 
@@ -139,28 +168,38 @@ class RemoteRead:
         if not history and enrich is not None:
             records = [await enrich(record) for record in records]
         offset = request.content_offset if isinstance(request, GetRequest) else 0
-        reply = ReadReply(
-            scope_id=request.scope_id,
-            instance_id=self.access.instance_id,
-            device_id=device["device_id"],
-            device_revision=device["revision"],
-            operation=operation,
+        return ScopedReadPage(
             items=tuple(self._item(record, privacy, offset) for record in records),
             next_offset=next_offset,
             candidate_limit_reached=limited,
         )
-        if len(reply.model_dump_json().encode()) > READ_RESPONSE_BYTES:
-            raise AccessError("read_response_too_large", 503)
-        # References/identities are metadata too. Reject unexpected secrets there
-        # instead of publishing them or inventing replacement record identifiers.
-        value = reply.model_dump(mode="json")
-        metadata = {
-            **value,
-            "items": [{k: v for k, v in item.items() if k != "content"} for item in value["items"]],
-        }
-        if privacy.protect(metadata).value != metadata:
-            raise AccessError("read_metadata_requires_review", 503)
-        return value
+
+    @staticmethod
+    def response(model, page, privacy, **identity):
+        try:
+            reply = model(
+                **identity,
+                items=page.items,
+                next_offset=page.next_offset,
+                candidate_limit_reached=page.candidate_limit_reached,
+            )
+            if len(reply.model_dump_json().encode()) > READ_RESPONSE_BYTES:
+                raise AccessError("read_response_too_large", 503)
+            # Reject unsafe identities/references instead of rewriting their meaning.
+            value = reply.model_dump(mode="json")
+            metadata = {
+                **value,
+                "items": [
+                    {k: v for k, v in item.items() if k != "content"} for item in value["items"]
+                ],
+            }
+            if privacy.protect(metadata).value != metadata:
+                raise AccessError("read_metadata_requires_review", 503)
+            return value
+        except AccessError:
+            raise
+        except Exception:
+            raise AccessError("read_unavailable", 503) from None
 
     @staticmethod
     def _visible(record, namespace, *, history):

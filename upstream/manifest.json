@@ -139,6 +139,16 @@
       "path": "patches/0027-model-catalog-and-probe-budget.patch",
       "scope": "bounded_model_catalog_selection_and_anthropic_probe_budget",
       "digest": "sha256:38ffb20d2101309c6302be4219330ac0ab62a557429b944374e02ae9d5eccae0"
+    },
+    {
+      "path": "patches/0028-hub-console-scope.patch",
+      "scope": "administrator_project_console_reads_question_answering_and_web_regressions",
+      "digest": "sha256:94990c83a17ff48ea6a730be9361b789087f57464e2c71adec66c1d6cbd0e3e9"
+    },
+    {
+      "path": "patches/0029-sdk-anthropic-qa.patch",
+      "scope": "reuse_anthropic_messages_for_sdk_memory_question_answering",
+      "digest": "sha256:24151bed87233139228ab65247ab3b5411b312c782d992d12e2683494a103ad8"
     }
   ]
 }

@@ -1,0 +1,292 @@
+diff --git a/memhub/apps/core/src/one_memory/sdk_memory_qa.py b/memhub/apps/core/src/one_memory/sdk_memory_qa.py
+index ec30f4b..774bc6f 100644
+--- a/memhub/apps/core/src/one_memory/sdk_memory_qa.py
++++ b/memhub/apps/core/src/one_memory/sdk_memory_qa.py
+@@ -9,6 +9,12 @@ from contextlib import aclosing
+ from typing import Literal
+ 
+ import httpx
++from hy_memory.agent.anthropic_messages import (
++    AnthropicRequestError,
++    build_payload,
++    messages_url,
++    parse_response,
++)
+ from pydantic import BaseModel, ConfigDict
+ 
+ from one_memory.http_client import create_async_client
+@@ -279,13 +285,19 @@ class SdkMemoryAnswerer:
+                     json=payload,
+                 )
+                 await _recheck_generation(recheck)
+-        except (httpx.TimeoutException, httpx.NetworkError) as error:
++        except httpx.RequestError as error:
+             raise MemoryAnswerError("memory_answer_model_unavailable") from error
+         if not response.is_success:
+             raise MemoryAnswerError("memory_answer_model_failed")
+         try:
+-            return _parse_model_answer(response.json())
+-        except (KeyError, IndexError, TypeError, ValueError) as error:
++            body = response.json()
++            if profile.provider_kind is ProviderKind.ANTHROPIC:
++                parsed = parse_response(body, model=profile.model)
++                if parsed["finish_reason"] != "stop" or parsed["tool_calls"]:
++                    raise ValueError("incomplete_answer")
++                body = {"message": {"content": parsed["content"]}}
++            return _parse_model_answer(body)
++        except (AnthropicRequestError, KeyError, IndexError, TypeError, ValueError) as error:
+             raise MemoryAnswerError("memory_answer_invalid_model_output") from error
+ 
+     async def _model_chunks(
+@@ -295,6 +307,12 @@ class SdkMemoryAnswerer:
+         memories: tuple[SdkAskMemory, ...],
+         recheck: _Recheck | None,
+     ) -> AsyncIterator[str]:
++        if profile.provider_kind is ProviderKind.ANTHROPIC:
++            # Preserve the existing reader/citation contract without inventing
++            # a second token-stream decoder for the first Messages integration.
++            answer = await self._model_answer(profile, question, memories, recheck)
++            yield answer.model_dump_json()
++            return
+         secret = await self._secret(profile)
+         if profile.provider_kind is not ProviderKind.OLLAMA and secret is None:
+             raise MemoryAnswerError("memory_answer_model_secret_unavailable")
+@@ -325,7 +343,7 @@ class SdkMemoryAnswerer:
+                         if chunk:
+                             yield chunk
+                     await _recheck_generation(recheck)
+-        except (httpx.TimeoutException, httpx.NetworkError) as error:
++        except httpx.RequestError as error:
+             raise MemoryAnswerError("memory_answer_model_unavailable") from error
+ 
+ 
+@@ -428,7 +446,22 @@ def _sdk_answer_request(
+             },
+         )
+     if profile.provider_kind is ProviderKind.ANTHROPIC:
+-        raise MemoryAnswerError("memory_answer_provider_unsupported")
++        messages[0]["content"] += (
++            " 仅返回 JSON 对象，字段为 answer（字符串）和 citations（memory_id 字符串数组）。"
++        )
++        payload = build_payload(
++            messages,
++            model=profile.model,
++            max_tokens=768,
++            temperature=0.1,
++        )
++        attach_disable_thinking(profile, payload)
++        return (
++            "POST",
++            messages_url(base_url),
++            {"x-api-key": secret or "", "anthropic-version": "2023-06-01"},
++            payload,
++        )
+     payload: dict[str, object] = {
+         "model": profile.model,
+         "messages": messages,
+diff --git a/memhub/apps/core/tests/test_sdk_memory_qa.py b/memhub/apps/core/tests/test_sdk_memory_qa.py
+index 939bfee..fa92fbe 100644
+--- a/memhub/apps/core/tests/test_sdk_memory_qa.py
++++ b/memhub/apps/core/tests/test_sdk_memory_qa.py
+@@ -96,3 +96,201 @@ def test_sdk_ask_propagates_sdk_search_failure_without_legacy_fallback() -> None
+                 secrets=object(),  # type: ignore[arg-type]
+             ).answer("偏好是什么？")
+         )
++
++
++# Anthropic transport uses the shared Messages adapter; no external service calls.
++def anthropic_answerer(
++    handler, *, base_url="https://synthetic.invalid", thinking=True, authorize=None, bridge=None
++):
++    import httpx
++
++    from one_memory.model_profiles import ProviderKind
++
++    profile = SimpleNamespace(
++        provider_kind=ProviderKind.ANTHROPIC,
++        model="synthetic-model",
++        base_url=base_url,
++        profile_id="synthetic-profile",
++        revision=1,
++        disable_thinking=thinking,
++        timeout_seconds=5,
++        capabilities=SimpleNamespace(model_available=True, structured_output=False),
++    )
++    profiles = SimpleNamespace(
++        active=lambda _secrets: profile,
++        resolve_snapshot_secret=lambda *_args: "synthetic-credential",
++    )
++    return SdkMemoryAnswerer(
++        bridge=bridge or Bridge(),
++        profiles=profiles,
++        secrets=object(),
++        authorize_generation=authorize,
++        transport=httpx.MockTransport(handler),
++    )
++
++
++def anthropic_response(*, text=None, stop="end_turn"):
++    import json
++
++    return {
++        "id": "synthetic-message",
++        "type": "message",
++        "role": "assistant",
++        "content": [
++            {
++                "type": "text",
++                "text": text
++                if text is not None
++                else json.dumps(
++                    {
++                        "answer": "你偏好本地优先。",
++                        "citations": ["memory-1"],
++                    }
++                ),
++            }
++        ],
++        "stop_reason": stop,
++        "model": "synthetic-model",
++        "usage": {"input_tokens": 10, "output_tokens": 10},
++    }
++
++
++@pytest.mark.parametrize(
++    "base_url",
++    [
++        "https://synthetic.invalid",
++        "https://synthetic.invalid/v1",
++        "https://synthetic.invalid/v1/messages",
++    ],
++)
++@pytest.mark.parametrize("stream", [False, True])
++def test_anthropic_sdk_answer_preserves_messages_and_citations(base_url, stream):
++    import json
++
++    import httpx
++
++    requests = []
++    rechecks = []
++
++    async def authorize(_profile, _question, grounding):
++        assert grounding[0].memory_id == "memory-1"
++
++        async def recheck():
++            rechecks.append(True)
++
++        return recheck
++
++    def handler(request):
++        requests.append(request)
++        assert request.url.path == "/v1/messages"
++        assert request.headers["x-api-key"] == "synthetic-credential"
++        assert request.headers["anthropic-version"] == "2023-06-01"
++        assert "authorization" not in request.headers
++        payload = json.loads(request.content)
++        assert "JSON" in payload["system"][0]["text"]
++        assert payload["messages"][0]["role"] == "user"
++        assert "memory-1" in payload["messages"][0]["content"][0]["text"]
++        assert payload["thinking"] == {"type": "disabled"}
++        assert "stream" not in payload and "response_format" not in payload
++        return httpx.Response(200, json=anthropic_response())
++
++    async def scenario():
++        answerer = anthropic_answerer(handler, base_url=base_url, authorize=authorize)
++        if stream:
++            events = [event async for event in answerer.answer_stream("偏好是什么？")]
++            answer = events[-1]
++            assert events[0]["type"] == "recall"
++            assert answer["type"] == "final"
++            assert (
++                "".join(event["text"] for event in events if event["type"] == "delta")
++                == answer["answer"]
++            )
++        else:
++            result = await answerer.answer("偏好是什么？")
++            answer = {"answer": result.answer, "mode": result.mode, "memories": result.memories}
++        assert answer["mode"] == "generated"
++        assert answer["answer"] == "你偏好本地优先。"
++        assert answer["memories"][0].memory_id == "memory-1"
++        assert len(requests) == 1 and len(rechecks) >= 3
++
++    asyncio.run(scenario())
++
++
++@pytest.mark.parametrize(
++    "text,stop",
++    [
++        ("not-json", "end_turn"),
++        ('{"answer":"incomplete","citations":["memory-1"]}', "max_tokens"),
++        ('{"answer":"wrong","citations":["other-project"]}', "end_turn"),
++    ],
++)
++@pytest.mark.parametrize("stream", [False, True])
++def test_anthropic_sdk_answer_rejects_invalid_output(text, stop, stream):
++    import httpx
++
++    async def scenario():
++        answerer = anthropic_answerer(
++            lambda request: httpx.Response(
++                200,
++                json=anthropic_response(text=text, stop=stop),
++            )
++        )
++        with pytest.raises(MemoryAnswerError, match="memory_answer_invalid_"):
++            if stream:
++                async for event in answerer.answer_stream("偏好是什么？"):
++                    assert event["type"] != "final"
++            else:
++                await answerer.answer("偏好是什么？")
++
++    asyncio.run(scenario())
++
++
++def test_anthropic_sdk_answer_omits_thinking_when_not_requested():
++    import json
++
++    import httpx
++
++    def handler(request):
++        assert "thinking" not in json.loads(request.content)
++        return httpx.Response(200, json=anthropic_response())
++
++    asyncio.run(anthropic_answerer(handler, thinking=False).answer("偏好是什么？"))
++
++
++@pytest.mark.parametrize("failure", ["http", "network", "protocol", "changed", "revoked"])
++def test_anthropic_sdk_answer_preserves_safe_errors_and_context_checks(failure):
++    import httpx
++
++    bridge = Bridge()
++    checks = []
++
++    async def authorize(*_args):
++        async def recheck():
++            checks.append(True)
++            if failure == "revoked" and len(checks) > 1:
++                raise RuntimeError("synthetic private detail must not escape")
++
++        return recheck
++
++    def handler(request):
++        if failure == "http":
++            return httpx.Response(401, text="synthetic private body must not escape")
++        if failure == "network":
++            raise httpx.ConnectError("synthetic failure", request=request)
++        if failure == "protocol":
++            raise httpx.RemoteProtocolError("synthetic truncated gateway response", request=request)
++        if failure == "changed":
++            bridge.current = record("changed")
++        return httpx.Response(200, json=anthropic_response())
++
++    expected = {
++        "http": "memory_answer_model_failed",
++        "network": "memory_answer_model_unavailable",
++        "protocol": "memory_answer_model_unavailable",
++        "changed": "memory_answer_context_changed",
++        "revoked": "memory_answer_generation_not_authorized",
++    }[failure]
++    with pytest.raises(MemoryAnswerError, match=expected):
++        asyncio.run(
++            anthropic_answerer(handler, bridge=bridge, authorize=authorize).answer("偏好是什么？")
++        )
