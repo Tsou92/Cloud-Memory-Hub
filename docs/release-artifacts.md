@@ -8,6 +8,8 @@
 ## 触发条件
 
 `.github/workflows/release.yml` 只允许手动 `workflow_dispatch`，不会因推送代码或标签自动发布。
+`publish` 默认关闭：流程执行完整检查和构建，保留 `verified-release` 七附件，暂不创建
+GitHub Release。首版 NAS 验收使用此模式，先验证最终将公开的同一批制品。
 先完成候选版本真实验收、更新产品版本、提交并准备已有标签；本流程不会创建、移动标签。
 运行时选择该标签作为 workflow ref，并在 `tag` 输入同一标签。
 GitHub 要求手动工作流已存在于默认分支，标签指向的提交也必须包含本工作流。
@@ -53,6 +55,25 @@ GitHub 要求手动工作流已存在于默认分支，标签指向的提交也�
 每个附件必须为普通文件且严格小于 2 GiB。上游 SBOM 仅覆盖复用来源，不能称为完整产品 SBOM。
 源码和 provenance 的 gzip 头不包含本机文件名或当前时间；不承诺第三方依赖和整套镜像逐字可重复构建。
 不包含用户配置、配对文件、运行数据、模型密钥或开发机私有路径。
+
+## 同一制品验收后发布
+
+按已有标签触发 `release.yml`，保持 `publish=false`。成功后，从该次运行下载
+`verified-release` 到新的空目录，核对 `release.json` 的 tag／commit 与本次运行一致，
+再校验 `SHA256SUMS`。NAS 导入其中的 Linux 镜像归档，使用同一镜像完成安装／升级验收；
+Mac 验收使用其中的最终客户端包。保留运行 ID、附件摘要、镜像配置摘要及实际验收结果。
+
+验收通过后，在该标签对应的干净源码 checkout 中调用既有发布器，`RELEASE_DIRECTORY`
+指向刚才下载并验收的原七附件目录：
+
+```sh
+python -m scripts.release_artifacts verify --tag v0.1.0 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY
+python -m scripts.release_artifacts publish --tag v0.1.0 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY --repository Tsou92/Cloud-Memory-Hub
+```
+
+发布器仍执行下文的远端标签、草稿、上传、重新下载与摘要核对，不跳过任何校验。
+此时不要重新触发构建、重新打包或仅改文件名，否则制品已不再是 NAS 验收的原对象。
+工作流显式选择 `publish=true` 会在构建后自动公开，因此不用于上述需要先做 NAS 验收的路径。
 
 下载到独立目录后，可运行 `shasum -a 256 -c SHA256SUMS` 校验六个附件。
 镜像使用 `gzip -dc cloud-memory-hub-<tag>-linux-amd64.tar.gz | docker load` 导入，
