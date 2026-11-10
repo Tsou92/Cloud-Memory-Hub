@@ -83,7 +83,7 @@ class CopiedCommandTests(unittest.TestCase):
             input=json.dumps({"script": script, "fragment": fragment, "windows": windows}),
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=30,
             check=True,
         )
         return result.stdout

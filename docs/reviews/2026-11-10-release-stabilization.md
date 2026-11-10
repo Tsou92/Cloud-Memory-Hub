@@ -49,3 +49,26 @@ Node 24.10.0 / Linux amd64 容器中通过 17 个文件、339 项测试。
 保留 `v0.1.0` 标签及其原提交，修复版使用 `0.1.1`，不移动或覆盖旧标签。
 本记录证明上述复现、定向修复和本地回归，不代表 `0.1.1` 已完成远程 CI、最终附件、
 NAS 升级或公开发布。最终仍需下载同一批七个附件、核验其摘要，在 NAS 验收后原样发布。
+
+
+## 0.1.1 后续发行检查
+
+`4e72c1a` 的 [PR](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42803121193)、
+[push](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42803113654) 和
+[标签](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42803163047) 各六项成功。
+三次 runtime 均实测 Hub 2,261 项通过／6 项跳过、Core 5,223 项通过／18 项跳过／
+12 项未选中／2 项预期失败、来源 28 项通过及 Web 339 项通过。
+
+随后独立[发行运行](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42803231636)
+仍失败：Windows 在 Node 生成安装命令的辅助进程等待中超过 10 秒，尚未执行 PowerShell；
+Core 在可选语义检索下丢失已完成的词法命中，5,222 项通过、1 项失败，其余条件项如上。
+Linux、Mac、附件汇总和公开发布均跳过，仍无 `verified-release` 或公开 Release。
+
+两项采用限定修复，分别见[原文超时回退](2026-11-10-raw-lexical-timeout.md)和
+[安装命令测试](2026-11-10-onboarding-command-timeout.md)。保留 `v0.1.1` 对应原提交；
+新源码使用 `0.1.2`，不移动旧标签。上述普通 CI 的成功不替代修复后发行和 NAS 的最终验收。
+
+
+`0.1.2` 本地合并检查通过：`make check` 113 项中 110 项通过、3 项条件跳过；
+固定上游完整补丁链验证通过，产品锁文件检查通过且依赖未变。相关 Core 168 项通过，
+独立审查未发现阻断项。新候选的远程 CI、发行附件、NAS 和宿主最终验收仍待完成。
