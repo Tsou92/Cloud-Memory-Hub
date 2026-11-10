@@ -6,6 +6,8 @@ build-backend = "uv_build"
 name = "cloud-memory-hub"
 version = "0.1.0.dev0"
 description = "NAS deployment boundary for the reused MemHub core"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "one-memory",
@@ -19,6 +21,7 @@ cloud-memory-hub = "cloud_memory_hub.__main__:main"
 cloud-memory-connector = "cloud_memory_hub.connector:main"
 cloud-memory-agent = "cloud_memory_hub.agent_cli:main"
 cloud-memory-mcp = "cloud_memory_hub.agent_mcp:main"
+cloud-memory-setup = "cloud_memory_hub.setup_cli:main"
 
 [dependency-groups]
 dev = ["pytest==9.1.1"]

@@ -30,7 +30,7 @@ from cloud_memory_hub.read_contract import (
     ReadItem,
     ReadReply,
 )
-from cloud_memory_hub.remote_access import TOKEN_PATTERN
+from cloud_memory_hub.remote_access import TOKEN_PATTERN, ScopeGrant
 
 MAX_RESPONSE_BYTES = 128 * 1024
 MAX_ORIGINAL_RESPONSE_BYTES = 64 * 1024
@@ -204,6 +204,54 @@ def _identity(value, connection):
         or value.get("instance_id") != connection.instance_id
     ):
         raise TransportError("remote_instance_mismatch")
+
+
+async def verify_connection(connection, *, scope_id, source_id, transport=None):
+    """Read-only pairing probe; an empty delivery queue is not connectivity evidence."""
+    try:
+        ScopeGrant.valid_scope(scope_id)
+        canonical_uuid(source_id)
+    except (ValueError, TypeError, AttributeError):
+        raise TransportError("connection_binding_mismatch") from None
+    async with create_async_client(
+        trust_env=False,
+        follow_redirects=False,
+        timeout=httpx.Timeout(10, connect=5),
+        transport=transport,
+    ) as client:
+        session = await _request(client, connection, "/hub/v1/session")
+        _identity(session, connection)
+        device, features = session.get("device"), session.get("features")
+        if (
+            not isinstance(device, dict)
+            or device.get("device_id") != connection.device_id
+            or device.get("status") != "active"
+            or not isinstance(features, list)
+            or not all(isinstance(item, str) for item in features)
+            or not {"device_identity", "event_upload", "source_preflight"}.issubset(features)
+            or not isinstance(device.get("grants"), list)
+        ):
+            raise TransportError("remote_session_invalid")
+        try:
+            grants = [ScopeGrant.model_validate(item) for item in device["grants"]]
+        except (ValueError, TypeError):
+            raise TransportError("remote_session_invalid") from None
+        if not any(
+            grant.scope_id == scope_id
+            and {"events:write", "memory:read", "history:read"}.issubset(grant.permissions)
+            for grant in grants
+        ):
+            raise TransportError("source_permission_required")
+        permission = await _request(client, connection, f"/hub/v1/sources/{source_id}/access")
+        _identity(permission, connection)
+        if (
+            permission.get("device_id") != connection.device_id
+            or permission.get("source_id") != source_id
+            or permission.get("scope_id") != scope_id
+            or permission.get("allowed") is not True
+        ):
+            raise TransportError("source_permission_required")
+    return {"status": "authorized", "checked": "session_and_source", "scope_id": scope_id}
 
 
 async def send_pending(connection: RemoteConnection, outbox: LocalOutbox, *, transport=None) -> int:
