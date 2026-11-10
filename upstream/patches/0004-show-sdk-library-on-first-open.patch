@@ -1,17 +1,11 @@
 diff --git a/memhub/apps/web/src/MemorySpace.sdk-start.test.tsx b/memhub/apps/web/src/MemorySpace.sdk-start.test.tsx
 new file mode 100644
-index 0000000..54f088a
+index 0000000..bfc748f
 --- /dev/null
 +++ b/memhub/apps/web/src/MemorySpace.sdk-start.test.tsx
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,60 @@
 +// @vitest-environment jsdom
-+import {
-+  cleanup,
-+  render,
-+  screen,
-+  waitFor,
-+  within,
-+} from "@testing-library/react";
++import { cleanup, render, screen, within } from "@testing-library/react";
 +import { afterEach, beforeEach, expect, it, vi } from "vitest";
 +import { MemorySpace } from "./MemorySpace";
 +
@@ -38,8 +32,10 @@ index 0000000..54f088a
 +it("shows an empty fresh SDK library in the default simplified view", async () => {
 +  render(<MemorySpace simplified />);
 +  const library = await screen.findByRole("region", { name: "SDK 记忆库" });
-+  await waitFor(() => expect(within(library).queryByRole("status")).toBeNull());
-+  expect(within(library).getByText("共 0 条")).toBeTruthy();
++  // Initial mount has neither a spinner nor a total; wait for the SDK result.
++  expect(await within(library).findByText("共 0 条")).toBeTruthy();
++  expect(within(library).queryByRole("status")).toBeNull();
++  expect(within(library).queryAllByRole("listitem")).toHaveLength(0);
 +  expect(screen.getByText("查看已保存的记忆")).toBeTruthy();
 +  expect(screen.getByRole("tab", { name: "问记忆" })).toBeTruthy();
 +  expect(screen.getByRole("tab", { name: "历史对话" })).toBeTruthy();
