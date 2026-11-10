@@ -69,6 +69,18 @@ Windows 另暴露测试默认 cp1252 读取 UTF-8 脚本的问题，测试已明
 的错误分类，产品命令仍只返回固定错误，不增加凭证输出。此项尚在定位，不能称 Windows
 已支持。POSIX 缺 Python 时的固定 uv／Python 下载路径在 Ubuntu 和 macOS CI 已实际通过。
 
+随后在本机使用官方摘要校验的便携 PowerShell 7.6.9，实际运行公共页与网页生成的两处命令，
+404、半截、完整下载和安装失败共 8 个场景全部通过，残留旧脚本未执行。带真实 PowerShell
+的 `make check` 完整通过，105 项中 3 项平台条件跳过。
+
+`048d698` 的[诊断运行 42786554254](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42786554254)
+已验证 Windows 缺 Python 时的下载准备路径；ACL 错误确定发生在首个 `Get-Acl` 的模块加载，
+尚未修改任何权限。PowerShell 7 启动 Python 后，子进程 Windows PowerShell 5.1 继承了不兼容
+的 `PSModulePath`。按[微软官方说明](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_psmodulepath?view=powershell-7.3#starting-windows-powershell-from-powershell-7)，
+配置器只从该子进程环境移除这一变量，让 Windows PowerShell 构造原生路径；父进程和系统
+环境、ACL 规则、所有者／保护／ACE 核验均不变。独立审查和 35 项本机客户端测试通过，
+Windows 实机 ACL 往返仍需修复后的 CI 结果，不能由 Mac 测试替代。
+
 ## 发布前尚需闭环
 
 目标提交全仓检查、完整远程 CI、固定镜像、真实 NAS、两台 Mac 与宿主实际调用需使用
