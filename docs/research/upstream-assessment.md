@@ -1,5 +1,7 @@
 # Hy-Memory / MemHub 复用评估
 
+2026-11-10 本地投递终态设计：NAS 安装验证证明已遗忘内容被正确拒绝，但 Mac 网络 outbox 队首阻塞后续事件。继续扩展既有 LocalOutbox、HTTP 传输和 capture 原子事务；上游 `memory_write_jobs` 是服务端模型处理队列，不替代跨设备上传及本地身份绑定。新增本地拒绝索引和显式格式升级，无新上游补丁、无 NAS 业务库迁移；边界见 [ADR-0055](../adr/0055-terminal-upload-rejections.md)。
+
 2026-11-10 显式记忆投影：同安装镜像的禁网合成重现证明 HY 正常执行场景分类和工具消息过滤，但 Hub 把 remember 文字当作工具输出，导致过滤后空输入。只修正 Hub 新接纳时的 assistant / AGENT 角色映射，继续复用原提炼和存储流程；旧队列和回执不改、不自动重放。依据见 [ADR-0054](../adr/0054-explicit-memory-input-role.md)。
 
 2026-11-10 模型配置修复：原 `model_probe._models_request` 仅判断已填模型，网页没有候选列表入口；复用既有 HTTP、URL 校验、凭证库和表单，增加只读有界模型列表 API 与选择控件。真实合成请求证明 64 token 探针会截断完整可用的 Anthropic 模型，因此调整预算和纯 JSON 提示，保留严格响应验证。兼容网关的列表认证重试仅限同地址 GET，不改生成协议。设计见 [ADR-0053](../adr/0053-model-catalog-and-probe-budget.md)。

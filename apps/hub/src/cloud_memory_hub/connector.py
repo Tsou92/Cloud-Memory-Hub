@@ -73,6 +73,7 @@ def main() -> int:
         "command",
         choices=[
             "init",
+            "upgrade-outbox",
             "enqueue",
             "status",
             "send",
@@ -90,11 +91,26 @@ def main() -> int:
     parser.add_argument("--connection-file", type=Path)
     parser.add_argument("--known-credentials-file", type=Path)
     parser.add_argument("--source-file", type=Path)
+    parser.add_argument("--backup-file", type=Path)
     parser.add_argument("--include-global", action="store_true")
     args = parser.parse_args()
+    if (args.command == "upgrade-outbox") != (args.backup_file is not None):
+        parser.error("--backup-file is required only for upgrade-outbox")
     if args.command == "claude-hook":
         return run_hook_process(args, open_configuration)
     try:
+        if args.command == "upgrade-outbox":
+            _, options = open_configuration(args)
+            if args.state_dir is None:
+                raise TransportError("state_directory_required")
+            result = LocalOutbox.upgrade(
+                args.state_dir / "outbox.sqlite3",
+                instance_id=options["instance_id"],
+                device_id=options["device_id"],
+                backup_file=args.backup_file,
+            )
+            print(json.dumps(result))
+            return 0
         if args.command in READ_OPERATIONS:
             connection, options = open_configuration(args)
             data = sys.stdin.buffer.read(64 * 1024 + 1)

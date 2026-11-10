@@ -58,9 +58,12 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(prog="cloud-memory-agent")
     parser.add_argument("--config-file", type=Path, required=True)
-    parser.add_argument("command", choices=["init", "claude-hook", *COMMANDS])
+    parser.add_argument("command", choices=["init", "upgrade-outbox", "claude-hook", *COMMANDS])
     parser.add_argument("--workspace", type=Path)
+    parser.add_argument("--backup-file", type=Path)
     args = parser.parse_args()
+    if (args.command == "upgrade-outbox") != (args.backup_file is not None):
+        parser.error("--backup-file is required only for upgrade-outbox")
     if args.command == "claude-hook":
         from cloud_memory_hub.agent_hook import run_hook_process
 
@@ -68,7 +71,11 @@ def main():
     if args.workspace is not None:
         parser.error("--workspace is only accepted by claude-hook")
     try:
-        service = AgentSettings.from_file(args.config_file).open(initialize=args.command == "init")
+        settings = AgentSettings.from_file(args.config_file)
+        if args.command == "upgrade-outbox":
+            print(json.dumps(settings.upgrade_outbox(args.backup_file)))
+            return 0
+        service = settings.open(initialize=args.command == "init")
         if args.command == "init":
             result = {"status": "initialized", **asyncio.run(service.status())}
         else:

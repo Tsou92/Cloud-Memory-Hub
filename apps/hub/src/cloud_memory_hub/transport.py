@@ -20,7 +20,7 @@ from cloud_memory_hub.events import (
     canonical_uuid,
     require_current_filter,
 )
-from cloud_memory_hub.local_outbox import LocalOutbox, OutboxError
+from cloud_memory_hub.local_outbox import TERMINAL_REJECTION_CODE, LocalOutbox, OutboxError
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError, parse_json
 from cloud_memory_hub.read_contract import (
     READ_OPERATIONS,
@@ -35,6 +35,7 @@ from cloud_memory_hub.remote_access import TOKEN_PATTERN
 MAX_RESPONSE_BYTES = 128 * 1024
 MAX_ORIGINAL_RESPONSE_BYTES = 64 * 1024
 REQUEST_DEADLINE = 20.0
+MAX_REJECTION_RESPONSE_BYTES = 4096
 
 
 class TransportError(Exception):
@@ -137,6 +138,27 @@ def _http_failure(status: int) -> TransportError:
     )
 
 
+async def _terminal_upload_rejection(response, path, payload, expected):
+    if not (
+        path == "/hub/v1/events"
+        and payload is not None
+        and expected == 202
+        and response.status_code == 409
+        and response.headers.get("content-type", "").split(";")[0].lower() == "application/json"
+        and response.headers.get("content-encoding", "identity").lower() == "identity"
+    ):
+        return False
+    body = bytearray()
+    async for chunk in response.aiter_raw():
+        if len(body) + len(chunk) > MAX_REJECTION_RESPONSE_BYTES:
+            return False
+        body.extend(chunk)
+    try:
+        return parse_json(body) == {"detail": TERMINAL_REJECTION_CODE}
+    except PrivacyError:
+        return False
+
+
 async def _request(client, connection, path, *, payload=None, expected=200):
     try:
         async with asyncio.timeout(REQUEST_DEADLINE):
@@ -151,6 +173,8 @@ async def _request(client, connection, path, *, payload=None, expected=200):
                 },
             ) as response:
                 if response.status_code != expected:
+                    if await _terminal_upload_rejection(response, path, payload, expected):
+                        raise TransportError(TERMINAL_REJECTION_CODE)
                     raise _http_failure(response.status_code)
                 if (
                     response.headers.get("content-type", "").split(";")[0].lower()
@@ -232,9 +256,24 @@ async def send_pending(connection: RemoteConnection, outbox: LocalOutbox, *, tra
                 or permission.get("allowed") is not True
             ):
                 raise TransportError("source_permission_required")
-            receipt = await _request(
-                client, connection, "/hub/v1/events", payload=item.payload, expected=202
-            )
+            try:
+                receipt = await _request(
+                    client, connection, "/hub/v1/events", payload=item.payload, expected=202
+                )
+            except TransportError as error:
+                if error.code != TERMINAL_REJECTION_CODE:
+                    raise
+                try:
+                    outbox.reject_delivery(
+                        instance_id=connection.instance_id,
+                        device_id=connection.device_id,
+                        event_id=item.event_id,
+                        payload_digest=item.payload_digest,
+                        code=error.code,
+                    )
+                except OutboxError:
+                    raise TransportError("remote_rejection_not_saved") from None
+                continue
             _identity(receipt, connection)
             if (
                 receipt.get("status") != "accepted"
