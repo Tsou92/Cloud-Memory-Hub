@@ -174,6 +174,11 @@
       "path": "patches/0034-source-root-generation.patch",
       "scope": "source_root_generation_identity_and_explicit_legacy_candidate_reconfirmation",
       "digest": "sha256:d7f08e2c613f0156a58bc2239c86a5113b45da63951f05e0e627947dd37796e6"
+    },
+    {
+      "path": "patches/0035-console-form-history-and-backup-guidance.patch",
+      "scope": "console_model_form_layout_readable_hub_history_and_existing_backup_guide",
+      "digest": "sha256:263f8dcf46990da49e7ccc69c98e8ac1f6beeab34711082825c547552b9a2424"
     }
   ]
 }
