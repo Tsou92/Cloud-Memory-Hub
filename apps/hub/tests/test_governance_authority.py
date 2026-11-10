@@ -245,12 +245,18 @@ def test_runtime_fault_blocks_core_remote_health_and_background_claims(tmp_path,
 def test_response_prepared_before_intent_is_not_published_after_it(tmp_path):
     config = config_for(tmp_path)
     app = create_hub(config)
+    entered = False
 
     async def read_then_govern():
+        nonlocal entered
+        entered = True
         app.governance.append(intent_for(app.governance))
         return JSONResponse({"content": "Synthetic obsolete memory"})
 
     app.core.add_api_route("/api/test-governance", read_then_govern)
+    # The installed Web SPA fallback is already registered by create_hub.
+    # This synthetic route must run before it to exercise the response fence.
+    app.core.router.routes.insert(0, app.core.router.routes.pop())
 
     async def scenario():
         async with app.core.router.lifespan_context(app.core):
@@ -261,6 +267,7 @@ def test_response_prepared_before_intent_is_not_published_after_it(tmp_path):
                     "/api/test-governance",
                     headers={"Authorization": "Bearer " + config.admin_token},
                 )
+                assert entered
                 assert reply.status_code == 503
                 assert "obsolete" not in reply.text
 
