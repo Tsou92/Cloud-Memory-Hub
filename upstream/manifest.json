@@ -23,7 +23,7 @@
     {
       "path": "patches/0004-show-sdk-library-on-first-open.patch",
       "scope": "runtime_compatibility_with_regression_tests",
-      "digest": "sha256:7201d14d74a8688d7aee3d11181d565f817054a3afd7b5ed7e65b14d57902332"
+      "digest": "sha256:4427e0bc41fa952188f1ef72d0edb5e199d3cc09bf41560ea3eb787c0508ab5f"
     },
     {
       "path": "patches/0005-external-source-write-authorizer.patch",

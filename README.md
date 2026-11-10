@@ -10,7 +10,7 @@
 
 ## 当前状态与支持范围
 
-**当前源码版本为 `0.1.0`，面向 GitHub 自行部署用户。** 可下载的已发行版本及校验文件以 [GitHub Releases](https://github.com/Tsou92/Cloud-Memory-Hub/releases) 为准；源码版本号不等于已完成发行。默认接入为“NAS 生成一次性链接 → 电脑一条命令或交给 Agent 安装 → 验证 MCP”，无须另装图形 App。已有完整 CI、三系统安装检查、真实 NAS／两台 Mac 的 Claude 读写，以及真实 Codex 桌面与 Claude 双向交接证据；各证据对应的提交、模型与制品范围见[新接入验证](docs/reviews/2026-11-10-one-link-onboarding.md)。
+**当前源码版本为 `0.1.1`，面向 GitHub 自行部署用户。** 可下载的已发行版本及校验文件以 [GitHub Releases](https://github.com/Tsou92/Cloud-Memory-Hub/releases) 为准；源码版本号不等于已完成发行。默认接入为“NAS 生成一次性链接 → 电脑一条命令或交给 Agent 安装 → 验证 MCP”，无须另装图形 App。已有完整 CI、三系统安装检查、真实 NAS／两台 Mac 的 Claude 读写，以及真实 Codex 桌面与 Claude 双向交接证据；各证据对应的提交、模型与制品范围见[新接入验证](docs/reviews/2026-11-10-one-link-onboarding.md)。
 
 | 入口 | 当前能力 | 验收边界 |
 | --- | --- | --- |

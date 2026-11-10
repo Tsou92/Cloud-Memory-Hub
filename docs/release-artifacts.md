@@ -56,6 +56,23 @@ GitHub 要求手动工作流已存在于默认分支，标签指向的提交也�
 源码和 provenance 的 gzip 头不包含本机文件名或当前时间；不承诺第三方依赖和整套镜像逐字可重复构建。
 不包含用户配置、配对文件、运行数据、模型密钥或开发机私有路径。
 
+镜像回执中的 `image_id` 保留 smoke 实测镜像的 Docker 原生 ID；新增
+`config_digest` 记录归档配置原始字节的 SHA-256。经典 image store 的 ID
+可以直接等于配置摘要；containerd image store 的 ID 也可能指向 OCI image
+index 或 image manifest，因此不同存储后端导入同一归档后的原生 ID 不保证相同。
+存在 OCI Descriptor 时，回执另存其 `mediaType`、`digest` 和 `size`。
+
+发行校验要求 Descriptor 的 digest 与实测 ID 一致，并逐层核对归档中相应
+blob 的大小和 SHA-256；index 必须唯一选出 `linux/amd64` image manifest，
+再证明其配置与 docker-save `manifest.json` 指向同一份配置。直接 OCI image
+manifest 使用相同的配置绑定检查。平台、源码 revision 和发行标签检查继续保留；
+未知 Descriptor 类型、多个匹配平台、配置绑定链上缺失或损坏的 blob 均拒绝。此兼容仅服务于
+现有 Linux amd64 制品，不新增其他架构支持，也不能仅凭相同 revision 标签认定
+归档就是已测镜像。跨存储后端验收应核对归档摘要和 `config_digest`，将原生
+`image_id` 作为相应 Docker 环境中的观测记录。
+存储后端背景见 [Docker containerd image store 文档](https://docs.docker.com/engine/storage/containerd/)；
+具体 ID 表示仍以该次实测 inspect 和归档中的内容摘要为准。
+
 ## 同一制品验收后发布
 
 按已有标签触发 `release.yml`，保持 `publish=false`。成功后，从该次运行下载
@@ -67,8 +84,8 @@ Mac 验收使用其中的最终客户端包。保留运行 ID、附件摘要、�
 指向刚才下载并验收的原七附件目录：
 
 ```sh
-python -m scripts.release_artifacts verify --tag v0.1.0 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY
-python -m scripts.release_artifacts publish --tag v0.1.0 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY --repository Tsou92/Cloud-Memory-Hub
+python -m scripts.release_artifacts verify --tag v0.1.1 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY
+python -m scripts.release_artifacts publish --tag v0.1.1 --commit "$(git rev-parse HEAD)" --directory RELEASE_DIRECTORY --repository Tsou92/Cloud-Memory-Hub
 ```
 
 发布器仍执行下文的远端标签、草稿、上传、重新下载与摘要核对，不跳过任何校验。
