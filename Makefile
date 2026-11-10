@@ -16,6 +16,7 @@ prepare-upstream:
 	uv run --locked python -m scripts.prepare_upstream
 
 check-runtime: prepare-upstream
+	uv run --locked python .local/upstream/hy-memory/memhub/scripts/fetch_embedding_model.py
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub pytest -q
 
 .PHONY: probe-diagnostic-inventory

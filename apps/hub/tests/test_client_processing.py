@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import sqlite3
 from dataclasses import asdict
 from datetime import datetime
@@ -391,5 +392,9 @@ def test_setup_status_exit_code_preserves_partial_failure(
         "sys.argv",
         ["cloud-memory-setup", "status", "--config-file", "/synthetic/config", "--check-remote"],
     )
-    assert setup_cli.main() == expected
+    previous_umask = os.umask(0o077)
+    try:
+        assert setup_cli.main() == expected
+    finally:
+        os.umask(previous_umask)
     assert json.loads(capsys.readouterr().out)["processing"]["status"] == state
