@@ -46,11 +46,19 @@
 
 [v0.1.2 正式 Release](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.2) 已于 `2026-11-10T12:26:22Z` 公开，Release ID `440321239`。既有发布脚本 exit 0；七附件上传后重新下载校验，与本次验收的原七附件一致。另以不带身份的 GET 请求下载公开 `SHA256SUMS`，得到 HTTP 200、599 字节，SHA-256 为 `08c3fdd76c12a1e1971c7d64a071e98e030f57dad8c66e5064c75d180c6d10c7`；此匿名检查仅针对校验文件。
 
-[官网](https://memoryhub.tsounas.cn) 已正式提升至 Vercel 部署 `dpl_CHpERiJn46KnhFppCdzfJxqfd6tC`：九个公开文件匿名 GET 均为 200，摘要与发布源码一致；五个私有路径 HEAD 均为 404。真实 Chrome 完成首页至指南、`guide#agents` 定位、390 像素菜单操作及无横向溢出检查，控制台错误为 0；下载按钮实际到达 `v0.1.2`、Latest 和 `c59db5b` 对应页面。GitHub 外部附件列表持续显示 Loading，重载未改善，本次未将浏览器附件列表展开记为通过；前述七附件下载校验及匿名校验文件直链结果独立保留。
+[官网](https://memoryhub.tsounas.cn) 首次发行发布提升至 Vercel 部署 `dpl_CHpERiJn46KnhFppCdzfJxqfd6tC`：九个公开文件匿名 GET 均为 200，摘要与发布源码一致；五个私有路径 HEAD 均为 404。真实 Chrome 完成首页至指南、`guide#agents` 定位、390 像素菜单操作及无横向溢出检查，控制台错误为 0；下载按钮实际到达 `v0.1.2`、Latest 和 `c59db5b` 对应页面。GitHub 外部附件列表持续显示 Loading，重载未改善，本次未将浏览器附件列表展开记为通过；前述七附件下载校验及匿名校验文件直链结果独立保留。
 
-测试资源只做了归属和生产依赖盘点，尚未执行最终清理；正式原附件、生产冷备、恢复资料、日常环境和 Git 历史继续保护。
+首次发行记录写入时，测试资源只完成归属和生产依赖盘点，尚未执行最终清理；后续实际清理见下节。正式原附件、生产冷备、恢复资料、日常环境和 Git 历史继续保护。
 
 参赛分支仍只保留在本地，不推送 GitHub，不改变主体产品或本次公开能力承诺。
+
+## 发布后收尾
+
+为避免用户依赖 GitHub 附件列表的加载状态，官网首页与指南补充了镜像、源码和校验文件的直接下载链接。最终网站提交 `77c5fa116ed7eb54bde478b01fde5f1c77182ed3` 对应生产部署 `dpl_CrBukQGAye7iHiDeCY1mhZL1giSQ`，九个公开文件及五个私有路径检查再次通过；真实 Chrome 核对三个链接和窄屏显示。该调整未修改 CSS、JavaScript 或后台风格，原生产部署保留以供回退。
+
+已按逐项归属与依赖检查清理 MacBook 的 9 个测试容器、13 个测试卷和 4 个测试网络，以及 NAS 的 3 个测试容器、7 个测试卷和 2 个测试网络；关闭的仅为隔离验收入口。另删除 NAS 上 35 份已验证存在保留副本的重复镜像归档，共 `9,138,948,608` 字节，并移除本机未配对验收安装、两个退役合成 Agent HOME 和项目内独立测试 MCP 配置。删除后生产容器、四个业务卷、原 HTTPS 入口与原 MCP 读取均通过核对，全部镜像、冷备、正式附件和验证证据继续保留。Mac mini 未访问、未清理；这不是所有设备测试文件均已清空的声明。
+
+清理期间一次只读预检因测试替身没有 Health 字段而停止，调整检查后才开始删除。全部删除完成后的首次汇总比较也报告失败，原始差异未捕获；随后独立只读核对证明生产字段一致，并复现 Docker 返回 Mounts 数组顺序变化导致原比较误报。按挂载目标规范化后结果一致，没有重放删除，也不把后续复现追认为第一次未保存差异的直接证据。
 
 ## 私有证据索引
 
@@ -69,3 +77,6 @@
 | `production-upgrade-complete.json` | `fe3363982e5b524df6a743863e313a22ddbe94695f10b106a916c2ea7322d64d` |
 | `production-external-acceptance.json` | `f165bf2a5d321aa0f13452826e947666e890fe19b0e327546a4a4a82333e222e` |
 | `production-mcp-acceptance.json` | `ca25878c4e4292099fa408fceaa59644abaab5a095fa6df75f68a07d4a998ca5` |
+| 官网最终 `production-verification.json` | `075a0a0ac6b97cb29fb62ab3e4eb128d947449da47432f0bb1a1a6dfdcc4da94` |
+| `website-direct-links-browser-acceptance.json` | `953c3d337d6aa1fd97c2157ef5d3d60ce7c38189582a656fd8c1104ea92424b5` |
+| Docker 清理 `summary.json` | `8df1740f81ff5a6e18a69ef682ec04660244be67cf31ae5506217c8a7daa71bc` |
