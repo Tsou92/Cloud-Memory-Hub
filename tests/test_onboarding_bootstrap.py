@@ -1,17 +1,22 @@
 """Exercise downloaded installer verification without touching an Agent configuration."""
 
+import ast
 import hashlib
 import http.server
 import json
 import os
+import select
 import shlex
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 RESOURCES = Path(__file__).resolve().parents[1] / "apps/hub/src/cloud_memory_hub/onboarding"
 CONNECTOR = (
@@ -21,10 +26,44 @@ CONNECTOR = (
 
 
 @contextmanager
-def synthetic_download(content):
+def synthetic_download(content, *, tls=False, path="/hub/connect.py", redirect=False):
+    temporary = tempfile.TemporaryDirectory(prefix="cmh-test-tls-")
+    cert = Path(temporary.name) / "ca.pem"
+    key = Path(temporary.name) / "key.pem"
+    if tls:
+        subprocess.run(
+            [
+                shutil.which("openssl"),
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-keyout",
+                str(key),
+                "-out",
+                str(cert),
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,DNS:hub-proxy-only.invalid,IP:127.0.0.1",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path != "/hub/connect.py":
+            if redirect and self.path == path:
+                self.send_response(302)
+                self.send_header("Location", "/redirected")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.path != path and not (redirect and self.path == "/redirected"):
                 self.send_error(404)
                 return
             self.send_response(200)
@@ -36,22 +75,156 @@ def synthetic_download(content):
             pass
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    if tls:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield (
+            f"{'https://localhost' if tls else 'http://127.0.0.1'}:{server.server_port}",
+            cert if tls else None,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        temporary.cleanup()
+
+
+@contextmanager
+def synthetic_proxy(content, mode=None, tunnel_target=None):
+    requests = []
+    if mode is None:
+        yield None, requests
+        return
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            body = content if mode == "required" else b""
+            self.send_response(200 if mode == "required" else 502)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_CONNECT(self):
+            requests.append("CONNECT " + self.path)
+            if mode != "required" or not tunnel_target:
+                self.send_error(502)
+                return
+            with socket.create_connection(tunnel_target, timeout=5) as target:
+                self.send_response(200)
+                self.end_headers()
+                sockets = [self.connection, target]
+                while True:
+                    ready, _, _ = select.select(sockets, [], [], 5)
+                    if not ready:
+                        return
+                    for source in ready:
+                        try:
+                            data = source.recv(65536)
+                            if not data:
+                                return
+                            (target if source is self.connection else self.connection).sendall(data)
+                        except OSError:
+                            # TLS rejection intentionally closes the tunnel abruptly.
+                            return
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", requests
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
 
+def isolated_proxy_environment(proxy, ca_file=None):
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+    }
+    if proxy:
+        environment.update(
+            http_proxy=proxy,
+            https_proxy=proxy,
+            all_proxy=proxy,
+            HTTP_PROXY=proxy,
+            HTTPS_PROXY=proxy,
+            ALL_PROXY=proxy,
+        )
+    if ca_file:
+        environment.update(CURL_CA_BUNDLE=str(ca_file), SSL_CERT_FILE=str(ca_file))
+    return environment
+
+
+def windows_test_ca(command, ca_file):
+    if os.name != "nt" or not ca_file:
+        return command
+    # Trust only this ephemeral test CA on the disposable CI runner, then remove it.
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        raise unittest.SkipTest("Windows TLS fixture trust is restricted to disposable CI")
+    cert = str(ca_file).replace("'", "''")
+    return (
+        "$cmhTestCert = [Security.Cryptography.X509Certificates.X509Certificate2]::new('"
+        + cert
+        + "'); "
+        "$cmhTestStore = "
+        "[Security.Cryptography.X509Certificates.X509Store]::new('Root','CurrentUser'); "
+        "$cmhTestStore.Open('ReadWrite'); $cmhTestStore.Add($cmhTestCert); try { "
+        + command
+        + " } finally { $cmhTestStore.Remove($cmhTestCert); $cmhTestStore.Close() }"
+    )
+
+
 class BootstrapTests(unittest.TestCase):
-    def run_installer(self, *, windows, valid, missing_python=False):
-        with tempfile.TemporaryDirectory(prefix="cmh-bootstrap-test-") as temporary:
-            with synthetic_download(CONNECTOR) as origin:
+    def run_installer(
+        self,
+        *,
+        windows,
+        valid,
+        missing_python=False,
+        proxy_mode=None,
+        unreachable=False,
+        expect_success=None,
+        untrusted=False,
+        redirect=False,
+        powershell_runtime=None,
+    ):
+        with tempfile.TemporaryDirectory(prefix="cmh bootstrap test ") as temporary:
+            with (
+                synthetic_download(CONNECTOR, tls=bool(proxy_mode), redirect=redirect) as (
+                    origin,
+                    ca_file,
+                ),
+                synthetic_proxy(CONNECTOR, proxy_mode, ("127.0.0.1", urlsplit(origin).port)) as (
+                    proxy,
+                    proxy_requests,
+                ),
+            ):
+                if unreachable or proxy_mode == "required":
+                    origin = "https://hub-proxy-only.invalid:65531"
                 suffix = "ps1" if windows else "sh"
                 script = (RESOURCES / f"install.{suffix}").read_text(encoding="utf-8")
+                values = {
+                    node.targets[0].id: ast.literal_eval(node.value)
+                    for node in ast.parse((RESOURCES.parent / "onboarding_api.py").read_text()).body
+                    if isinstance(node, ast.Assign)
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id in {"HUB_SHELL_FETCH", "HUB_POWERSHELL_FETCH"}
+                }
+                script = script.replace("__CMH_HUB_SHELL_FETCH__", values["HUB_SHELL_FETCH"])
+                script = script.replace(
+                    "__CMH_HUB_POWERSHELL_FETCH__", values["HUB_POWERSHELL_FETCH"]
+                )
                 if missing_python:
                     # Simulate only interpreter discovery. Download verification,
                     # extraction, uv and its Python preparation execute unchanged.
@@ -77,18 +250,28 @@ class BootstrapTests(unittest.TestCase):
                 path.write_text(script, encoding="utf-8")
                 # A non-secret placeholder also checks that shell metacharacters
                 # are preserved as argument data, never interpreted as commands.
-                link = origin + "/hub/connect#synthetic=A&B=literal"
+                link = origin + "/hub/connect#synthetic=A&B=literal with spaces"
                 if windows:
                     escaped_path = str(path).replace("'", "''")
                     command = [
-                        shutil.which("pwsh") or shutil.which("powershell"),
+                        shutil.which(powershell_runtime)
+                        if powershell_runtime
+                        else (shutil.which("pwsh") or shutil.which("powershell")),
                         "-NoProfile",
                         "-NonInteractive",
                         "-Command",
-                        f"& '{escaped_path}' -Link '{link}' -Agent codex",
+                        windows_test_ca(f"& '{escaped_path}' -Link '{link}' -Agent codex", ca_file),
                     ]
                 else:
                     command = ["sh", str(path), "--link", link, "--agent", "codex"]
+                environment = isolated_proxy_environment(proxy, ca_file)
+                if untrusted:
+                    environment.pop("CURL_CA_BUNDLE", None)
+                    environment.pop("SSL_CERT_FILE", None)
+                    curl_home = Path(temporary) / "curl settings"
+                    curl_home.mkdir()
+                    (curl_home / ".curlrc").write_text("insecure\nlocation\n")
+                    environment["CURL_HOME"] = str(curl_home)
                 result = subprocess.run(
                     command,
                     capture_output=True,
@@ -96,8 +279,9 @@ class BootstrapTests(unittest.TestCase):
                     encoding="utf-8",
                     errors="replace",
                     timeout=480 if missing_python else 30,
+                    env=environment,
                 )
-                if valid:
+                if expect_success if expect_success is not None else valid:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     markers = [
                         line for line in result.stdout.splitlines() if "bootstrap_probe" in line
@@ -113,6 +297,10 @@ class BootstrapTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertNotIn("bootstrap_probe", result.stdout)
                     self.assertNotIn(link, result.stdout + result.stderr)
+                self.assertTrue(
+                    all("#" not in url and "synthetic=" not in url for url in proxy_requests)
+                )
+                return result, proxy_requests
 
     @unittest.skipIf(os.name == "nt", "POSIX entry point is verified on Mac/Linux")
     def test_posix_download_integrity_and_argument_preservation(self):
@@ -149,6 +337,67 @@ class BootstrapTests(unittest.TestCase):
     )
     def test_powershell_prepares_verified_runtime_when_python_is_missing(self):
         self.run_installer(windows=True, valid=True, missing_python=True)
+
+    @unittest.skipIf(os.name == "nt", "POSIX entry point is verified on Mac/Linux")
+    def test_posix_hub_download_falls_back_only_after_environment_proxy_failure(self):
+        result, requests = self.run_installer(windows=False, valid=True, proxy_mode="reject")
+        self.assertTrue(requests)
+        self.assertIn("绕过代理", result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX entry point is verified on Mac/Linux")
+    def test_posix_hub_download_keeps_a_required_environment_proxy(self):
+        result, requests = self.run_installer(windows=False, valid=True, proxy_mode="required")
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("绕过代理", result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX entry point is verified on Mac/Linux")
+    def test_posix_both_paths_failure_is_private_and_actionable(self):
+        result, requests = self.run_installer(
+            windows=False, valid=True, proxy_mode="reject", unreachable=True, expect_success=False
+        )
+        self.assertTrue(requests)
+        self.assertIn("Tailscale", result.stderr)
+        self.assertIn("DIRECT", result.stderr)
+        self.assertIn("Clash", result.stderr)
+        self.assertNotIn("hub-proxy-only.invalid", result.stderr)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "Proxy environment coverage requires PowerShell 7")
+    def test_powershell_hub_download_falls_back_after_environment_proxy_failure(self):
+        result, requests = self.run_installer(windows=True, valid=True, proxy_mode="reject")
+        self.assertTrue(requests)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "Proxy environment coverage requires PowerShell 7")
+    def test_powershell_hub_download_keeps_a_required_environment_proxy(self):
+        self.run_installer(windows=True, valid=True, proxy_mode="required")
+
+    @unittest.skipUnless(shutil.which("pwsh"), "Proxy environment coverage requires PowerShell 7")
+    def test_powershell_both_paths_failure_is_private_and_actionable(self):
+        result, requests = self.run_installer(
+            windows=True, valid=True, proxy_mode="reject", unreachable=True, expect_success=False
+        )
+        self.assertTrue(requests)
+        self.assertIn("DIRECT", result.stderr)
+        self.assertNotIn("hub-proxy-only.invalid", result.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX entry point is verified on Mac/Linux")
+    def test_posix_hub_download_rejects_redirect_without_executing_target(self):
+        self.run_installer(windows=False, valid=True, redirect=True, expect_success=False)
+
+    @unittest.skipIf(os.name == "nt", "POSIX entry point is verified on Mac/Linux")
+    def test_posix_hub_download_ignores_insecure_curlrc_and_keeps_tls_verification(self):
+        self.run_installer(
+            windows=False, valid=True, proxy_mode="required", untrusted=True, expect_success=False
+        )
+
+    @unittest.skipUnless(
+        os.name == "nt" and shutil.which("powershell"), "Requires real Windows PowerShell 5.1"
+    )
+    def test_windows_powershell_51_direct_download_and_integrity(self):
+        self.run_installer(windows=True, valid=True, powershell_runtime="powershell")
+        self.run_installer(windows=True, valid=False, powershell_runtime="powershell")
+        self.run_installer(
+            windows=True, valid=True, proxy_mode="required", powershell_runtime="powershell"
+        )
 
 
 if __name__ == "__main__":

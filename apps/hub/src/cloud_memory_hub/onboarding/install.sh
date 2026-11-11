@@ -8,7 +8,7 @@ cmh_temp=$(mktemp -d "${TMPDIR:-/tmp}/cmh-connect.XXXXXXXX")
 trap 'rm -rf -- "$cmh_temp"' EXIT HUP INT TERM
 cmh_fail() { printf '%s\n' "$1" >&2; exit 1; }
 cmh_fetch() {
-  curl --fail --silent --show-error --location --max-redirs 3 \
+  curl --fail --silent --location --max-redirs 3 \
     --proto '=http,https' --proto-redir '=https' \
     --connect-timeout 15 --max-time 180 "$1" -o "$2" || \
     cmh_fail '下载连接组件失败。请检查网络后重新执行同一条命令。'
@@ -17,8 +17,9 @@ cmh_sha() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d ' ' -f 1
   else shasum -a 256 "$1" | cut -d ' ' -f 1; fi
 }
+__CMH_HUB_SHELL_FETCH__
 command -v curl >/dev/null 2>&1 || cmh_fail '系统缺少 curl，暂时无法下载连接组件。'
-cmh_fetch "$cmh_origin/hub/connect.py" "$cmh_temp/connect.py"
+cmh_fetch_hub "$cmh_origin/hub/connect.py" "$cmh_temp/connect.py"
 [ "$(cmh_sha "$cmh_temp/connect.py")" = "$cmh_script_sha" ] || \
   cmh_fail '连接组件校验失败。服务可能正在升级，请刷新连接页面再试。'
 cmh_python=''

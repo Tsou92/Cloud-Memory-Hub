@@ -4,6 +4,8 @@ Cloud Memory Hub 主体运行在 NAS Docker。电脑只需为已有的 AI 应用
 
 ## 默认：一次性链接接入
 
+使用 Clash、Shadowrocket 或终端代理时，参阅[代理与网络连接指南](proxy-and-network.md)。安装器的网络检查与 Agent 实际连接是两个阶段；需要调整白名单或重新启动宿主时，应先完成提示再验证 MCP。
+
 默认流程对应 [ADR-0065](adr/0065-one-link-remote-agent-onboarding.md)。正式支持的系统、实际验证的宿主及自动触发边界以发行说明和[接入验证](reviews/2026-11-10-one-link-onboarding.md)为准；接口通用不等于所有 Agent 都已实测。
 
 1. 在 NAS 管理网页创建或选择项目，进入「连接 Agent」。项目就是要共享的事情，例如“工作计划”；另一台设备要继续同一件事，也选择这个项目。

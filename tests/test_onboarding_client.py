@@ -399,6 +399,58 @@ class ClientTests(unittest.TestCase):
                 remote_factory=self.remote,
             )
 
+    def test_network_action_stops_before_claim_or_host_config_and_retry_preserves_identity(self):
+        self.remote.network_status = {
+            "requested": "auto",
+            "selected": "direct",
+            "hostname": "hub.example.invalid",
+            "environment_available": False,
+            "direct_available": True,
+            "action_required": True,
+            "health_verified": True,
+        }
+        result = self.connect()
+        self.assertEqual(result["status"], "network_action_required")
+        self.assertFalse(result["remote_verified"])
+        self.assertFalse(result["host_connection_verified"])
+        self.assertEqual(self.remote.calls, [])
+        self.assertFalse(self.claude_path().exists())
+        path, before = self.pending()
+        self.assertNotIn("bundle", before)
+        self.remote.network_status["action_required"] = False
+        self.remote.network_status["environment_available"] = True
+        self.remote.network_status["selected"] = "environment"
+        self.assertEqual(self.connect()["status"], "configured")
+        after = json.loads(path.read_text())
+        self.assertEqual(before["claimant_secret"], after["claimant_secret"])
+        self.assertEqual(self.remote.claim_secrets, [before["claimant_secret"]])
+
+    def test_claimed_identity_and_pending_plan_survive_later_network_action(self):
+        self.connect()
+        path, before = self.pending()
+        self.remote.network_status = {"action_required": True, "health_verified": True}
+        calls = list(self.remote.calls)
+        self.assertEqual(self.connect()["status"], "network_action_required")
+        self.assertEqual(json.loads(path.read_text()), before)
+        self.assertEqual(self.remote.calls, calls)
+
+    def test_network_action_cli_never_says_connection_complete(self):
+        output, errors = io.StringIO(), io.StringIO()
+        pending = {"status": "network_action_required", "agent": "codex"}
+        with (
+            patch.object(client, "connect", return_value=pending),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            self.assertEqual(client.main(["--agent", "codex", "--link", LINK]), 2)
+        self.assertNotIn("已配置", output.getvalue() + errors.getvalue())
+        self.assertIn("DOMAIN,hub.example.invalid,DIRECT", errors.getvalue())
+        self.assertIn("NO_PROXY", errors.getvalue())
+        self.assertIn("图形客户端", errors.getvalue())
+        self.assertIn("/mcp", errors.getvalue())
+        self.assertIn("memory_status", errors.getvalue())
+        self.assertNotIn(INVITATION, output.getvalue() + errors.getvalue())
+
     def test_unknown_response_fields_or_foreign_origin_rejected(self):
         for mutation in (
             {"credential": "must-not-be-returned"},

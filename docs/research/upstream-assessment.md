@@ -1,5 +1,7 @@
 # Hy-Memory / MemHub 复用评估
 
+2026-11-11 代理环境接入：继续复用独立 stdlib 安装器的 Remote、配对、MCP 验证和可恢复配置安装，以及现有 POSIX／PowerShell 下载模板。原 Remote 强制直连，与原生 HTTP MCP 宿主的环境代理不一致，需在 Hub 安装层补充选路检测、首层下载回退和明确恢复引导。上游高级连接组件需要不同运行时且同样固定忽略环境代理，不能通过默认切换 stdio 解决此问题。无需新代理服务或宿主私有配置字段。设计见 [ADR-0068](../adr/0068-proxy-aware-agent-onboarding.md)。
+
 2026-11-11 管理员凭证修改：复用上游 `UISessionStore`、Hub 既有 Origin／登录限速、私有文件检查与凭证过滤，以及现有 R6Settings 分组和表单。固定上游没有管理员凭证轮换；Hub 初始化刻意拒绝覆盖，因此在 Hub 边界补充原子凭证更新和会话失效，前端以独立小补丁接入。无需账户数据库、设备协议迁移或备份运行时重构。设计见 [ADR-0067](../adr/0067-administrator-credential-change.md)。
 
 2026-11-10 首次 GitHub Core 回归暴露了安装边界问题：原 `core-pr` runner 的独立环境安装注册表 SDK，缺少本项目已登记的 Anthropic 补丁。保留原 runner、隔离 HOME 和测试选择，仅为测试进程绑定校验后的固定 SDK 包，并在 pytest 启动时核对实际模块来源。补丁 0033 将 Core 中现存 SDK 直连收回已有 `hy_memory_bridge`，复用原协议转换、异常和文件维护原语；不复制解析器、不改变锁顺序或数据格式，也不放宽原架构检查。子进程测试保留已绑定的 SDK 搜索路径，缺密钥场景改为已有 Anthropic 支持下的准确错误。验证见[冷环境 CI 记录](../reviews/2026-11-10-cold-core-ci.md)。

@@ -7,10 +7,11 @@ $cmhOrigin = __CMH_ORIGIN_POWERSHELL__
 $cmhScriptSha = '__CMH_CONNECT_SHA256__'
 $cmhTemp = Join-Path ([IO.Path]::GetTempPath()) ('cmh-connect-' + [Guid]::NewGuid().ToString('N'))
 $cmhFailure = $false
+__CMH_HUB_POWERSHELL_FETCH__
 try {
     New-Item -ItemType Directory -Path $cmhTemp | Out-Null
     $cmhScript = Join-Path $cmhTemp 'connect.py'
-    Invoke-WebRequest -UseBasicParsing -Uri ($cmhOrigin + '/hub/connect.py') -OutFile $cmhScript -TimeoutSec 180
+    Get-CmhHubFile -Uri ($cmhOrigin + '/hub/connect.py') -OutFile $cmhScript
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $cmhScript).Hash.ToLowerInvariant() -ne $cmhScriptSha) {
         throw 'component_checksum_mismatch'
     }

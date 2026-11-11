@@ -78,6 +78,15 @@ def test_downloads_are_bound_to_served_connector_and_configured_origin(tmp_path)
                 assert "__CMH_" not in reply.text
                 assert "0.12.5" in reply.text
                 assert "3.12.13" in reply.text
+                assert "proxy-and-network.md" in reply.text
+                if path.endswith(".sh"):
+                    assert "curl -q --fail --silent" in reply.text
+                    assert "--noproxy '*'" in reply.text
+                    assert "--show-error" not in reply.text
+                else:
+                    assert "MaximumRedirection = 0" in reply.text
+                    assert "$cmhRequest.Proxy = $null" in reply.text
+                    assert "$cmhRequest.AllowAutoRedirect = $false" in reply.text
             page = await client.get("/hub/connect")
             script = re.search(r"<script>(.*?)</script>", page.text, re.S).group(1)
             script_hash = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
@@ -91,6 +100,9 @@ def test_downloads_are_bound_to_served_connector_and_configured_origin(tmp_path)
             assert "localStorage" not in script and "sessionStorage" not in script
             assert "history.replaceState" in script
             assert "fetch(" not in script
+            assert "__CMH_HUB_" not in script
+            assert "cmh_fetch_hub" in script and "Get-CmhHubFile" in script
+            assert "proxy-and-network.md" in script
             assert "__SCRIPT__" not in page.text and "__ORIGIN__" not in page.text
 
     asyncio.run(scenario())

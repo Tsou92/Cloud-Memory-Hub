@@ -84,6 +84,133 @@ STYLE = (
     "h1{font-size:23px}button,select{width:100%}}"
 )
 
+
+# Hub requests may retry directly, without altering proxy handling for public downloads.
+HUB_SHELL_FETCH = r"""cmh_hub_request() {
+  cmh_hub_url=$1; cmh_hub_output=$2; shift 2
+  cmh_hub_code=$(curl -q --fail --silent --proto '=http,https' \
+    --connect-timeout 15 --max-time 180 --write-out '%{http_code}' \
+    "$@" "$cmh_hub_url" -o "$cmh_hub_output") || return 1
+  case "$cmh_hub_code" in 2??) [ -s "$cmh_hub_output" ] ;; *) return 1 ;; esac
+}
+cmh_fetch_hub() {
+  case "$1" in http://*) cmh_hub_request "$1" "$2" --noproxy '*' && return 0 ;; esac
+  case "$1" in https://*)
+  cmh_hub_request "$1" "$2" && return 0
+  if cmh_hub_request "$1" "$2" --noproxy '*'; then
+    printf '%s\n' '已为本次 Hub 下载绕过代理；其他下载仍沿用原代理设置。' >&2
+    return 0
+  fi
+  esac
+  printf '%s\n' \
+    '无法下载连接组件。请先确认 NAS 服务可访问；使用 Tailscale 时也要确认已连接。' \
+    '如用局域网或 Tailscale，在 Clash/Shadowrocket 为服务的精确域名添加 DIRECT 规则。' \
+    '如 Hub 必须通过代理访问，请检查代理节点和规则。然后重新打开 Agent，重试并验证 MCP 连接。' \
+    '排查指南：https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md' >&2
+  return 1
+}
+"""
+
+HUB_POWERSHELL_FETCH = r"""function Get-CmhHubFile {
+    param([string]$Uri, [string]$OutFile)
+    $cmhParameters = @{
+        UseBasicParsing = $true; Uri = $Uri; OutFile = $OutFile
+        TimeoutSec = 180; MaximumRedirection = 0; ErrorAction = 'Stop'; PassThru = $true
+    }
+    if (([Uri]$Uri).Scheme -eq 'https') {
+        try {
+            if ($PSVersionTable.PSVersion.Major -lt 6) {
+                # PS 5.1 needs explicit environment proxy support; no system settings change.
+                $cmhHost = ([Uri]$Uri).DnsSafeHost.Trim([char[]]'[]').ToLowerInvariant()
+                $cmhBypass = $false
+                $cmhNoProxy = [Environment]::GetEnvironmentVariable('no_proxy')
+                foreach ($cmhEntry in ($cmhNoProxy -split ',')) {
+                    $cmhEntry = $cmhEntry.Trim().ToLowerInvariant()
+                    if ($cmhEntry -eq '*') { $cmhBypass = $true; break }
+                    if ($cmhEntry -match '^(?:\[([^]]+)\]|([^:]+))(?::([0-9]+))?$') {
+                        $cmhEntryHost = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+                        $cmhEntryPort = $Matches[3]
+                        $cmhEntryHost = $cmhEntryHost.TrimStart('.')
+                        if ($cmhEntryHost -and
+                            (!$cmhEntryPort -or [int]$cmhEntryPort -eq ([Uri]$Uri).Port) -and
+                            ($cmhHost -eq $cmhEntryHost -or
+                             $cmhHost.EndsWith('.' + $cmhEntryHost))) { $cmhBypass = $true }
+                    }
+                }
+                if ($cmhBypass) { throw 'environment_proxy_bypassed' }
+                $cmhProxyValue = $null
+                foreach ($cmhName in @('https_proxy','HTTPS_PROXY','all_proxy','ALL_PROXY')) {
+                    $cmhProxyValue = [Environment]::GetEnvironmentVariable($cmhName)
+                    if ($cmhProxyValue) { break }
+                }
+                if ($cmhProxyValue) {
+                    $cmhProxy = [Uri]$cmhProxyValue
+                    $cmhParameters.Proxy = $cmhProxy.Scheme + '://' + $cmhProxy.Authority
+                    if ($cmhProxy.UserInfo) {
+                        $cmhParts = $cmhProxy.UserInfo.Split(':', 2)
+                        $cmhUsername = [Uri]::UnescapeDataString($cmhParts[0])
+                        $cmhPassword = [Security.SecureString]::new()
+                        if ($cmhParts.Count -gt 1 -and $cmhParts[1]) {
+                            $cmhPassword = ConvertTo-SecureString -AsPlainText -Force -String (
+                                [Uri]::UnescapeDataString($cmhParts[1]))
+                        }
+                        $cmhParameters.ProxyCredential =
+                            [Management.Automation.PSCredential]::new($cmhUsername, $cmhPassword)
+                    }
+                }
+            }
+            $cmhResponse = Invoke-WebRequest @cmhParameters
+            if ([int]$cmhResponse.StatusCode -ge 200 -and
+                [int]$cmhResponse.StatusCode -lt 300 -and
+                (Get-Item -LiteralPath $OutFile).Length -gt 0) { return }
+        } catch { }
+    }
+    try {
+        if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('NoProxy')) {
+            $cmhParameters.NoProxy = $true
+            $cmhResponse = Invoke-WebRequest @cmhParameters
+            if ([int]$cmhResponse.StatusCode -lt 200 -or
+                [int]$cmhResponse.StatusCode -ge 300 -or
+                (Get-Item -LiteralPath $OutFile).Length -eq 0) { throw 'hub_status_invalid' }
+        } else {
+            # Windows PowerShell 5.1: disable the proxy on this request only.
+            $cmhRequest = [Net.HttpWebRequest]::Create([Uri]$Uri)
+            $cmhRequest.Proxy = $null
+            $cmhRequest.AllowAutoRedirect = $false
+            $cmhRequest.Timeout = 180000
+            $cmhRequest.ReadWriteTimeout = 180000
+            $cmhResponse = $null; $cmhInput = $null; $cmhOutput = $null
+            try {
+                $cmhResponse = $cmhRequest.GetResponse()
+                if ([int]$cmhResponse.StatusCode -lt 200 -or
+                [int]$cmhResponse.StatusCode -ge 300) { throw 'hub_status_invalid' }
+                $cmhInput = $cmhResponse.GetResponseStream()
+                $cmhOutput = [IO.File]::Open($OutFile, [IO.FileMode]::Create,
+                    [IO.FileAccess]::Write, [IO.FileShare]::None)
+                $cmhInput.CopyTo($cmhOutput)
+                if ($cmhOutput.Length -eq 0 -or
+                    ($cmhResponse.ContentLength -ge 0 -and
+                     $cmhOutput.Length -ne $cmhResponse.ContentLength)) {
+                    throw 'hub_download_incomplete'
+                }
+                $cmhOutput.Flush($true)
+            } finally {
+                if ($cmhOutput) { $cmhOutput.Dispose() }
+                if ($cmhInput) { $cmhInput.Dispose() }
+                if ($cmhResponse) { $cmhResponse.Dispose() }
+            }
+        }
+        return
+    } catch {
+        throw ('无法下载连接组件。请先确认 NAS 服务可访问；使用 Tailscale 时也要确认已连接。' +
+            '如用局域网或 Tailscale，在 Clash/Shadowrocket 为服务的精确域名添加 DIRECT 规则。' +
+            '如 Hub 必须通过代理访问，请检查代理节点和规则。' +
+            '然后重新打开 Agent，重试并验证 MCP 连接。排查指南：' +
+            'https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md')
+    }
+}
+"""
+
 SCRIPT = r"""'use strict';
 const origin = __ORIGIN__;
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -105,18 +232,26 @@ function render() {
   const agent = byId('agent').value;
   const unixProgram = 'umask 077; cmh_file=$(mktemp) || exit 1; '
     + 'trap \'rm -f -- "$cmh_file"\' EXIT; '
-    + 'curl -fsSL --proto-redir \'=https\' "$1/hub/install.sh" -o "$cmh_file" '
+    + __CMH_HUB_SHELL_FETCH__
+    + 'cmh_fetch_hub "$1/hub/install.sh" "$cmh_file" '
     + '&& sh "$cmh_file" --link "$2" --agent "$3"';
+  const windowsProgram = "& { $ErrorActionPreference = 'Stop'; "
+    + __CMH_HUB_POWERSHELL_FETCH__
+    + '$cmhFile = [IO.Path]::GetTempFileName(); try { Get-CmhHubFile -Uri '
+    + psQuote(origin + '/hub/install.ps1')
+    + ' -OutFile $cmhFile; & ([scriptblock]::Create([IO.File]::ReadAllText($cmhFile))) -Link '
+    + psQuote(link) + ' -Agent ' + agent
+    + ' } finally { Remove-Item -LiteralPath $cmhFile -Force } }';
   const command = byId('platform').value === 'windows'
-    ? "& { $ErrorActionPreference = 'Stop'; $cmhScript = irm -ErrorAction Stop "
-      + psQuote(origin + '/hub/install.ps1')
-      + '; & ([scriptblock]::Create($cmhScript)) -Link ' + psQuote(link) + ' -Agent ' + agent + ' }'
+    ? windowsProgram
     : 'sh -c ' + shellQuote(unixProgram) + ' cmh-connect ' + shellQuote(origin)
       + ' ' + shellQuote(link) + ' ' + agent;
   byId('command').value = valid ? command : '';
   byId('prompt').value = valid ? '请按此 Cloud Memory Hub 连接页的说明，使用官方连接器为 '
     + byId('agent').selectedOptions[0].text + ' 安装 MCP 和 Skill，并验证连接：' + link
-    + '。保留其他配置，不要输出长期凭证；需要重新加载时告诉我。' : '';
+    + '。保留其他配置，不要输出长期凭证；需要重新加载时告诉我。网络或代理问题请按 '
+    + 'https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md '
+    + '排查，按诊断选择此 Hub 直连或代理，不改其他服务设置。' : '';
   byId('copy-prompt').disabled = !valid;
   byId('copy-command').disabled = !valid;
 }
@@ -154,6 +289,8 @@ def public_connection_response(path: str, method: str, origin: str) -> Response:
         )
     if path == "/hub/connect":
         script = SCRIPT.replace("__ORIGIN__", json.dumps(origin).replace("<", "\\u003c"))
+        script = script.replace("__CMH_HUB_SHELL_FETCH__", json.dumps(HUB_SHELL_FETCH))
+        script = script.replace("__CMH_HUB_POWERSHELL_FETCH__", json.dumps(HUB_POWERSHELL_FETCH))
         digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
         style_digest = base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode()
         headers["Content-Security-Policy"] = (
@@ -172,6 +309,8 @@ def public_connection_response(path: str, method: str, origin: str) -> Response:
             return Response(status_code=404, headers=headers)
         content = resource.joinpath(path.rsplit("/", 1)[1]).read_text(encoding="utf-8")
         content = content.replace("__CMH_CONNECT_SHA256__", hashlib.sha256(connector).hexdigest())
+        content = content.replace("__CMH_HUB_SHELL_FETCH__", HUB_SHELL_FETCH)
+        content = content.replace("__CMH_HUB_POWERSHELL_FETCH__", HUB_POWERSHELL_FETCH)
         content = content.replace("__CMH_ORIGIN_SHELL__", shlex.quote(origin))
         content = content.replace(
             "__CMH_ORIGIN_POWERSHELL__", "'" + origin.replace("'", "''") + "'"

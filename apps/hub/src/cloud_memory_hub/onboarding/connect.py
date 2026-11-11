@@ -7,6 +7,7 @@ import argparse
 import base64
 import contextlib
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -353,11 +354,91 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Remote:
-    def __init__(self, origin):
+    def __init__(self, origin, *, network="auto"):
         self.origin = valid_origin(origin)
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        if network not in {"auto", "environment", "direct"}:
+            fail("invalid_network_mode")
+        host = network_hostname(self.origin)
+        try:
+            loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        proxies = urllib.request.getproxies_environment()
+        # Claude's HTTPS requests also fall back to HTTP_PROXY. Preserve the
+        # environment's existing bypass entries; never copy proxy URLs to output.
+        if "https" not in proxies and "http" in proxies:
+            proxies["https"] = proxies["http"]
+        if "https" not in proxies and "all" in proxies:
+            proxies["https"] = proxies["all"]
+        has_proxy = bool(proxies.get("https") or proxies.get("http") or proxies.get("all"))
+        direct = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        environment = None
+        if not loopback:
+            try:
+                environment = urllib.request.build_opener(
+                    urllib.request.ProxyHandler(proxies), NoRedirect()
+                )
+            except (OSError, ValueError, TypeError, http.client.HTTPException):
+                pass
+        environment_available = None
+        direct_available = None
+        if loopback:
+            direct_available = self._health(direct)
+            selected = "direct"
+            # Never probe or send plaintext loopback credentials through a proxy.
+            action = has_proxy and not urllib.request.proxy_bypass_environment(host, proxies)
+        elif network == "environment":
+            environment_available = environment is not None and self._health(environment)
+            if not environment_available:
+                fail("network_unavailable")
+            selected, action = "environment", False
+        else:
+            environment_available = environment is not None and self._health(environment)
+            if network == "auto" and environment_available:
+                selected, action = "environment", False
+            else:
+                direct_available = self._health(direct)
+                selected = "direct"
+                action = not environment_available
+        if selected == "direct" and not direct_available:
+            fail("network_unavailable")
+        self.opener = direct if selected == "direct" else environment
+        self.network_status = {
+            "requested": network,
+            "selected": selected,
+            "hostname": host,
+            "environment_available": environment_available,
+            "direct_available": direct_available,
+            "action_required": action,
+            "health_verified": True,
+            "loopback_direct": loopback,
+        }
+
+    def _health(self, opener):
+        request = urllib.request.Request(
+            self.origin + "/healthz", headers={"Accept": "application/json"}
+        )
+        try:
+            with opener.open(request, timeout=5) as response:
+                data = response.read(4097)
+                return (
+                    response.status == 200
+                    and len(data) <= 4096
+                    and parse_json(data) == {"status": "ok"}
+                )
+        except (
+            ConnectError,
+            urllib.error.URLError,
+            OSError,
+            ValueError,
+            TypeError,
+            http.client.HTTPException,
+        ):
+            return False
 
     def request(self, path, *, payload=None, token=None, notification=False):
+        if self.network_status["action_required"]:
+            fail("network_action_required")
         headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
@@ -391,8 +472,91 @@ class Remote:
                 503: "hub_unavailable",
             }
             fail(codes.get(error.code, "remote_request_failed"))
-        except (urllib.error.URLError, TimeoutError, OSError):
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            ValueError,
+            TypeError,
+            http.client.HTTPException,
+        ):
             fail("network_unavailable")
+
+
+def network_hostname(origin):
+    """A single exact host safe for proxy rules and shell/PowerShell literals."""
+    host = urllib.parse.urlsplit(origin).hostname
+    # ipaddress accepts arbitrary IPv6 scope-id text; reject nonportable zones
+    # before a host can enter a proxy rule or suggested shell command.
+    if not isinstance(host, str) or "%" in host:
+        fail("invalid_link")
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        if (
+            not isinstance(host, str)
+            or len(host) > 253
+            or any(
+                not re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+                for label in host.split(".")
+            )
+        ):
+            fail("invalid_link")
+        return host.lower()
+
+
+def network_guidance(origin, agent):
+    host = network_hostname(valid_origin(origin))
+    try:
+        address = ipaddress.ip_address(host)
+        kind = "IP-CIDR6" if address.version == 6 else "IP-CIDR"
+        rule = f"{kind},{host}/{address.max_prefixlen},DIRECT"
+    except ValueError:
+        rule = f"DOMAIN,{host},DIRECT"
+    lines = [
+        "网络设置尚未完成，不能认定 Agent 已连接；已领取身份和配对进度保留。",
+        "若这个 Hub 应通过局域网/Tailscale直连，请在 Clash/Mihomo 或 Shadowrocket "
+        "当前生效的规则中加入：",
+        rule,
+        "只绕过这个精确目标，保留其他代理；若 Hub 必须经过代理，"
+        "请修正代理路径后用 --network environment 重试。",
+    ]
+    if os.name == "nt":
+        lines.extend(
+            [
+                "从当前 PowerShell 启动的 Agent，也可保留原项并追加精确主机：",
+                f'if (($env:NO_PROXY -split "[,\\s]+") -notcontains "{host}") {{ '
+                f'$env:NO_PROXY = (@($env:NO_PROXY, "{host}") | Where-Object {{$_}}) -join "," }}',
+                f'if (($env:no_proxy -split "[,\\s]+") -notcontains "{host}") {{ '
+                f'$env:no_proxy = (@($env:no_proxy, "{host}") | Where-Object {{$_}}) -join "," }}',
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "从当前终端启动的 Agent，也可保留原项并追加精确主机：",
+                f'case ",${{NO_PROXY:-}}," in *",{host},"*) ;; *) '
+                f'export NO_PROXY="${{NO_PROXY:+${{NO_PROXY}},}}{host}" ;; esac',
+                f'case ",${{no_proxy:-}}," in *",{host},"*) ;; *) '
+                f'export no_proxy="${{no_proxy:+${{no_proxy}},}}{host}" ;; esac',
+            ]
+        )
+    lines.extend(
+        [
+            "完成网络设置后，在同一环境重试原安装命令；不要删除配对进度或重新生成身份。",
+            "完全退出并重新启动 Agent。Claude Code 在 /mcp 重连此 Hub，"
+            "再调用 memory_status；确认 connected 才算完成。",
+        ]
+    )
+    if agent == "codex":
+        lines.append(
+            "Codex 桌面和其他已打开的图形客户端未必继承终端变量；"
+            "优先配置代理软件的精确直连规则，完全退出后重开并检查该 MCP。"
+        )
+    lines.append(
+        "完整排查：https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md"
+    )
+    return "\n".join(lines)
 
 
 def validate_bundle(value, origin):
@@ -881,7 +1045,7 @@ def configure(installation, agent, home, env, bundle, token):
     return name
 
 
-def connect(link, agent, *, home=None, remote_factory=Remote):
+def connect(link, agent, *, home=None, remote_factory=None, network="auto"):
     origin, pairing_id, invitation = parse_link(link)
     explicit_home = home is not None
     home = checked_path(Path(home).expanduser() if explicit_home else Path.home())
@@ -919,7 +1083,22 @@ def connect(link, agent, *, home=None, remote_factory=Remote):
             ):
                 fail("pending_state_invalid")
             installation = Installation(directory, state)
-        remote = remote_factory(origin)
+        remote = (
+            remote_factory(origin)
+            if remote_factory is not None
+            else Remote(origin, network=network)
+        )
+        network_status = getattr(remote, "network_status", None)
+        if network_status is not None and network_status["action_required"]:
+            return {
+                "status": "network_action_required",
+                "agent": agent,
+                "remote_verified": False,
+                "host_connection_verified": False,
+                "host_reload_required": True,
+                "network": network_status,
+                "private_state": str(directory),
+            }
         if "bundle" not in state:
             value = remote.request(
                 "/hub/v1/pairings/claim",
@@ -941,6 +1120,8 @@ def connect(link, agent, *, home=None, remote_factory=Remote):
             "agent": agent,
             "remote_verified": True,
             "host_reload_required": True,
+            "host_connection_verified": False,
+            "network": network_status,
             "private_state": str(directory),
         }
 
@@ -1045,14 +1226,30 @@ def main(argv=None):
         "--agent", choices=("claude", "codex", "opencode", "hermes", "generic"), required=True
     )
     parser.add_argument("--home", type=Path, help="隔离安装根目录（测试或显式独立配置用）")
+    parser.add_argument(
+        "--network",
+        choices=("auto", "environment", "direct"),
+        default="auto",
+        help="Hub 网络路径；固定在无凭证健康检查选中的线路，不在写入结果未知后换线重放",
+    )
     args = parser.parse_args(argv)
     try:
         if sys.version_info < (3, 11):  # noqa: UP036 - downloaded standalone script
             fail("python_311_required")
-        result = connect(args.link, args.agent, home=args.home)
+        result = connect(args.link, args.agent, home=args.home, network=args.network)
     except ConnectError as error:
         print(f"连接未完成（{error}）。" + recovery_message(str(error)), file=sys.stderr)
         show_recovery_directory(args)
+        if str(error) in {
+            "network_unavailable",
+            "network_action_required",
+            "remote_request_failed",
+        }:
+            try:
+                origin, _, _ = parse_link(args.link)
+                print(network_guidance(origin, args.agent), file=sys.stderr)
+            except ConnectError:
+                pass
         return 1
     except (OSError, ValueError, TypeError, KeyError):
         print(
@@ -1060,6 +1257,10 @@ def main(argv=None):
             file=sys.stderr,
         )
         return 1
+    if result.get("status") == "network_action_required":
+        origin, _, _ = parse_link(args.link)
+        print(network_guidance(origin, args.agent), file=sys.stderr)
+        return 2
     if args.agent == "generic":
         print("远程 MCP 及身份验证通过，已生成通用配置；仍需将它添加到对应 Agent。")
     else:
