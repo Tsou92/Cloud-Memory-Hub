@@ -4,23 +4,30 @@
 
 ## 一条命令完成首装和接入
 
-在电脑上执行源码目录内的首装入口。把 `nas` 换成 SSH 别名或 `用户名@NAS地址`，将 `codex` 换成你正在使用的 Agent：
+在 Mac 或 Linux 电脑的目标项目目录运行以下命令。把 `USER@NAS` 换成 NAS 的 SSH 用户名与地址，或现有的 SSH 别名。
 
 ```sh
-/path/to/Cloud-Memory-Hub/scripts/install-hub --nas nas --agent codex
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && curl -q -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.5/scripts/bootstrap-install.sh -o "$cmh_installer" && sh "$cmh_installer" --nas USER@NAS --agent codex)
 ```
 
 也可以打开想共享的项目，把这句话交给能执行终端命令的 Agent：
 
-> 请用 Cloud Memory Hub 的 `scripts/install-hub` 在 `nas` 完成首次部署并接入我当前的 Codex 项目。需要本人登录或确认授权时，让我在原界面处理。
+> 请用 Cloud Memory Hub 的官方安装命令，在我的 NAS `USER@NAS` 完成首次部署并接入当前 Codex 项目。需要本人登录或确认授权时，让我在原界面处理。
 
 安装器通过 SSH 检查 NAS、校验发行制品、初始化 Docker 服务和私网入口，再自动创建当前项目并配对这台电脑。默认使用当前目录，在主目录运行会建立一个 `Cloud Memory Hub` 文件夹。`--workspace` 可选择已有项目。已有的项目和设备可以继续通过 Hub 的「连接 Agent」页面加入。
 
-NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Tailscale。若 Tailscale 在 Docker 中运行，同一行加 `--tailscale-container tailscale`。已配置好指向 Hub 的 HTTPS 反代时，用 `--origin https://你的域名`。已有实例使用下方的升级指南。
+NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Tailscale。需要参数时，加在命令末尾的右括号前。已有实例使用[升级指南](development-runtime.md#已有实例升级保持配置和身份)。
+
+| 场景 | 参数 |
+| --- | --- |
+| NAS 的 Tailscale 在 Docker 中运行 | `--tailscale-container tailscale`，将 `tailscale` 换成实际容器名 |
+| 已有 HTTPS 反代指向 NAS 回环端口 | `--origin https://hub.example.com`，换成自己的地址 |
+| SSH 使用非默认端口 | `--ssh-port 2222`，换成实际端口 |
+| Claude Code CLI、OpenCode 或 Hermes | 将 `--agent codex` 换为 `--agent claude`、`--agent opencode` 或 `--agent hermes` |
 
 支持 Apple Silicon Mac 上的 Claude Code CLI 和 Codex 桌面自动收发。安装器写好项目钩子，Codex 首次打开项目时按 **Review hooks** 提示信任。等待信任会显示为待完成。完成后普通聊天即可；模型配置只在需要长期记忆提炼时使用。OpenCode、Hermes 和通用 MCP 的范围见[设备接入指南](client-installation.md)。
 
-支持首次设置的镜像会在首装完成后打开受保护的设置页。输入 `admin`，然后设置新密码。保存成功后进入后台。已有实例和 v0.1.4 等旧镜像，可以在 Mac 上用同一个安装器运行 `--nas nas --open-admin` 打开登录页，并按 ⌘V 粘贴凭证。
+首装完成后，安装器会打开受保护的初始化页。输入 `admin`，然后设置新密码。保存成功后进入后台。Mac 上要重新打开管理员入口，可把命令中的 `--agent codex` 换成 `--open-admin`。若已设密码，安装器会打开普通登录页并把现有凭证放到剪贴板。
 
 下面保留已有发行版的逐步部署和手动安装说明。
 
