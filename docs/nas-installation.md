@@ -2,6 +2,26 @@
 
 **服务装在 NAS 的 Docker 中；电脑只负责连接，不需要再装一个 App。**
 
+## 一条命令完成首装和接入
+
+在电脑上执行源码目录内的首装入口。把 `nas` 换成 SSH 别名或 `用户名@NAS地址`，将 `codex` 换成你正在使用的 Agent：
+
+```sh
+/path/to/Cloud-Memory-Hub/scripts/install-hub --nas nas --agent codex
+```
+
+也可以打开想共享的项目，把这句话交给能执行终端命令的 Agent：
+
+> 请用 Cloud Memory Hub 的 `scripts/install-hub` 在 `nas` 完成首次部署并接入我当前的 Codex 项目。需要本人登录或确认授权时，让我在原界面处理。
+
+安装器通过 SSH 检查 NAS、校验发行制品、初始化 Docker 服务和私网入口，再自动创建当前项目并配对这台电脑。默认使用当前目录，在主目录运行会建立一个 `Cloud Memory Hub` 文件夹。`--workspace` 可选择已有项目。已有的项目和设备可以继续通过 Hub 的「连接 Agent」页面加入。
+
+NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Tailscale。若 Tailscale 在 Docker 中运行，同一行加 `--tailscale-container tailscale`。已配置好指向 Hub 的 HTTPS 反代时，用 `--origin https://你的域名`。已有实例使用下方的升级指南。
+
+支持 Apple Silicon Mac 上的 Claude Code CLI 和 Codex 桌面自动收发。安装器写好项目钩子，Codex 首次打开项目时按 **Review hooks** 提示信任。等待信任会显示为待完成。完成后普通聊天即可；模型配置只在需要长期记忆提炼时使用。OpenCode、Hermes 和通用 MCP 的范围见[设备接入指南](client-installation.md)。
+
+下面保留已有发行版的逐步部署和手动安装说明。
+
 推荐让能执行终端命令的电脑端 Agent 帮你部署。你负责开启 NAS 连接、完成登录；下载、校验和启动服务交给 Agent。
 
 ## 1. 在 NAS 开启连接

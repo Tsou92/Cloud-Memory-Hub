@@ -19,7 +19,18 @@
 
 <a id="在-nas-安装发行版"></a>
 
-## 🚀 三步部署
+## 🚀 一次完成 NAS 首装与首台接入
+
+在电脑上打开要共享的项目，使用源码中的首装命令。把 `nas` 换成你的 SSH 别名或 `用户名@NAS地址`。
+
+```sh
+/path/to/Cloud-Memory-Hub/scripts/install-hub --nas nas --agent codex
+```
+
+也可以请当前 Agent 执行同一条命令。它会校验正式发行包，启动 NAS 服务，创建当前共享项目并配对这台电脑。NAS 需已开启 Docker 和 SSH，并有 Tailscale 或可用 HTTPS 入口。Codex 首次按宿主提示信任项目钩子；之后在项目内正常聊天即可。[首装参数和支持范围](docs/nas-installation.md#一条命令完成首装和接入)
+
+<details>
+<summary>已有版本的 Agent 辅助部署说明</summary>
 
 **推荐让电脑上的 Agent 帮你安装，不需要自己输入 Docker 命令。**
 
@@ -38,6 +49,8 @@ NAS 地址：[填写地址]；SSH 用户名：[填写用户名]；SSH 端口：[
 
 [不清楚 SSH 在哪里？查看安装说明](docs/nas-installation.md) · [熟悉 Docker？查看手动安装](docs/nas-installation.md#手动安装)
 
+</details>
+
 ## 🔌 三步使用
 
 1. **生成连接。** 在 Hub 的「连接 Agent」中选择项目、填写设备名称并选择 Agent。每台电脑分别生成链接，共享同一个项目。
@@ -51,7 +64,7 @@ NAS 地址：[填写地址]；SSH 用户名：[填写用户名]；SSH 端口：[
 | 能力 | 已做到什么 |
 | --- | --- |
 | 跨设备共享与交接 | 已有真实 NAS、两台 Mac 的 MCP 读写与任务交接验证；不同版本的复验范围见[验收记录](docs/reviews/2026-11-10-final-artifact-acceptance.md)。 |
-| Claude Code CLI / Codex 桌面 | 已有真实宿主的 MCP 读写与交接实测；**自动采集、逐轮触发和已有对话召回，仍按 Agent 分别配置与验证**。 |
+| Claude Code CLI / Codex 桌面 | Apple Silicon Mac 可安装项目钩子。Codex 桌面已在 NAS 上用两个真实聊天验证自动上传与接续；新项目首次按宿主提示信任钩子。 |
 | 更多 Agent | 提供通用 MCP / Skill 接口；OpenCode、Hermes 等可按接口接入，但尚未完成所有宿主的读写实测。 |
 | 网页与备份 | 管理项目、记忆、原文、设备连接和备份；恢复操作与演练范围见[备份与恢复](docs/backup-and-recovery.md)。 |
 

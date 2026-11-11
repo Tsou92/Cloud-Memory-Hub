@@ -788,6 +788,102 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn(INVITATION, output.getvalue() + errors.getvalue())
         self.assertIn("network_unavailable", errors.getvalue())
 
+    def test_stdin_json_reports_first_use_steps_without_configuration_details(self):
+        for agent, automation, status, mcp, readiness in (
+            (
+                "codex",
+                {"status": "configured", "host_review_required": True},
+                "pending_host_trust",
+                "configured",
+                "pending_host_trust",
+            ),
+            (
+                "claude",
+                {"status": "configured", "host_review_required": False},
+                "pending_host_reload",
+                "configured",
+                "hooks_installed",
+            ),
+            (
+                "claude",
+                {"status": "automation_runtime_unavailable"},
+                "mcp_configured",
+                "configured",
+                "not_configured",
+            ),
+            (
+                "hermes",
+                {"status": "unsupported_agent"},
+                "mcp_configured",
+                "configured",
+                "unsupported",
+            ),
+            (
+                "generic",
+                {"status": "unsupported_agent"},
+                "manual_import_required",
+                "manual_import_required",
+                "unsupported",
+            ),
+        ):
+            with self.subTest(agent=agent, readiness=readiness):
+                result = {
+                    "status": "configured",
+                    "automation": automation,
+                    "private_state": LINK,
+                    "remote_verified": True,
+                    "host_connection_verified": False,
+                    "host_reload_required": True,
+                }
+                output, errors = io.StringIO(), io.StringIO()
+                with (
+                    io.TextIOWrapper(io.BytesIO((LINK + "\r\n").encode())) as stream,
+                    patch.object(client.sys, "stdin", stream),
+                    patch.object(client, "connect", return_value=result) as connect,
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    self.assertEqual(
+                        client.main(["--agent", agent, "--link-stdin", "--json-status"]), 0
+                    )
+                connect.assert_called_once_with(
+                    LINK, agent, home=None, network="auto", workspace=None
+                )
+                report = json.loads(output.getvalue())
+                self.assertEqual(
+                    (report["status"], report["mcp"], report["automation"]),
+                    (status, mcp, readiness),
+                )
+                self.assertTrue(report["remote_verified"])
+                self.assertFalse(report["host_connection_verified"])
+                self.assertNotIn(INVITATION, output.getvalue() + errors.getvalue())
+                self.assertEqual(errors.getvalue(), "")
+
+    def test_stdin_rejects_unbounded_or_multiline_input_before_pairing(self):
+        for data in (b"", (LINK + "\n" + LINK).encode(), b"x" * (client.MAX_LINK_BYTES + 1)):
+            with (
+                self.subTest(length=len(data)),
+                io.TextIOWrapper(io.BytesIO(data)) as stream,
+                patch.object(client.sys, "stdin", stream),
+                patch.object(client, "connect") as connect,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(
+                    client.main(["--agent", "codex", "--link-stdin", "--json-status"]), 1
+                )
+                self.assertEqual(json.loads(output.getvalue())["error"], "invalid_link_input")
+            connect.assert_not_called()
+
+    def test_json_failure_does_not_pass_through_error_text(self):
+        with (
+            patch.object(client, "connect", side_effect=client.ConnectError(LINK)),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(client.main(["--agent", "codex", "--link", LINK, "--json-status"]), 1)
+        self.assertEqual(json.loads(output.getvalue())["error"], "connection_failed")
+        self.assertNotIn(INVITATION, output.getvalue() + errors.getvalue())
+
     def test_windows_acl_command_never_interpolates_path(self):
         path = Path('synthetic " $(bad) secret path')
         completed = client.subprocess.CompletedProcess([], 0)
