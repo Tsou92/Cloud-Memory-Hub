@@ -20,6 +20,8 @@ NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Ta
 
 支持 Apple Silicon Mac 上的 Claude Code CLI 和 Codex 桌面自动收发。安装器写好项目钩子，Codex 首次打开项目时按 **Review hooks** 提示信任。等待信任会显示为待完成。完成后普通聊天即可；模型配置只在需要长期记忆提炼时使用。OpenCode、Hermes 和通用 MCP 的范围见[设备接入指南](client-installation.md)。
 
+支持首次设置的镜像会在首装完成后打开受保护的设置页。输入 `admin`，然后设置新密码。保存成功后进入后台。已有实例和 v0.1.4 等旧镜像，可以在 Mac 上用同一个安装器运行 `--nas nas --open-admin` 打开登录页，并按 ⌘V 粘贴凭证。
+
 下面保留已有发行版的逐步部署和手动安装说明。
 
 推荐让能执行终端命令的电脑端 Agent 帮你部署。你负责开启 NAS 连接、完成登录；下载、校验和启动服务交给 Agent。

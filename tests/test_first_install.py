@@ -106,6 +106,40 @@ class FirstInstallTests(unittest.TestCase):
             self.assertEqual(install.show_client_result(result, "codex"), 3)
         self.assertIn("Review hooks", output.getvalue())
 
+    def test_legacy_admin_opens_login_and_copies_the_secret_only_via_stdin(self):
+        token = "synthetic" * 5
+        finished = SimpleNamespace(returncode=0)
+        with (
+            patch.object(install.sys, "platform", "darwin"),
+            patch.object(install, "read_admin_entry", return_value=(ORIGIN, "login", token)),
+            patch.object(install.shutil, "which", return_value="/usr/bin/open"),
+            patch.object(install.subprocess, "run", return_value=finished) as launch,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertTrue(install.open_admin_entry(self.args, self.connector))
+        browser, copy = launch.call_args_list
+        self.assertEqual(copy.args[0], ["/usr/bin/pbcopy"])
+        self.assertEqual(copy.kwargs["input"], token.encode())
+        self.assertEqual(browser.args[0], ["/usr/bin/open", ORIGIN + "/hub/login"])
+        self.assertNotIn(token, output.getvalue())
+
+    def test_setup_proof_is_only_opened_for_the_expected_hub(self):
+        proof = "a" * 64
+        response = json.dumps({"origin": ORIGIN, "proof": proof}).encode()
+        with patch.object(install, "remote_script", return_value=response) as remote:
+            self.assertEqual(
+                install.read_admin_entry(
+                    self.args, self.connector, expected_origin=ORIGIN, setup_only=True
+                ),
+                (ORIGIN, "setup", proof),
+            )
+            self.assertTrue(remote.call_args.kwargs["private"])
+            self.assertIn("--setup-only", remote.call_args.args[1])
+            with self.assertRaisesRegex(install.InstallError, "admin_entry_unavailable"):
+                install.read_admin_entry(
+                    self.args, self.connector, expected_origin="https://other.invalid"
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

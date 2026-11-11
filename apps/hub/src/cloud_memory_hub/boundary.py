@@ -17,16 +17,18 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from cloud_memory_hub.admin_credentials import AdminCredentialError, AdminCredentials
+from cloud_memory_hub.admin_setup_page import SETUP_FORM, SETUP_SCRIPT, SETUP_SCRIPT_HASH
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_boundary import guarded_call
 from cloud_memory_hub.onboarding_api import PUBLIC_CONNECT_PATHS, public_connection_response
 
 STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg"})
 ADMIN_CREDENTIAL_PATH = "/hub/v1/admin/credential"
+ADMIN_SETUP_PATH = "/hub/setup"
 
-LOGIN_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+AUTH_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>登录 Cloud Memory Hub</title>
+<title>{{title}} · Cloud Memory Hub</title>
 <style>:root{color-scheme:dark}*{box-sizing:border-box}
 body{font:15px system-ui,-apple-system,'PingFang SC',sans-serif;color:#f3f4fc;margin:0;
 min-height:100svh;display:grid;place-items:center;padding:32px 16px;background:
@@ -42,14 +44,48 @@ button{background:linear-gradient(110deg,#7775dc,#a18be6);color:white;border:1px
 font-weight:600;cursor:pointer;margin-top:22px;box-shadow:0 4px 22px #8670df33}
 button:hover{filter:brightness(1.1)}input:focus-visible,button:focus-visible
 {outline:2px solid #c5afff;outline-offset:3px}p{line-height:1.75;color:#b4b8d0;margin-bottom:26px}
-label{font-weight:600}[role=alert]{color:#ffb0bd;background:#f28f9f12;border:1px solid #f28f9f40;
+label{display:block;font-weight:600;margin-top:14px}small{display:block;color:#b4b8d0;margin-top:8px}
+button:disabled{opacity:.55;cursor:default}a{color:#c5b1ff}
+[role=alert]{color:#ffb0bd;background:#f28f9f12;border:1px solid #f28f9f40;
 padding:12px;border-radius:10px}@media(max-width:420px){main{padding:30px 24px}}</style>
 <main><span class="brand" aria-hidden="true">∞</span><h1>Cloud Memory Hub</h1>
-<p>欢迎回来。输入初始化时生成的管理员凭证，进入你的共享记忆中枢。</p>
+{{body}}</main>{{script}}</html>"""
+
+
+def _auth_page(title: str, body: str, script: str = "") -> str:
+    return (
+        AUTH_PAGE.replace("{{title}}", title)
+        .replace("{{body}}", body)
+        .replace("{{script}}", script)
+    )
+
+
+LOGIN_PAGE = _auth_page(
+    "登录",
+    """<p>欢迎回来。输入管理员凭证，进入你的共享记忆中枢。</p>
 {{error}}
 <form method="post" action="/hub/login"><label for="credential">管理员凭证</label>
 <input id="credential" name="credential" type="password" autocomplete="current-password"
-required maxlength="256"><button>登录</button></form></main></html>"""
+required maxlength="256"><button>登录</button></form>""",
+)
+SETUP_PAGE = _auth_page("设置管理员密码", SETUP_FORM, f"<script>{SETUP_SCRIPT}</script>")
+SETUP_REQUIRED_PAGE = _auth_page(
+    "初始化",
+    "<p>此实例需要先设置管理员密码。请打开安装器提供的初始化链接。</p>",
+)
+SETUP_FINISHED_PAGE = _auth_page(
+    "初始化链接已失效",
+    '<p>请使用当前管理员凭证。<a href="/hub/login">返回登录</a></p>',
+)
+
+
+async def _read_auth_body(request: Request) -> bytearray | None:
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > 4096:
+            return None
+        body.extend(chunk)
+    return body
 
 
 class CloudBoundary:
@@ -118,11 +154,24 @@ class CloudBoundary:
                 scope, receive, send
             )
             return
+        if path == ADMIN_SETUP_PATH:
+            response = await self._initial_setup(request)
+            script_hash = (
+                SETUP_SCRIPT_HASH
+                if request.method == "GET" and response.status_code == 200
+                else None
+            )
+            await self._respond(response, scope, receive, send, script_hash=script_hash)
+            return
         authorization = request.headers.get("authorization", "")
         scheme, _, supplied = authorization.partition(" ")
         bearer = scheme.lower() == "bearer" and self._valid_token(supplied)
         cookie = request.cookies.get("cmh_session", "")
-        session = self.admin_credentials.available and self.sessions.valid_session(cookie)
+        session = (
+            self.admin_credentials.available
+            and not self.admin_credentials.setup_pending
+            and self.sessions.valid_session(cookie)
+        )
         if path == ADMIN_CREDENTIAL_PATH:
             response = await self._change_credential(request, authenticated=bearer or session)
             await self._respond(response, scope, receive, send)
@@ -233,11 +282,9 @@ class CloudBoundary:
             return JSONResponse({"detail": "authentication_required"}, status_code=401)
         if self._login_limited():
             return JSONResponse({"detail": "login_rate_limited"}, status_code=429)
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 4096:
-                return JSONResponse({"detail": "request_too_large"}, status_code=413)
+        body = await _read_auth_body(request)
+        if body is None:
+            return JSONResponse({"detail": "request_too_large"}, status_code=413)
         try:
             value = json.loads(body)
         except (ValueError, UnicodeError):
@@ -263,18 +310,22 @@ class CloudBoundary:
 
     async def _login(self, request: Request):
         if request.method == "GET":
-            return HTMLResponse(LOGIN_PAGE.replace("{{error}}", ""))
+            return HTMLResponse(
+                SETUP_REQUIRED_PAGE
+                if self.admin_credentials.setup_pending
+                else LOGIN_PAGE.replace("{{error}}", "")
+            )
         if request.method != "POST":
             return JSONResponse({"detail": "method_not_allowed"}, status_code=405)
         if request.headers.get("origin") != self.config.public_origin:
             return JSONResponse({"detail": "origin_required"}, status_code=403)
+        if self.admin_credentials.setup_pending:
+            return self._login_error(request, "initial_setup_required", 409)
         if self._login_limited():
             return self._login_error(request, "login_rate_limited", 429)
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 4096:
-                return self._login_error(request, "request_too_large", 413)
+        body = await _read_auth_body(request)
+        if body is None:
+            return self._login_error(request, "request_too_large", 413)
         try:
             if request.headers.get("content-type", "").startswith("application/json"):
                 value = json.loads(body).get("credential", "")
@@ -285,9 +336,55 @@ class CloudBoundary:
         if not isinstance(value, str) or not self._valid_token(value):
             self.failed_logins.append(time.monotonic())
             return self._login_error(request, "invalid_credential", 401)
+        return self._new_session(RedirectResponse("/", status_code=303))
+
+    async def _initial_setup(self, request: Request):
+        if request.method == "GET":
+            if self.admin_credentials.setup_pending:
+                return HTMLResponse(SETUP_PAGE)
+            return HTMLResponse(SETUP_FINISHED_PAGE, status_code=409)
+        if request.method != "POST":
+            return JSONResponse({"detail": "method_not_allowed"}, status_code=405)
+        if request.headers.get("origin") != self.config.public_origin:
+            return JSONResponse({"detail": "origin_required"}, status_code=403)
+        if not self.admin_credentials.setup_pending:
+            return JSONResponse({"detail": "initial_setup_not_pending"}, status_code=409)
+        if self._login_limited():
+            return JSONResponse({"detail": "login_rate_limited"}, status_code=429)
+        if (
+            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            != "application/json"
+        ):
+            return JSONResponse({"detail": "invalid_request"}, status_code=400)
+        body = await _read_auth_body(request)
+        if body is None:
+            return JSONResponse({"detail": "request_too_large"}, status_code=413)
+        try:
+            value = json.loads(body)
+        except (ValueError, UnicodeError):
+            value = None
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"password", "proof", "new_credential", "confirm_credential"}
+            or not all(isinstance(item, str) for item in value.values())
+        ):
+            return JSONResponse({"detail": "invalid_request"}, status_code=400)
+        if value["new_credential"] != value["confirm_credential"]:
+            return JSONResponse({"detail": "invalid_new_credential"}, status_code=422)
+        try:
+            self.admin_credentials.complete_initial_setup(
+                value["password"], value["proof"], value["new_credential"]
+            )
+        except AdminCredentialError as error:
+            if error.code == "invalid_initial_credential":
+                self.failed_logins.append(time.monotonic())
+            return JSONResponse({"detail": error.code}, status_code=error.status)
+        self.sessions = UISessionStore(instance_id=self.internal_token)
+        return self._new_session(JSONResponse({"state": "initial_setup_completed"}))
+
+    def _new_session(self, response):
         code, _ = self.sessions.issue_exchange()
         session_id = self.sessions.consume_exchange(code)
-        response = RedirectResponse("/", status_code=303)
         response.set_cookie(
             "cmh_session",
             session_id,
@@ -303,6 +400,8 @@ class CloudBoundary:
     def _login_error(request: Request, detail: str, status: int):
         if request.headers.get("content-type", "").startswith("application/json"):
             return JSONResponse({"detail": detail}, status_code=status)
+        if detail == "initial_setup_required":
+            return HTMLResponse(SETUP_REQUIRED_PAGE, status_code=status)
         messages = {
             "invalid_credential": "凭证不正确，请重新输入。",
             "login_rate_limited": "尝试次数较多，请稍后再试。",
@@ -313,11 +412,16 @@ class CloudBoundary:
         return HTMLResponse(LOGIN_PAGE.replace("{{error}}", message), status_code=status)
 
     @staticmethod
-    async def _respond(response, scope, receive, send) -> None:
+    async def _respond(response, scope, receive, send, *, script_hash=None) -> None:
         response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; style-src 'unsafe-inline'; "
             "form-action 'self'; frame-ancestors 'none'"
         )
+        if script_hash is not None:
+            response.headers["Content-Security-Policy"] += (
+                f"; script-src 'sha256-{script_hash}'; connect-src 'self'"
+            )
         await response(scope, receive, send)

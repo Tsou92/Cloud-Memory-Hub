@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -76,6 +77,72 @@ def ssh_command(args, remote_command):
     if args.ssh_port is not None:
         command.extend(["-p", str(args.ssh_port)])
     return [*command, args.nas, remote_command]
+
+
+def read_admin_entry(args, connector, *, expected_origin=None, setup_only=False):
+    # Select a single running Hub owned by this Compose project, on the same
+    # local daemon as the installer. The container reads its own private file.
+    remote = "\n".join(
+        [
+            "set -eu",
+            "unset DOCKER_CONTEXT DOCKER_HOST",
+            "if docker --context default info >/dev/null 2>&1; then set -- docker;",
+            "else set -- sudo -n docker; fi",
+            'set -- "$@" --context default',
+            'container=$("$@" ps -q --filter '
+            + shlex.quote("label=com.docker.compose.project=" + args.compose_project)
+            + " --filter label=com.docker.compose.service=hub)",
+            'case "$container" in ""|*[!0-9a-f]*) exit 1 ;; esac',
+            'exec "$@" exec -i "$container" /opt/cmh/venv/bin/python -'
+            + (" --setup-only" if setup_only else ""),
+        ]
+    )
+    try:
+        result = remote_script(args, remote, "admin_entry.py", private=True)
+        if len(result) > 1024:
+            raise ValueError
+        entry = connector.parse_json(result)
+        origin = connector.valid_origin(entry["origin"])
+        if not origin.startswith("https://") or (expected_origin and origin != expected_origin):
+            raise ValueError
+        if setup_only and set(entry) == {"origin"}:
+            return origin, "ready", ""
+        if set(entry) == {"origin", "proof"} and re.fullmatch(r"[0-9a-f]{64}", entry["proof"]):
+            return origin, "setup", entry["proof"]
+        if set(entry) == {"origin", "credential"} and re.fullmatch(
+            r"[!-~]{32,256}", entry["credential"]
+        ):
+            return origin, "login", entry["credential"]
+    except (InstallError, connector.ConnectError, TypeError, ValueError, KeyError):
+        pass
+    raise InstallError("admin_entry_unavailable")
+
+
+def open_admin_entry(args, connector, *, expected_origin=None, setup_only=False):
+    origin, mode, secret = read_admin_entry(
+        args, connector, expected_origin=expected_origin, setup_only=setup_only
+    )
+    if mode == "ready":
+        return False
+    command = ["/usr/bin/open"] if sys.platform == "darwin" else ["xdg-open"]
+    if shutil.which(command[0]) is None:
+        raise InstallError("browser_opener_unavailable")
+    if mode == "login" and sys.platform != "darwin":
+        raise InstallError("clipboard_unavailable")
+    url = origin + ("/hub/setup#proof=" + secret if mode == "setup" else "/hub/login")
+    result = subprocess.run([*command, url], capture_output=True, check=False, timeout=15)
+    if result.returncode:
+        raise InstallError("browser_open_failed")
+    if mode == "setup":
+        print("已打开首次登录页。输入 admin 并设置新密码，保存后进入后台。")
+    else:
+        copied = subprocess.run(
+            ["/usr/bin/pbcopy"], input=secret.encode("ascii"), capture_output=True, check=False
+        )
+        if copied.returncode:
+            raise InstallError("login_opened_clipboard_unavailable")
+        print("已打开后台登录页，管理员凭证已放入 Mac 剪贴板。在凭证框按 ⌘V 即可登录。")
+    return True
 
 
 def remote_script(args, remote_command, script, *, private=False):
@@ -344,9 +411,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="首次安装 NAS Hub 并接入电脑当前项目。")
     parser.add_argument("--nas", required=True, help="已有 SSH 别名，或 用户名@NAS地址")
     parser.add_argument("--ssh-port", type=int, help="SSH 端口，默认沿用本机 SSH 配置")
-    parser.add_argument(
-        "--agent", choices=("claude", "codex", "opencode", "hermes", "generic"), required=True
-    )
+    parser.add_argument("--agent", choices=("claude", "codex", "opencode", "hermes", "generic"))
+    parser.add_argument("--open-admin", action="store_true", help="打开已安装 Hub 的管理员入口")
     parser.add_argument("--workspace", type=Path, help="共享的项目目录，默认当前目录")
     parser.add_argument("--project", help="共享项目名，默认为当前目录名")
     parser.add_argument("--device", help="设备名称，默认为电脑名称")
@@ -367,6 +433,11 @@ def main(argv=None):
     connector = load_connector()
     try:
         check_arguments(args, connector)
+        if args.open_admin:
+            open_admin_entry(args, connector)
+            return 0
+        if args.agent is None:
+            parser.error("--agent is required for installation")
         home = (args.home or Path.home()).resolve(strict=True)
         connector.paths_for(
             args.agent, home, connector.agent_environment(home if args.home else None)
@@ -381,6 +452,12 @@ def main(argv=None):
         print("正在创建项目并连接这台电脑…", flush=True)
         result = install_client(args, connector, home, workspace, origin, directory, access)
         print("共享项目目录：" + str(workspace), flush=True)
+        if args.home is None:
+            try:
+                if not open_admin_entry(args, connector, expected_origin=origin, setup_only=True):
+                    print("首次登录可运行同一安装器并带 --open-admin 打开后台。")
+            except (InstallError, OSError, subprocess.SubprocessError):
+                print("需要登录后台时，请用安装器的 --open-admin 打开管理员入口。")
         return show_client_result(result, args.agent)
     except (InstallError, connector.ConnectError) as error:
         print(f"安装尚未完成（{error}）。处理提示后可重跑同一命令。", file=sys.stderr)

@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import os
-import secrets
 import signal
 import sys
 from contextlib import contextmanager
@@ -12,6 +11,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+from cloud_memory_hub.admin_credentials import initial_admin_setup_proof, new_initial_admin_token
 from cloud_memory_hub.config import HubConfig, read_private_file
 from cloud_memory_hub.diagnostics import initialize_diagnostics, install_process_exception_hooks
 from cloud_memory_hub.governance_authority import activate_authority, require_separate_directory
@@ -49,7 +49,7 @@ def initialize(directory: Path, *, governance_dir: Path) -> None:
 def _initialize_locked(directory, governance_dir):
     DeviceAccessStore._check_private(directory, directory=True)
     values = {
-        "admin-token": secrets.token_urlsafe(48).encode(),
+        "admin-token": new_initial_admin_token().encode(),
         "encryption-key": Fernet.generate_key(),
     }
     if any((directory / name).exists() or (directory / name).is_symlink() for name in values):
@@ -82,6 +82,7 @@ def _main() -> None:
             "serve",
             "supervise",
             "init",
+            "setup-link",
             "migrate-governance",
             "migrate-originals",
             "diagnostic-preview",
@@ -152,6 +153,14 @@ def _main() -> None:
     if args.command == "init":
         initialize(config_dir, governance_dir=governance_dir)
         print("Private configuration and governance authority initialized.")
+        return
+    if args.command == "setup-link":
+        config = HubConfig.from_environment()
+        proof = initial_admin_setup_proof(config.admin_token)
+        if proof is None:
+            print("Administrator setup is already complete.", file=sys.stderr)
+            raise SystemExit(1)
+        print(config.public_origin + "/hub/setup#proof=" + proof)
         return
     if args.command == "migrate-originals":
         from cloud_memory_hub.original_archive import migrate_originals
