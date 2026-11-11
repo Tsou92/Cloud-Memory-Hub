@@ -4,7 +4,7 @@
 
 服务通过 **Docker 部署在自己的 NAS**，电脑无需安装独立 App。
 
-在电脑运行一条命令，即可部署 NAS 服务、创建共享项目，并配对这台电脑。
+在电脑运行一条命令，即可部署 NAS 服务。然后在后台创建共享项目并配对设备。
 
 [![最新发行版](https://img.shields.io/github/v/release/Tsou92/Cloud-Memory-Hub?style=flat-square&color=8b5cf6&logo=github)](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-64748b?style=flat-square)](LICENSE)
@@ -17,23 +17,31 @@
 
 <a id="在-nas-安装发行版"></a>
 
-## 🚀 一次完成 NAS 首装与首台接入
+## 🚀 一条命令部署 NAS
 
-在 NAS 开启 Docker Compose 和 SSH，并准备已登录的 Tailscale 或可访问的 HTTPS 入口。使用 Mac 或 Linux 电脑打开要共享的项目目录，把 `USER@NAS` 换成 NAS 的 SSH 用户名与地址，或你已有的 SSH 别名。
+在 NAS 开启 Docker Compose 和 SSH，并准备已登录的 Tailscale 或可访问的 HTTPS 入口。在任意目录运行对应电脑系统的命令，把 `USER@NAS` 换成 NAS 的 SSH 用户名与地址，或已有的 SSH 别名。
 
-命令使用 [v0.1.5 的正式附件](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.5)。
+命令使用 [v0.1.6 的正式附件](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.6)。
+
+**Mac / Linux 终端**
 
 ```sh
-(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && curl -q -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.5/scripts/bootstrap-install.sh -o "$cmh_installer" && sh "$cmh_installer" --nas USER@NAS --agent codex)
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --nas USER@NAS --nas-only)
 ```
 
-也可以对能执行终端命令的 Agent 说：「请用 Cloud Memory Hub 的官方安装命令，把 Hub 部署到我的 NAS `USER@NAS`，并接入当前 Codex 项目。」SSH 登录和权限确认按原界面提示完成。
+**Windows PowerShell**
 
-1. 安装器校验正式发行包、启动 NAS、创建项目并配对电脑。
-2. 在安装器打开的受保护初始化页输入 `admin`，设置新密码后进入后台。
-3. 在 Codex 打开安装结果显示的共享目录，按 **Review hooks** 提示信任一次，随后正常聊天。其他电脑从后台的「连接 Agent」加入同一个项目。
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.ps1').Content)) -Nas 'USER@NAS'
+```
 
-Tailscale 在 NAS 的 Docker 容器中时，加 `--tailscale-container tailscale`。已有 HTTPS 反代用 `--origin https://hub.example.com`。Claude Code CLI 用 `--agent claude`。[首装参数、其他 Agent 和手动部署](docs/nas-installation.md) · [已有实例升级](docs/development-runtime.md#已有实例升级保持配置和身份)
+也可以把填好 NAS 地址的命令发给能运行对应终端的 Agent，请它原样执行一次，等安装器返回后告诉你管理页地址或具体错误。安装器负责环境检查、下载、校验和启动。
+
+1. 等安装器输出管理页地址。首次运行需要下载并导入镜像。
+2. 在安装器打开的初始化页输入 `admin`，设置自己的新密码后进入后台。
+3. 在后台创建项目，进入「连接 Agent」，用页面生成的命令或话术配对。
+
+安装器会识别 NAS 上的原生 Tailscale 或单个官方 Tailscale 容器。[首装参数与手动部署](docs/nas-installation.md) · [已有实例升级](docs/development-runtime.md#已有实例升级保持配置和身份)
 
 ## 🔌 三步使用
 

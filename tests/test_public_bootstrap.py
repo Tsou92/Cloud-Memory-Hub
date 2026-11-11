@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TAG = "v0.1.5"
+TAG = "v0.1.6"
 PREFIX = f"cloud-memory-hub-{TAG}"
 SOURCE = f"{PREFIX}-source.tar.gz"
 FILES = (
@@ -24,17 +24,35 @@ FILES = (
 
 MOCK_CURL = """#!/bin/sh
 set -eu
-direct=
+route=environment
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --noproxy) direct=$2; shift ;;
+        --noproxy) [ "$2" = '*' ]; route=direct; shift ;;
+        --proto) [ "$2" = '=https' ]; proto=yes; shift ;;
+        --proto-redir) [ "$2" = '=https' ]; proto_redir=yes; shift ;;
+        --max-time) maximum_time=$2; shift ;;
         -o) destination=$2; shift ;;
-        https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/v0.1.5/*) member=${1##*/} ;;
+        https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/v0.1.6/*) member=${1##*/} ;;
     esac
     shift
 done
-if [ "${CMH_TEST_DIRECT_ONLY:-}" = yes ] && [ "$direct" != '*' ]; then exit 7; fi
+[ "$proto" = yes ] && [ "$proto_redir" = yes ]
+printf '%s|%s|%s\n' "$member" "$route" "$maximum_time" >> "$CMH_TEST_ATTEMPTS"
+if [ "${CMH_TEST_DIRECT_ONLY:-}" = yes ] && [ "$route" != direct ]; then exit 7; fi
+if [ "$member" = "$CMH_TEST_TLS_MEMBER" ]; then
+    attempt=$(grep -cF "$member|" "$CMH_TEST_ATTEMPTS")
+    if [ "$attempt" -le "$CMH_TEST_TLS_FAILURES" ]; then exit 35; fi
+fi
 cp "$CMH_TEST_FIXTURE/$member" "$destination"
+"""
+
+MOCK_DATE = """#!/bin/sh
+set -eu
+[ "$1" = '+%s' ]
+now=1000
+if [ -f "$CMH_TEST_CLOCK" ]; then read -r now < "$CMH_TEST_CLOCK"; fi
+printf '%s\n' "$((now + 5))" > "$CMH_TEST_CLOCK"
+printf '%s\n' "$now"
 """
 
 
@@ -48,11 +66,13 @@ class PublicBootstrapTests(unittest.TestCase):
         self.downloads = self.root / "downloads"
         self.bin = self.root / "bin"
         self.scratch = self.root / "scratch"
+        self.attempts = self.root / "attempts"
         for directory in (self.project, self.downloads, self.bin, self.scratch):
             directory.mkdir()
-        fake = self.bin / "curl"
-        fake.write_text(MOCK_CURL, encoding="utf-8")
-        fake.chmod(0o700)
+        for name, script in (("curl", MOCK_CURL), ("date", MOCK_DATE), ("sleep", "#!/bin/sh\n")):
+            fake = self.bin / name
+            fake.write_text(script, encoding="utf-8")
+            fake.chmod(0o700)
 
     def make_release(self, *, installer_kind="file", expected=None):
         source = self.downloads / SOURCE
@@ -74,7 +94,7 @@ class PublicBootstrapTests(unittest.TestCase):
         checksum = expected or hashlib.sha256(source.read_bytes()).hexdigest()
         (self.downloads / "SHA256SUMS").write_text(f"{checksum}  {SOURCE}\n", encoding="ascii")
 
-    def run_bootstrap(self, *args, direct_only=False):
+    def run_bootstrap(self, *args, direct_only=False, tls_member="", tls_failures=0):
         return subprocess.run(
             ["sh", str(ROOT / "scripts/bootstrap-install.sh"), *args],
             cwd=self.project,
@@ -84,6 +104,10 @@ class PublicBootstrapTests(unittest.TestCase):
                 "TMPDIR": str(self.scratch),
                 "CMH_TEST_FIXTURE": str(self.downloads),
                 "CMH_TEST_DIRECT_ONLY": "yes" if direct_only else "",
+                "CMH_TEST_ATTEMPTS": str(self.attempts),
+                "CMH_TEST_CLOCK": str(self.root / "clock"),
+                "CMH_TEST_TLS_MEMBER": tls_member,
+                "CMH_TEST_TLS_FAILURES": str(tls_failures),
             },
             capture_output=True,
             text=True,
@@ -97,6 +121,40 @@ class PublicBootstrapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), [str(self.project), *args, "--tag", TAG])
         self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_retries_transient_tls_failures_and_reports_stages(self):
+        self.make_release()
+        result = self.run_bootstrap("--nas", "user@nas", tls_member="SHA256SUMS", tls_failures=2)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.count("curl 35"), 2)
+        self.assertIn("发行源码包校验通过，正在启动安装器", result.stderr)
+        self.assertEqual(
+            self.attempts.read_text().splitlines(),
+            [
+                "SHA256SUMS|environment|55",
+                "SHA256SUMS|direct|45",
+                "SHA256SUMS|environment|35",
+                f"{SOURCE}|environment|175",
+            ],
+        )
+
+    def test_source_tls_failure_stops_after_four_attempts_without_handoff(self):
+        self.make_release()
+        result = self.run_bootstrap("--nas", "user@nas", tls_member=SOURCE, tls_failures=100)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"官方发行附件 {SOURCE}（curl 35）", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(list(self.scratch.iterdir()), [])
+        self.assertEqual(
+            self.attempts.read_text().splitlines(),
+            [
+                "SHA256SUMS|environment|55",
+                f"{SOURCE}|environment|175",
+                f"{SOURCE}|direct|165",
+                f"{SOURCE}|environment|155",
+                f"{SOURCE}|direct|145",
+            ],
+        )
 
     def test_corrupt_source_never_runs_the_installer(self):
         self.make_release(expected="0" * 64)

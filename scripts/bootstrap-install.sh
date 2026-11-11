@@ -4,7 +4,7 @@ set -eu
 umask 077
 unset TAR_OPTIONS GZIP
 
-cmh_tag=v0.1.5
+cmh_tag=v0.1.6
 cmh_prefix="cloud-memory-hub-$cmh_tag"
 cmh_archive="$cmh_prefix-source.tar.gz"
 cmh_release="https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/$cmh_tag"
@@ -25,23 +25,43 @@ cmh_stage=$(mktemp -d "${TMPDIR:-/tmp}/cmh-release.XXXXXXXX")
 trap 'rm -rf -- "$cmh_stage"' 0
 trap 'exit 1' HUP INT TERM
 
-cmh_download() {
+cmh_fetch() {
     cmh_file=$1
     cmh_limit=$2
-    shift 2
-    curl -q -fLsS --proto '=https' --proto-redir '=https' --max-redirs 3 \
-        --connect-timeout 15 --max-time 180 --max-filesize "$cmh_limit" \
-        "$@" "$cmh_release/$cmh_file" -o "$cmh_stage/$cmh_file"
+    cmh_deadline=$(($(date +%s) + $3))
+    cmh_status=28
+    printf '正在下载 %s 的官方发行附件 %s…\n' "$cmh_tag" "$cmh_file" >&2
+    # Retry TLS resets on the same official URL, sharing one deadline per asset.
+    cmh_attempt=1
+    for cmh_route in environment direct environment direct; do
+        cmh_remaining=$((cmh_deadline - $(date +%s)))
+        [ "$cmh_remaining" -gt 0 ] || break
+        set --
+        if [ "$cmh_route" = direct ]; then
+            set -- --noproxy '*'
+        fi
+        if curl -q -fsL --http1.1 --proto '=https' --proto-redir '=https' --max-redirs 3 \
+            --connect-timeout 12 --max-time "$cmh_remaining" --max-filesize "$cmh_limit" \
+            --speed-limit 4096 --speed-time 30 \
+            "$@" "$cmh_release/$cmh_file" -o "$cmh_stage/$cmh_file"; then
+            cmh_size=$(wc -c < "$cmh_stage/$cmh_file")
+            [ "$cmh_size" -gt 0 ] && [ "$cmh_size" -le "$cmh_limit" ] || \
+                cmh_fail '发行附件大小不符合预期。'
+            return
+        else
+            cmh_status=$?
+        fi
+        [ "$cmh_attempt" -lt 4 ] || break
+        [ "$cmh_deadline" -gt "$(date +%s)" ] || break
+        cmh_attempt=$((cmh_attempt + 1))
+        printf '%s 下载中断（curl %s），准备第 %s/4 次尝试。\n' \
+            "$cmh_file" "$cmh_status" "$cmh_attempt" >&2
+        sleep 1
+    done
+    cmh_fail "无法下载 $cmh_tag 的官方发行附件 ${cmh_file}（curl ${cmh_status}），请检查网络或发行状态。"
 }
 
-cmh_fetch() {
-    cmh_download "$1" "$2" || cmh_download "$1" "$2" --noproxy '*' || \
-        cmh_fail "无法下载 $cmh_tag 的官方发行附件，请检查网络或发行状态。"
-    cmh_size=$(wc -c < "$cmh_stage/$1")
-    [ "$cmh_size" -gt 0 ] && [ "$cmh_size" -le "$2" ] || cmh_fail '发行附件大小不符合预期。'
-}
-
-cmh_fetch SHA256SUMS 65536
+cmh_fetch SHA256SUMS 65536 60
 cmh_expected=$(LC_ALL=C awk -v name="$cmh_archive" '
     $2 == name {
         count++
@@ -49,7 +69,8 @@ cmh_expected=$(LC_ALL=C awk -v name="$cmh_archive" '
     }
     END { if (count != 1 || digest == "") exit 1; print digest }
 ' "$cmh_stage/SHA256SUMS") || cmh_fail '官方校验清单没有唯一的源码包校验值。'
-cmh_fetch "$cmh_archive" 134217728
+cmh_fetch "$cmh_archive" 134217728 180
+printf '正在校验发行源码包…\n' >&2
 cmh_actual=$(cmh_sha "$cmh_stage/$cmh_archive") || cmh_fail '无法计算源码包校验值。'
 cmh_actual=${cmh_actual%% *}
 [ "$cmh_actual" = "$cmh_expected" ] || cmh_fail '源码包校验失败，安装已停止。'
@@ -82,4 +103,5 @@ done
 
 # Keep cwd and argument boundaries, and pass the verified tag last so the
 # installation cannot select a different release from the one we unpacked.
+printf '发行源码包校验通过，正在启动安装器…\n' >&2
 sh "$cmh_stage/$cmh_prefix/scripts/install-hub" "$@" --tag "$cmh_tag"

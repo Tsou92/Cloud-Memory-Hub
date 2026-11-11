@@ -18,7 +18,7 @@ from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[1]
 CONNECTOR = ROOT / "apps/hub/src/cloud_memory_hub/onboarding/connect.py"
-DEFAULT_TAG = "v0.1.5"
+DEFAULT_TAG = "v0.1.6"
 STABLE_TAG = re.compile(r"v(?:0|[1-9][0-9]{0,7})(?:\.(?:0|[1-9][0-9]{0,7})){2}")
 SSH_TARGET = re.compile(
     r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?(?:[A-Za-z0-9][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])"
@@ -49,6 +49,8 @@ def checked_name(value):
 
 
 def check_arguments(args, connector):
+    if args.nas == "USER@NAS":
+        raise InstallError("ssh_target_placeholder")
     if not SSH_TARGET.fullmatch(args.nas):
         raise InstallError("ssh_target_invalid")
     if not STABLE_TAG.fullmatch(args.tag) or not SAFE_NAME.fullmatch(args.compose_project):
@@ -73,6 +75,8 @@ def check_arguments(args, connector):
 
 
 def ssh_command(args, remote_command):
+    if shutil.which("ssh") is None:
+        raise InstallError("ssh_client_unavailable")
     command = ["ssh", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-T"]
     if args.ssh_port is not None:
         command.extend(["-p", str(args.ssh_port)])
@@ -124,25 +128,40 @@ def open_admin_entry(args, connector, *, expected_origin=None, setup_only=False)
     )
     if mode == "ready":
         return False
-    command = ["/usr/bin/open"] if sys.platform == "darwin" else ["xdg-open"]
-    if shutil.which(command[0]) is None:
-        raise InstallError("browser_opener_unavailable")
-    if mode == "login" and sys.platform != "darwin":
-        raise InstallError("clipboard_unavailable")
     url = origin + ("/hub/setup#proof=" + secret if mode == "setup" else "/hub/login")
-    result = subprocess.run([*command, url], capture_output=True, check=False, timeout=15)
-    if result.returncode:
-        raise InstallError("browser_open_failed")
+    if sys.platform == "win32":
+        try:
+            os.startfile(url)
+        except OSError:
+            raise InstallError("browser_open_failed") from None
+    else:
+        command = ["/usr/bin/open"] if sys.platform == "darwin" else ["xdg-open"]
+        if shutil.which(command[0]) is None:
+            raise InstallError("browser_opener_unavailable")
+        result = subprocess.run([*command, url], capture_output=True, check=False, timeout=15)
+        if result.returncode:
+            raise InstallError("browser_open_failed")
     if mode == "setup":
         print("已打开首次登录页。输入 admin 并设置新密码，保存后进入后台。")
-    else:
+    elif sys.platform == "darwin":
         copied = subprocess.run(
             ["/usr/bin/pbcopy"], input=secret.encode("ascii"), capture_output=True, check=False
         )
         if copied.returncode:
             raise InstallError("login_opened_clipboard_unavailable")
         print("已打开后台登录页，管理员凭证已放入 Mac 剪贴板。在凭证框按 ⌘V 即可登录。")
+    else:
+        print("已打开后台登录页，请输入已设置的管理员密码。")
     return True
+
+
+def offer_admin_setup(args, connector, origin):
+    try:
+        if open_admin_entry(args, connector, expected_origin=origin, setup_only=True):
+            return
+    except (InstallError, OSError, subprocess.SubprocessError):
+        pass
+    print("需要登录后台时，请用同一安装器的 --open-admin 打开管理员入口。")
 
 
 def remote_script(args, remote_command, script, *, private=False):
@@ -234,6 +253,7 @@ def install_from_computer(args, connector, directory):
         r"/[^\x00-\x1f]+/\.cmh-first-release\.[A-Za-z0-9]{8}", staging
     ):
         raise InstallError("nas_release_staging_failed")
+    print("正在将校验通过的官方制品传给 NAS。镜像传输可能需要几分钟。", flush=True)
     try:
         for name in names:
             destination = shlex.quote(staging + "/" + name)
@@ -411,7 +431,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="首次安装 NAS Hub 并接入电脑当前项目。")
     parser.add_argument("--nas", required=True, help="已有 SSH 别名，或 用户名@NAS地址")
     parser.add_argument("--ssh-port", type=int, help="SSH 端口，默认沿用本机 SSH 配置")
-    parser.add_argument("--agent", choices=("claude", "codex", "opencode", "hermes", "generic"))
+    installation = parser.add_mutually_exclusive_group()
+    installation.add_argument(
+        "--agent", choices=("claude", "codex", "opencode", "hermes", "generic")
+    )
+    installation.add_argument("--nas-only", action="store_true", help="只部署 NAS，随后从后台配对")
     parser.add_argument("--open-admin", action="store_true", help="打开已安装 Hub 的管理员入口")
     parser.add_argument("--workspace", type=Path, help="共享的项目目录，默认当前目录")
     parser.add_argument("--project", help="共享项目名，默认为当前目录名")
@@ -429,6 +453,8 @@ def main(argv=None):
     parser.add_argument("--network", choices=("auto", "direct", "environment"), default="auto")
     parser.add_argument("--home", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.nas_only and args.open_admin:
+        parser.error("--nas-only 和 --open-admin 请分别执行。")
     os.umask(0o077)
     connector = load_connector()
     try:
@@ -436,8 +462,16 @@ def main(argv=None):
         if args.open_admin:
             open_admin_entry(args, connector)
             return 0
+        if args.nas_only:
+            print("正在通过 SSH 安装 NAS 服务…", flush=True)
+            origin, _, _ = deploy(args, connector)
+            print("NAS 已就绪。管理页面：" + origin + "/hub", flush=True)
+            if args.home is None:
+                offer_admin_setup(args, connector, origin)
+            print("登录后可从「连接 Agent」为设备生成配对链接。")
+            return 0
         if args.agent is None:
-            parser.error("--agent is required for installation")
+            parser.error("请使用 --nas-only，或通过 --agent 指定要接入的客户端。")
         home = (args.home or Path.home()).resolve(strict=True)
         connector.paths_for(
             args.agent, home, connector.agent_environment(home if args.home else None)
@@ -453,13 +487,18 @@ def main(argv=None):
         result = install_client(args, connector, home, workspace, origin, directory, access)
         print("共享项目目录：" + str(workspace), flush=True)
         if args.home is None:
-            try:
-                if not open_admin_entry(args, connector, expected_origin=origin, setup_only=True):
-                    print("首次登录可运行同一安装器并带 --open-admin 打开后台。")
-            except (InstallError, OSError, subprocess.SubprocessError):
-                print("需要登录后台时，请用安装器的 --open-admin 打开管理员入口。")
+            offer_admin_setup(args, connector, origin)
         return show_client_result(result, args.agent)
     except (InstallError, connector.ConnectError) as error:
+        if str(error) == "ssh_target_placeholder":
+            print("请把 USER@NAS 换成真实 SSH 用户名和地址，或填已有的 SSH 别名。", file=sys.stderr)
+            return 1
+        if str(error) == "ssh_client_unavailable":
+            print(
+                "本机缺少 SSH 客户端。请启用系统的 OpenSSH 客户端，再运行同一命令。",
+                file=sys.stderr,
+            )
+            return 1
         print(f"安装尚未完成（{error}）。处理提示后可重跑同一命令。", file=sys.stderr)
         return 1
     except (OSError, UnicodeError, subprocess.SubprocessError):

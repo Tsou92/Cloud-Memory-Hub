@@ -52,6 +52,20 @@ if ! "${cmh_docker[@]}" info >/dev/null 2>&1; then
 fi
 "${cmh_docker[@]}" compose version >/dev/null 2>&1 || fail '请先启用 Docker Compose v2。'
 
+tailscale_image='(docker\.io/|ghcr\.io/)?tailscale/tailscale([:@][^[:space:]]+)?'
+if [[ $requested_origin == AUTO && -z $tailscale_container ]] && ! command -v tailscale >/dev/null; then
+    running=$("${cmh_docker[@]}" ps --filter network=host --format '{{.Names}} {{.Image}}') \
+        || fail '无法检查 NAS 上的 Tailscale 容器。'
+    while read -r candidate image_name; do
+        if [[ $candidate =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ && $image_name =~ ^$tailscale_image$ ]]; then
+            [[ -z $tailscale_container ]] || fail '发现多个 Tailscale 容器，请指定要使用的容器。'
+            tailscale_container=$candidate
+        fi
+    done <<< "$running"
+    [[ -n $tailscale_container ]] || fail 'NAS 未找到可用的 Tailscale。请先登录 Tailscale，或指定已有 HTTPS 入口。'
+    printf '已找到 NAS 上的 Tailscale 容器。\n'
+fi
+
 if [[ $install_path != /* ]]; then
     install_path=$HOME/$install_path
 fi
@@ -161,7 +175,7 @@ if [[ $requested_origin == AUTO ]]; then
         expected_container=$("${cmh_docker[@]}" container inspect --format \
             '{{.Config.Image}} {{.HostConfig.NetworkMode}} {{.State.Running}}' "$tailscale_container" 2>/dev/null) \
             || fail '找不到所选 Tailscale 容器。'
-        [[ $expected_container =~ ^(docker\.io/|ghcr\.io/)?tailscale/tailscale([:@][^[:space:]]+)?\ host\ true$ ]] \
+        [[ $expected_container =~ ^$tailscale_image\ host\ true$ ]] \
             || fail '请选择运行中的官方 Tailscale host 网络容器。'
         tailscale_cmd=("${cmh_docker[@]}" exec "$tailscale_container" tailscale)
     else
@@ -257,6 +271,9 @@ fetch_release() {
     fi
     # curl's default retry does not cover an SSL connection reset. Try the
     # same official URL again without switching off certificate verification.
+    if [[ $file == "$image_file" ]]; then
+        printf '正在下载 NAS 镜像 %s，传输可能需要几分钟。\n' "$file"
+    fi
     for route in environment direct environment direct; do
         route_options=(--http1.1)
         [[ $route != direct ]] || route_options+=(--noproxy '*')
@@ -329,6 +346,7 @@ if [[ -z $local_image ]]; then
     # Check again after downloading before docker load can update a tag.
     local_image=$("${cmh_docker[@]}" image ls --no-trunc --quiet "$image_ref") || fail '无法重新核对 Docker 镜像目录。'
     if [[ -z $local_image ]]; then
+        printf '正在导入已校验的 NAS 镜像。\n'
         "${cmh_docker[@]}" image load --input "$workspace/$image_file" >/dev/null 2>&1 \
             || fail 'Docker 未能导入已校验镜像。'
     fi

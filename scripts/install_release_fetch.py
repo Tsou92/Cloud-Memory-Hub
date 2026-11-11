@@ -344,10 +344,14 @@ def fetch_release(tag: str, directory: Path) -> dict:
         for name in filenames:
             source = stage / name
             source.chmod(0o600)
-            # Link with no replacement, then remove the temporary name.
+            destination = directory / name
             try:
-                os.link(source, directory / name, follow_symlinks=False)
+                if os.name == "nt":
+                    # Windows rename fails if the destination already exists.
+                    source.rename(destination)
+                else:
+                    os.link(source, destination, follow_symlinks=False)
+                    source.unlink()
             except OSError:
                 raise ReleaseFetchError("release_target_busy") from None
-            source.unlink()
         return metadata
