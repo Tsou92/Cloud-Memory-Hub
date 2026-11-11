@@ -174,9 +174,14 @@ function Invoke-WebRequest {
           [int]$TimeoutSec = 180, [int]$MaximumRedirection = 0,
           [switch]$PassThru, [switch]$NoProxy)
     $session = $null
-    $cmhTestStage = 'session'
+    $cmhTestStage = 'module_import'
     try {
+        # This function shadows Invoke-WebRequest, so load its built-in module
+        # before resolving WebRequestSession in a cold PowerShell process.
+        Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+        $cmhTestStage = 'session_constructor'
         $session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+        $cmhTestStage = 'session_options'
         $flags = [Reflection.BindingFlags]'Instance,Public,NonPublic'
         $type = $session.GetType()
         $type.GetProperty('NoProxy', $flags).SetValue($session, $NoProxy.IsPresent)
@@ -234,9 +239,16 @@ def windows_test_ca(command, ca_file, *, legacy=False):
         + "'); "
         "$cmhTestStore = "
         "[Security.Cryptography.X509Certificates.X509Store]::new('Root','CurrentUser'); "
-        "$cmhTestStore.Open('ReadWrite'); $cmhTestStore.Add($cmhTestCert); try { "
+        "[Console]::Error.WriteLine('cmh_legacy_fixture_stage=trust_open'); "
+        "$cmhTestStore.Open('ReadWrite'); try { "
+        "[Console]::Error.WriteLine('cmh_legacy_fixture_stage=trust_add'); "
+        "$cmhTestStore.Add($cmhTestCert); try { "
+        "[Console]::Error.WriteLine('cmh_legacy_fixture_stage=legacy_download'); "
         + command
-        + " } finally { $cmhTestStore.Remove($cmhTestCert); $cmhTestStore.Close() }"
+        + " } finally { "
+        "[Console]::Error.WriteLine('cmh_legacy_fixture_stage=trust_remove'); "
+        "$cmhTestStore.Remove($cmhTestCert) } "
+        "} finally { $cmhTestStore.Close() }"
     )
 
 
@@ -366,15 +378,36 @@ class BootstrapTests(unittest.TestCase):
                     (curl_home / ".curlrc").write_text("insecure\nlocation\n", encoding="ascii")
                     environment["CURL_HOME"] = str(curl_home)
                 expected = expect_success if expect_success is not None else valid
-                result = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=480 if missing_python else 30,
-                    env=environment,
-                )
+                timeout = 480 if missing_python else 30
+                try:
+                    result = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=timeout,
+                        env=environment,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    if powershell_runtime != "powershell":
+                        raise
+                    stderr = error.stderr or b""
+                    if isinstance(stderr, bytes):
+                        stderr = stderr.decode("utf-8", errors="replace")
+                    prefix = "cmh_legacy_fixture_stage="
+                    stages = {"trust_open", "trust_add", "legacy_download", "trust_remove"}
+                    seen = [
+                        line.removeprefix(prefix)
+                        for line in stderr.splitlines()
+                        if line.startswith(prefix) and line.removeprefix(prefix) in stages
+                    ]
+                    connects = sum(request.startswith("CONNECT ") for request in proxy_requests)
+                    raise self.failureException(
+                        f"Windows PowerShell 5.1 exceeded {timeout}s; "
+                        f"last fixture stage={seen[-1] if seen else 'unknown'}; "
+                        f"proxy CONNECT requests={connects}"
+                    ) from None
                 if expected:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     markers = [
