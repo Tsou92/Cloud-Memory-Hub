@@ -2,32 +2,57 @@
 
 **服务装在 NAS 的 Docker 中；电脑只负责连接，不需要再装一个 App。**
 
-## 一条命令完成首装和接入
+## 一条命令部署 NAS
 
-在 Mac 或 Linux 电脑的目标项目目录运行以下命令。把 `USER@NAS` 换成 NAS 的 SSH 用户名与地址，或现有的 SSH 别名。
+选择电脑对应的终端。把 `USER@NAS` 换成 NAS 的 SSH 用户名与地址，或已有的 SSH 别名。可以在任意目录运行。
+
+**Mac / Linux 终端**
 
 ```sh
-(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && curl -q -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.5/scripts/bootstrap-install.sh -o "$cmh_installer" && sh "$cmh_installer" --nas USER@NAS --agent codex)
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --nas USER@NAS --nas-only)
 ```
 
-也可以打开想共享的项目，把这句话交给能执行终端命令的 Agent：
+**Windows PowerShell**
 
-> 请用 Cloud Memory Hub 的官方安装命令，在我的 NAS `USER@NAS` 完成首次部署并接入当前 Codex 项目。需要本人登录或确认授权时，让我在原界面处理。
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.ps1').Content)) -Nas 'USER@NAS'
+```
 
-安装器通过 SSH 检查 NAS、校验发行制品、初始化 Docker 服务和私网入口，再自动创建当前项目并配对这台电脑。默认使用当前目录，在主目录运行会建立一个 `Cloud Memory Hub` 文件夹。`--workspace` 可选择已有项目。已有的项目和设备可以继续通过 Hub 的「连接 Agent」页面加入。
+也可以把填好 NAS 地址的命令交给能运行对应终端的 Agent，附上下面这句话：
 
-NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Tailscale。需要参数时，加在命令末尾的右括号前。已有实例使用[升级指南](development-runtime.md#已有实例升级保持配置和身份)。
+> 请原样执行这条安装命令一次，等待安装器返回。告诉我管理页地址或具体错误。需要本人登录或授权时，告诉我在哪个界面操作。
 
-| 场景 | 参数 |
-| --- | --- |
-| NAS 的 Tailscale 在 Docker 中运行 | `--tailscale-container tailscale`，将 `tailscale` 换成实际容器名 |
-| 已有 HTTPS 反代指向 NAS 回环端口 | `--origin https://hub.example.com`，换成自己的地址 |
-| SSH 使用非默认端口 | `--ssh-port 2222`，换成实际端口 |
-| Claude Code CLI、OpenCode 或 Hermes | 将 `--agent codex` 换为 `--agent claude`、`--agent opencode` 或 `--agent hermes` |
+安装器处理 SSH、运行环境、下载校验、镜像导入和健康检查。首次下载可能需要几分钟。服务启动后，登录后台并从「连接 Agent」配对。要在 Mac 同时配置首台设备，可将 `--nas-only` 换为 `--agent codex` 或 `--agent claude`。
+
+NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Tailscale，或已有 HTTPS 反代。Mac/Linux 参数加在命令末尾的右括号前，PowerShell 参数加在末尾。已有实例使用[升级指南](development-runtime.md#已有实例升级保持配置和身份)。
+
+| 场景 | Mac / Linux | Windows PowerShell |
+| --- | --- | --- |
+| NAS 有多个 Tailscale 容器，需指定其中一个 | `--tailscale-container tailscale` | `-TailscaleContainer 'tailscale'` |
+| 已有 HTTPS 反代指向 NAS 回环端口 | `--origin https://hub.example.com` | `-Origin 'https://hub.example.com'` |
+| SSH 使用非默认端口 | `--ssh-port 2222` | `-SshPort 2222` |
 
 支持 Apple Silicon Mac 上的 Claude Code CLI 和 Codex 桌面自动收发。安装器写好项目钩子，Codex 首次打开项目时按 **Review hooks** 提示信任。等待信任会显示为待完成。完成后普通聊天即可；模型配置只在需要长期记忆提炼时使用。OpenCode、Hermes 和通用 MCP 的范围见[设备接入指南](client-installation.md)。
 
-首装完成后，安装器会打开受保护的初始化页。输入 `admin`，然后设置新密码。保存成功后进入后台。Mac 上要重新打开管理员入口，可把命令中的 `--agent codex` 换成 `--open-admin`。若已设密码，安装器会打开普通登录页并把现有凭证放到剪贴板。
+首装完成后，安装器会打开初始化页。输入 `admin`，再设定自己的新密码。支持短密码、中文和空格。需要重新打开管理员入口时，Mac/Linux 把 `--nas-only` 换成 `--open-admin`，Windows 在命令末尾加 `-OpenAdmin`。
+
+## 部署到本机 Docker
+
+启动 Docker Engine 或 Docker Desktop，使用 Linux 容器。发行镜像是 Linux amd64。Apple 芯片等 ARM 主机需要 Docker 支持运行 amd64 容器。在任意目录执行对应命令，也可把命令交给 Agent 原样执行一次。
+
+**Mac / Linux 终端**
+
+```sh
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --local)
+```
+
+**Windows PowerShell**
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.ps1').Content)) -Local
+```
+
+默认管理地址是 `http://127.0.0.1:8800/hub`。服务和端口仅供本机访问，不需要 SSH 或 Tailscale。端口已被占用时，Mac/Linux 在右括号前加 `--port 8890`，Windows 在末尾加 `-Port 8890`。重新打开管理员入口，在同一目标命令加 `--open-admin` 或 `-OpenAdmin`。
 
 ## 把其他设备接入已部署的 Hub
 
@@ -39,7 +64,7 @@ Linux、Windows 和其他 Agent 可使用 MCP。按安装结果重新加载连�
 
 下面保留已有发行版的逐步部署和手动安装说明。
 
-推荐让能执行终端命令的电脑端 Agent 帮你部署。你负责开启 NAS 连接、完成登录；下载、校验和启动服务交给 Agent。
+电脑端 Agent 可以执行上面的命令。你负责开启 NAS 连接和完成登录，命令负责下载、校验和启动服务。
 
 ## 1. 在 NAS 开启连接
 
@@ -54,17 +79,13 @@ Linux、Windows 和其他 Agent 可使用 MCP。按安装结果重新加载连�
 
 SSH 是让电脑远程操作 NAS 的入口，**不要求 NAS 管理网页自带命令行**。安装前不必自己配置 Compose、导入镜像或准备模型密钥。
 
-## 2. 把这段话发给电脑上的 Agent
+## 2. 把安装命令发给电脑上的 Agent
 
-打开有终端执行能力的 Claude Code、Codex 或其他 Agent，替换方括号内的信息，然后发送：
+把[上面的一行安装命令](#一条命令部署-nas)中的 `USER@NAS` 换成真实地址或 SSH 别名，然后把填好的命令和这段话一起发给 Agent：
 
 ```text
-请帮我把 Cloud Memory Hub 部署到 NAS。
-NAS 地址：[填写地址]；SSH 用户名：[填写用户名]；SSH 端口：[填写端口，通常为 22]。
-请先阅读 https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/nas-installation.md ，
-按官方指南使用最新已发布版本，完成下载校验、Docker 部署、可访问的 HTTPS 入口和健康检查。
-已有实例请先备份，保留原数据和配置。需要我登录或授权时，请指导我在本机完成，不要让我把密码或密钥发到聊天。
-完成后给我管理页面地址，并指导我安全登录和连接 Agent。
+请原样执行我附上的 Cloud Memory Hub 安装命令一次，等待安装器返回。
+告诉我管理页地址或具体错误。需要我登录、授权或信任时，请告诉我在哪个界面操作。
 ```
 
 第一次 SSH 登录、NAS 管理员授权或网络服务登录，可能需要你在自己的终端／浏览器中操作。Agent 应告诉你在哪里完成；无需把密码或密钥发给它。只有普通聊天功能、不能执行终端的助手无法替你实际部署。
@@ -86,7 +107,7 @@ NAS 服务安装和电脑的 Agent 接入是两步：前者只需部署一次，
 支持「从文件导入镜像」的 NAS 可以导入发行镜像；但镜像导入后仍需初始化、持久存储和网络配置。**目前最省事的完整路径是上面的 Agent 代部署。** 将来提供镜像仓库入口时，也会同时给出完整的启动配置。
 
 <details>
-<summary>给执行部署的 Agent：按现有发行流程操作</summary>
+<summary>一行命令无法使用时的手动流程</summary>
 
 以下复用已有发行包、Compose、初始化和备份能力，不新增安装服务。
 

@@ -7,15 +7,11 @@ SETUP_FORM = """<p>初始密码是 <code>admin</code>。请先设置新的管理
 <p id="setup-message" role="alert" hidden></p>
 <form id="setup-form" method="post" action="/hub/setup">
 <label for="initial-password">初始密码</label>
-<input id="initial-password" type="password" autocomplete="current-password" maxlength="256"
-required>
+<input id="initial-password" type="password" autocomplete="current-password" required>
 <label for="new-password">新密码</label>
-<input id="new-password" type="password" autocomplete="new-password" minlength="32" maxlength="256"
-aria-describedby="password-help" required>
-<small id="password-help">使用 32–256 个英文字母、数字或符号。请妥善保存。</small>
+<input id="new-password" type="password" autocomplete="new-password" required>
 <label for="confirm-password">再次输入新密码</label>
-<input id="confirm-password" type="password" autocomplete="new-password" minlength="32"
-maxlength="256" required>
+<input id="confirm-password" type="password" autocomplete="new-password" required>
 <button id="generate-password" type="button" hidden>生成并显示强密码</button>
 <button id="finish-setup" type="submit" disabled>保存新密码并进入后台</button>
 </form>
@@ -63,11 +59,6 @@ SETUP_SCRIPT = """(() => {
       confirmation.focus();
       return;
     }
-    if (!/^[!-~]{32,256}$/.test(next.value)) {
-      show('新密码须为 32–256 个英文字母、数字或符号。');
-      next.focus();
-      return;
-    }
     submit.disabled = true;
     show('');
     try {
@@ -91,7 +82,7 @@ SETUP_SCRIPT = """(() => {
       const errors = {
         invalid_initial_credential: '初始密码或初始化链接无效，请核对。',
         initial_setup_not_pending: '此初始化链接已经失效，请返回登录页。',
-        invalid_new_credential: '请使用另一个符合要求的新密码。',
+        invalid_new_credential: '请设置不同于初始密码的新密码，并确认两次输入一致。',
         login_rate_limited: '尝试次数较多，请稍后再试。',
       };
       show(Object.hasOwn(errors, detail) ? errors[detail] : '暂时无法保存，请稍后再试。');

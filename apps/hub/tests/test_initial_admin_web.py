@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import replace
 
+import pytest
 from cloud_memory_hub.admin_credentials import ADMIN_SETUP_PREFIX, initial_admin_setup_proof
 from cloud_memory_hub.boundary import ADMIN_SETUP_PATH, CloudBoundary
 from cloud_memory_hub.config import HubConfig, read_private_file
@@ -131,6 +132,46 @@ def test_setup_uses_scoped_proof_and_rotates_before_issuing_session(tmp_path):
             )
             assert new_login.status_code == 303
             assert (await web.get("/api/example")).status_code == 200
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("password", ["7", " 短密码🟣 ", "测" * 500])
+def test_flexible_password_works_in_setup_login_restart_and_settings(tmp_path, password):
+    config = configuration(tmp_path)
+    app = CloudBoundary(core, config, "synthetic-internal", remote_api=remote)
+    headers = {"Origin": config.public_origin}
+    payload = {**setup_payload(), "new_credential": password, "confirm_credential": password}
+
+    async def scenario():
+        async with browser(app, config) as web:
+            setup_page = await web.get(ADMIN_SETUP_PATH)
+            assert "minlength" not in setup_page.text and "maxlength" not in setup_page.text
+            response = await web.post(ADMIN_SETUP_PATH, json=payload, headers=headers)
+            assert response.status_code == 200
+            assert app.admin_credentials.valid_password(password)
+            assert not app.admin_credentials.valid(password)
+        stored = read_private_file(config.config_dir / "admin-token").decode().strip()
+        assert stored != password and initial_admin_setup_proof(stored) is None
+        restarted = CloudBoundary(
+            core, replace(config, admin_token=stored), "synthetic-restart", remote_api=remote
+        )
+        async with browser(restarted, config) as web:
+            page = await web.get("/hub/login")
+            assert "maxlength" not in page.text
+            assert (
+                await web.get("/hub/v1/projects", headers={"Authorization": f"Bearer {stored}"})
+            ).json() == {"is_admin": True}
+            response = await web.post("/hub/login", data={"credential": password}, headers=headers)
+            assert response.status_code == 303
+            response = await web.post(
+                "/hub/v1/admin/credential",
+                json={"current_credential": password, "new_credential": "新"},
+                headers=headers,
+            )
+            assert response.status_code == 200
+            assert not restarted.admin_credentials.valid_password(password)
+            assert restarted.admin_credentials.valid_password("新")
 
     asyncio.run(scenario())
 

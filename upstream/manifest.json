@@ -229,6 +229,11 @@
       "path": "patches/0045-hub-managed-agent-workspace.patch",
       "scope": "default_agent_pairing_creates_a_scoped_workspace_with_explicit_existing_project_and_host_trust_guidance",
       "digest": "sha256:962f033fb1ed52526b4ce9f2c73ffcdc5acb7756b19f70863cba4f16c0842e37"
+    },
+    {
+      "path": "patches/0046-hub-admin-password-input.patch",
+      "scope": "allow_nonempty_verbatim_admin_password_inputs_in_settings_and_remove_password_format_policy",
+      "digest": "sha256:97a8945a3218c6d07e3267a607e31691382cc527e1a370e11afed95a9eba2415"
     }
   ]
 }

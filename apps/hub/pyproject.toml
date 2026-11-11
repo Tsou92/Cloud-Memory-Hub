@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "cloud-memory-hub"
-version = "0.1.5"
+version = "0.1.6"
 description = "NAS deployment boundary for the reused MemHub core"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]

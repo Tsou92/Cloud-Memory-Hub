@@ -13,7 +13,7 @@ from cloud_memory_hub.onboarding.connect import valid_origin
 def main():
     try:
         origin = valid_origin(os.environ["CMH_PUBLIC_ORIGIN"])
-        if not origin.startswith("https://"):
+        if not origin.startswith(("https://", "http://127.0.0.1:")):
             return 1
         directory = Path(os.environ.get("CMH_CONFIG_DIR", "/config"))
         token = read_private_file(directory / "admin-token").decode("ascii").strip()

@@ -18,13 +18,24 @@ from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[1]
 CONNECTOR = ROOT / "apps/hub/src/cloud_memory_hub/onboarding/connect.py"
-DEFAULT_TAG = "v0.1.5"
+DEFAULT_TAG = "v0.1.6"
 STABLE_TAG = re.compile(r"v(?:0|[1-9][0-9]{0,7})(?:\.(?:0|[1-9][0-9]{0,7})){2}")
 SSH_TARGET = re.compile(
     r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?(?:[A-Za-z0-9][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])"
 )
 SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 READY_PREFIX = "CMH_NAS_READY\t"
+LOCAL_INSTALL_HELP = {
+    "local_docker_unavailable": "请安装并启动 Docker Desktop 或 Docker Engine。",
+    "local_docker_compose_unavailable": "请启用 Docker Compose v2 后重试。",
+    "local_docker_needs_linux": "请将 Docker 切换为 Linux 容器。",
+    "local_docker_context_remote": "请将 Docker 切换到本机上下文，再运行同一命令。",
+    "local_docker_project_conflict": "本机已有同名 Docker 项目，请打开已有后台或另选项目名。",
+    "local_port_busy": "本机端口已被占用，请加 --port 8890 后重试。PowerShell 使用 -Port 8890。",
+    "local_install_intent_conflict": "参数与已有部署不一致。请用原命令重试，或按升级指南操作。",
+    "local_release_unavailable": "无法取得或校验官方发行附件，请检查 GitHub 网络后重试。",
+    "local_docker_health_timeout": "容器启动后未通过健康检查，请查看 Docker 中的 Hub 状态。",
+}
 
 
 class InstallError(Exception):
@@ -49,14 +60,21 @@ def checked_name(value):
 
 
 def check_arguments(args, connector):
-    if not SSH_TARGET.fullmatch(args.nas):
-        raise InstallError("ssh_target_invalid")
+    if not args.local:
+        if args.nas == "USER@NAS":
+            raise InstallError("ssh_target_placeholder")
+        if not SSH_TARGET.fullmatch(args.nas):
+            raise InstallError("ssh_target_invalid")
     if not STABLE_TAG.fullmatch(args.tag) or not SAFE_NAME.fullmatch(args.compose_project):
         raise InstallError("release_or_compose_name_invalid")
     if not 1024 <= args.port <= 65535 or not (
         args.serve_port == 443 or 1024 <= args.serve_port <= 65535
     ):
         raise InstallError("port_invalid")
+    if args.local:
+        if args.agent or args.ssh_port or args.origin != "AUTO" or args.tailscale_container:
+            raise InstallError("local_mode_conflicts_with_nas_options")
+        return
     if args.ssh_port is not None and not 1 <= args.ssh_port <= 65535:
         raise InstallError("ssh_port_invalid")
     if args.origin != "AUTO" and not connector.valid_origin(args.origin).startswith("https://"):
@@ -73,13 +91,15 @@ def check_arguments(args, connector):
 
 
 def ssh_command(args, remote_command):
+    if shutil.which("ssh") is None:
+        raise InstallError("ssh_client_unavailable")
     command = ["ssh", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-T"]
     if args.ssh_port is not None:
         command.extend(["-p", str(args.ssh_port)])
     return [*command, args.nas, remote_command]
 
 
-def read_admin_entry(args, connector, *, expected_origin=None, setup_only=False):
+def remote_admin_entry(args, setup_only):
     # Select a single running Hub owned by this Compose project, on the same
     # local daemon as the installer. The container reads its own private file.
     remote = "\n".join(
@@ -97,13 +117,33 @@ def read_admin_entry(args, connector, *, expected_origin=None, setup_only=False)
             + (" --setup-only" if setup_only else ""),
         ]
     )
+    return remote_script(args, remote, "admin_entry.py", private=True)
+
+
+def read_admin_entry(args, connector, *, expected_origin=None, setup_only=False):
     try:
-        result = remote_script(args, remote, "admin_entry.py", private=True)
+        if args.local:
+            installer = load_local_installer()
+            home = (args.home or Path.home()).resolve(strict=True)
+            expected_origin = f"http://127.0.0.1:{args.port}"
+            try:
+                result = installer.local_admin_entry(
+                    args,
+                    home=home,
+                    script=(ROOT / "scripts/admin_entry.py").read_bytes(),
+                    setup_only=setup_only,
+                )
+            except installer.LocalInstallError as error:
+                raise InstallError(str(error)) from None
+        else:
+            result = remote_admin_entry(args, setup_only)
         if len(result) > 1024:
             raise ValueError
         entry = connector.parse_json(result)
         origin = connector.valid_origin(entry["origin"])
-        if not origin.startswith("https://") or (expected_origin and origin != expected_origin):
+        if (expected_origin and origin != expected_origin) or (
+            not args.local and not origin.startswith("https://")
+        ):
             raise ValueError
         if setup_only and set(entry) == {"origin"}:
             return origin, "ready", ""
@@ -124,25 +164,40 @@ def open_admin_entry(args, connector, *, expected_origin=None, setup_only=False)
     )
     if mode == "ready":
         return False
-    command = ["/usr/bin/open"] if sys.platform == "darwin" else ["xdg-open"]
-    if shutil.which(command[0]) is None:
-        raise InstallError("browser_opener_unavailable")
-    if mode == "login" and sys.platform != "darwin":
-        raise InstallError("clipboard_unavailable")
     url = origin + ("/hub/setup#proof=" + secret if mode == "setup" else "/hub/login")
-    result = subprocess.run([*command, url], capture_output=True, check=False, timeout=15)
-    if result.returncode:
-        raise InstallError("browser_open_failed")
+    if sys.platform == "win32":
+        try:
+            os.startfile(url)
+        except OSError:
+            raise InstallError("browser_open_failed") from None
+    else:
+        command = ["/usr/bin/open"] if sys.platform == "darwin" else ["xdg-open"]
+        if shutil.which(command[0]) is None:
+            raise InstallError("browser_opener_unavailable")
+        result = subprocess.run([*command, url], capture_output=True, check=False, timeout=15)
+        if result.returncode:
+            raise InstallError("browser_open_failed")
     if mode == "setup":
         print("已打开首次登录页。输入 admin 并设置新密码，保存后进入后台。")
-    else:
+    elif sys.platform == "darwin":
         copied = subprocess.run(
             ["/usr/bin/pbcopy"], input=secret.encode("ascii"), capture_output=True, check=False
         )
         if copied.returncode:
             raise InstallError("login_opened_clipboard_unavailable")
         print("已打开后台登录页，管理员凭证已放入 Mac 剪贴板。在凭证框按 ⌘V 即可登录。")
+    else:
+        print("已打开后台登录页，请输入已设置的管理员密码。")
     return True
+
+
+def offer_admin_setup(args, connector, origin):
+    try:
+        if open_admin_entry(args, connector, expected_origin=origin, setup_only=True):
+            return
+    except (InstallError, OSError, subprocess.SubprocessError):
+        pass
+    print("需要登录后台时，请用同一安装器的 --open-admin 打开管理员入口。")
 
 
 def remote_script(args, remote_command, script, *, private=False):
@@ -215,6 +270,15 @@ def load_release_fetcher():
     return module
 
 
+def load_local_installer():
+    spec = importlib.util.spec_from_file_location(
+        "cmh_install_local", ROOT / "scripts/install_local_docker.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def install_from_computer(args, connector, directory):
     fetcher = load_release_fetcher()
     try:
@@ -234,6 +298,7 @@ def install_from_computer(args, connector, directory):
         r"/[^\x00-\x1f]+/\.cmh-first-release\.[A-Za-z0-9]{8}", staging
     ):
         raise InstallError("nas_release_staging_failed")
+    print("正在将校验通过的官方制品传给 NAS。镜像传输可能需要几分钟。", flush=True)
     try:
         for name in names:
             destination = shlex.quote(staging + "/" + name)
@@ -408,10 +473,20 @@ def show_client_result(result, agent):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="首次安装 NAS Hub 并接入电脑当前项目。")
-    parser.add_argument("--nas", required=True, help="已有 SSH 别名，或 用户名@NAS地址")
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+    parser = argparse.ArgumentParser(description="在本机 Docker 或 NAS 部署 Cloud Memory Hub。")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--nas", help="已有 SSH 别名，或 用户名@NAS地址")
+    target.add_argument("--local", action="store_true", help="直接部署到本机 Docker")
     parser.add_argument("--ssh-port", type=int, help="SSH 端口，默认沿用本机 SSH 配置")
-    parser.add_argument("--agent", choices=("claude", "codex", "opencode", "hermes", "generic"))
+    installation = parser.add_mutually_exclusive_group()
+    installation.add_argument(
+        "--agent", choices=("claude", "codex", "opencode", "hermes", "generic")
+    )
+    installation.add_argument("--nas-only", action="store_true", help="只部署 NAS，随后从后台配对")
     parser.add_argument("--open-admin", action="store_true", help="打开已安装 Hub 的管理员入口")
     parser.add_argument("--workspace", type=Path, help="共享的项目目录，默认当前目录")
     parser.add_argument("--project", help="共享项目名，默认为当前目录名")
@@ -420,7 +495,7 @@ def main(argv=None):
     parser.add_argument("--assets-dir", type=Path, help="使用已下载的官方发行附件目录")
     parser.add_argument("--install-dir", default="cloud-memory-hub-install", help="NAS 新安装目录")
     parser.add_argument("--compose-project", default="cloud-memory-hub", help="NAS Compose 项目名")
-    parser.add_argument("--port", type=int, default=8800, help="NAS 回环端口")
+    parser.add_argument("--port", type=int, default=8800, help="回环端口")
     parser.add_argument("--origin", default="AUTO", help="已有 HTTPS 入口，默认用 Tailscale Serve")
     parser.add_argument("--serve-port", type=int, default=8443, help="Tailscale 私网 HTTPS 端口")
     parser.add_argument(
@@ -429,6 +504,8 @@ def main(argv=None):
     parser.add_argument("--network", choices=("auto", "direct", "environment"), default="auto")
     parser.add_argument("--home", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.nas_only and args.open_admin:
+        parser.error("--nas-only 和 --open-admin 请分别执行。")
     os.umask(0o077)
     connector = load_connector()
     try:
@@ -436,8 +513,27 @@ def main(argv=None):
         if args.open_admin:
             open_admin_entry(args, connector)
             return 0
+        if args.local:
+            installer = load_local_installer()
+            home = (args.home or Path.home()).resolve(strict=True)
+            try:
+                origin = installer.deploy_local(args, home=home, fetcher=load_release_fetcher())
+            except installer.LocalInstallError as error:
+                raise InstallError(str(error)) from None
+            print("本机 Docker 已就绪。管理页面：" + origin + "/hub", flush=True)
+            if args.home is None:
+                offer_admin_setup(args, connector, origin)
+            return 0
+        if args.nas_only:
+            print("正在通过 SSH 安装 NAS 服务…", flush=True)
+            origin, _, _ = deploy(args, connector)
+            print("NAS 已就绪。管理页面：" + origin + "/hub", flush=True)
+            if args.home is None:
+                offer_admin_setup(args, connector, origin)
+            print("登录后可从「连接 Agent」为设备生成配对链接。")
+            return 0
         if args.agent is None:
-            parser.error("--agent is required for installation")
+            parser.error("请使用 --nas-only，或通过 --agent 指定要接入的客户端。")
         home = (args.home or Path.home()).resolve(strict=True)
         connector.paths_for(
             args.agent, home, connector.agent_environment(home if args.home else None)
@@ -453,14 +549,23 @@ def main(argv=None):
         result = install_client(args, connector, home, workspace, origin, directory, access)
         print("共享项目目录：" + str(workspace), flush=True)
         if args.home is None:
-            try:
-                if not open_admin_entry(args, connector, expected_origin=origin, setup_only=True):
-                    print("首次登录可运行同一安装器并带 --open-admin 打开后台。")
-            except (InstallError, OSError, subprocess.SubprocessError):
-                print("需要登录后台时，请用安装器的 --open-admin 打开管理员入口。")
+            offer_admin_setup(args, connector, origin)
         return show_client_result(result, args.agent)
     except (InstallError, connector.ConnectError) as error:
-        print(f"安装尚未完成（{error}）。处理提示后可重跑同一命令。", file=sys.stderr)
+        if str(error) == "ssh_target_placeholder":
+            print("请把 USER@NAS 换成真实 SSH 用户名和地址，或填已有的 SSH 别名。", file=sys.stderr)
+            return 1
+        if str(error) == "ssh_client_unavailable":
+            print(
+                "本机缺少 SSH 客户端。请启用系统的 OpenSSH 客户端，再运行同一命令。",
+                file=sys.stderr,
+            )
+            return 1
+        if str(error) == "local_mode_conflicts_with_nas_options":
+            print("本机 Docker 模式只需 --local；请从后台连接 Agent。", file=sys.stderr)
+            return 1
+        guidance = LOCAL_INSTALL_HELP.get(str(error), "处理提示后可重跑同一命令。")
+        print(f"安装尚未完成（{error}）。{guidance}", file=sys.stderr)
         return 1
     except (OSError, UnicodeError, subprocess.SubprocessError):
         print("安装尚未完成。请检查 SSH、网络和运行环境后重试。", file=sys.stderr)
