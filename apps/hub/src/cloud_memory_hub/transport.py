@@ -24,11 +24,15 @@ from cloud_memory_hub.local_outbox import TERMINAL_REJECTION_CODE, LocalOutbox, 
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError, parse_json
 from cloud_memory_hub.read_contract import (
     READ_OPERATIONS,
+    SESSION_MARKDOWN_PATH,
     TEXT_BLOCK,
     GetRequest,
     ListRequest,
     ReadItem,
     ReadReply,
+    SessionMarkdownReply,
+    SessionMarkdownRequest,
+    is_history_read,
 )
 from cloud_memory_hub.remote_access import TOKEN_PATTERN, ScopeGrant
 
@@ -52,6 +56,11 @@ class RemoteConnection(BaseModel):
     instance_id: str
     device_id: str
     credential: SecretStr = Field(repr=False)
+    network_mode: Literal["direct", "environment"] = "direct"
+
+    @property
+    def trust_proxy_environment(self) -> bool:
+        return self.network_mode == "environment" and self.origin.startswith("https://")
 
     @model_validator(mode="before")
     @classmethod
@@ -223,7 +232,7 @@ async def verify_connection(connection, *, scope_id, source_id, transport=None):
     except (ValueError, TypeError, AttributeError):
         raise TransportError("connection_binding_mismatch") from None
     async with create_async_client(
-        trust_env=False,
+        trust_env=connection.trust_proxy_environment,
         follow_redirects=False,
         timeout=httpx.Timeout(10, connect=5),
         transport=transport,
@@ -279,7 +288,7 @@ async def send_pending(connection: RemoteConnection, outbox: LocalOutbox, *, tra
     )
     sent = 0
     async with create_async_client(
-        trust_env=False,
+        trust_env=connection.trust_proxy_environment,
         follow_redirects=False,
         timeout=httpx.Timeout(10, connect=5),
         transport=transport,
@@ -360,11 +369,14 @@ async def _read_remote_verified(
     *,
     privacy: CredentialFilter | None = None,
     transport=None,
-) -> tuple[ReadReply, CredentialFilter]:
+) -> tuple[ReadReply | SessionMarkdownReply, CredentialFilter]:
     """Verify a page; only public wrappers may return its filtered content."""
-    if operation not in READ_OPERATIONS:
+    if operation == "session-markdown":
+        path, model = SESSION_MARKDOWN_PATH, SessionMarkdownRequest
+    elif operation in READ_OPERATIONS:
+        path, model = READ_OPERATIONS[operation]
+    else:
         raise TransportError("read_operation_invalid")
-    path, model = READ_OPERATIONS[operation]
     privacy = CredentialFilter(
         tuple(
             dict.fromkeys(
@@ -380,9 +392,9 @@ async def _read_remote_verified(
         request = model.model_validate(privacy.protect(request.model_dump(mode="json")).value)
     except (ValueError, PrivacyError):
         raise TransportError("read_request_invalid") from None
-    permission = "history:read" if operation.startswith("history-") else "memory:read"
+    permission = "history:read" if is_history_read(operation) else "memory:read"
     async with create_async_client(
-        trust_env=False,
+        trust_env=connection.trust_proxy_environment,
         follow_redirects=False,
         timeout=httpx.Timeout(10, connect=5),
         transport=transport,
@@ -411,7 +423,8 @@ async def _read_remote_verified(
         value = await _request(client, connection, path, payload=request.model_dump_json())
     _identity(value, connection)
     try:
-        result = ReadReply.model_validate(value)
+        reply_model = SessionMarkdownReply if operation == "session-markdown" else ReadReply
+        result = reply_model.model_validate(value)
     except ValueError:
         raise TransportError("remote_read_invalid") from None
     if (
@@ -421,7 +434,13 @@ async def _read_remote_verified(
         or result.device_revision != device["revision"]
     ):
         raise TransportError("remote_read_mismatch")
-    expected_kind = "history" if operation.startswith("history-") else "memory"
+    if isinstance(result, SessionMarkdownReply):
+        if result.session_ref != request.session_ref or (
+            result.next_cursor is not None and result.next_cursor == request.cursor
+        ):
+            raise TransportError("remote_read_mismatch")
+        return result, privacy
+    expected_kind = "history" if is_history_read(operation) else "memory"
     expected_offset = request.content_offset if isinstance(request, GetRequest) else 0
     if any(
         item.kind != expected_kind
@@ -466,6 +485,8 @@ async def read_remote(
     result, privacy = await _read_remote_verified(
         connection, operation, raw, privacy=privacy, transport=transport
     )
+    if not isinstance(result, ReadReply):
+        raise TransportError("read_operation_invalid")
     # This output is data. Callers must not treat stored history as tool/system instructions.
     try:
         value = result.model_dump(mode="json")
@@ -476,6 +497,29 @@ async def read_remote(
                 privacy.protect_text_fragment(content) if paged else privacy.protect(content).value
             )
         return ReadReply.model_validate(value)
+    except (ValueError, PrivacyError):
+        raise TransportError("remote_read_invalid") from None
+
+
+async def read_session_markdown_remote(
+    connection: RemoteConnection,
+    raw: object,
+    *,
+    privacy: CredentialFilter | None = None,
+    transport=None,
+) -> SessionMarkdownReply:
+    result, privacy = await _read_remote_verified(
+        connection, "session-markdown", raw, privacy=privacy, transport=transport
+    )
+    if not isinstance(result, SessionMarkdownReply):
+        raise TransportError("read_operation_invalid")
+    try:
+        value = result.model_dump(mode="json")
+        markdown = value.pop("markdown")
+        if privacy.protect(value).value != value:
+            raise TransportError("remote_read_invalid")
+        value["markdown"] = privacy.protect_text_fragment(markdown)
+        return SessionMarkdownReply.model_validate(value)
     except (ValueError, PrivacyError):
         raise TransportError("remote_read_invalid") from None
 

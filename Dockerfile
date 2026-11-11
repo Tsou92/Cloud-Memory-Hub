@@ -28,6 +28,7 @@ RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
     src/ModelSettings.test.tsx src/OnboardingModelStep.test.tsx src/R6Settings.test.tsx \
     src/HubConsole.test.tsx src/HubQuestion.test.tsx src/hub-api.test.ts src/HubGovernance.test.tsx \
     src/HubConnections.test.tsx src/HubBackups.test.tsx src/hub-backups.test.ts \
+    src/HubAdminCredential.test.tsx src/hub-admin-credential.test.ts \
     src/HubAgentConnect.test.tsx src/hub-invitation.test.ts \
     src/HubDashboard.test.tsx src/HubNetwork.test.tsx src/hub-dashboard.test.ts
 

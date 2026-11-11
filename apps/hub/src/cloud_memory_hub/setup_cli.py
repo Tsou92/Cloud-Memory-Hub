@@ -19,11 +19,15 @@ from cloud_memory_hub.client_service import (
 )
 from cloud_memory_hub.client_setup import (
     ClientSetupError,
+    PairingBundle,
     client_status,
+    import_bundle,
     import_pairing,
+    install_automation,
     mcp_configuration,
 )
 from cloud_memory_hub.local_outbox import OutboxError
+from cloud_memory_hub.privacy import PrivacyError, parse_json
 from cloud_memory_hub.transport import TransportError
 
 
@@ -34,6 +38,12 @@ def main():
     pairing = commands.add_parser("import", help="校验并安装网页下载的配对文件")
     pairing.add_argument("--pairing-file", type=Path, required=True)
     pairing.add_argument("--client-root", type=Path)
+    automation = commands.add_parser("automation", help="为当前项目安装自动采集与召回")
+    automation.add_argument("--agent", choices=["claude", "codex"], required=True)
+    automation.add_argument("--workspace", type=Path, required=True)
+    automation.add_argument(
+        "--config-file", type=Path, help="复用已有配对，省略时从标准输入接收配对"
+    )
     status = commands.add_parser("status", help="查看队列，可选检查实际远程授权")
     status.add_argument("--config-file", type=Path, required=True)
     status.add_argument("--check-remote", action="store_true")
@@ -47,6 +57,19 @@ def main():
     try:
         if args.command == "import":
             result = asyncio.run(import_pairing(args.pairing_file, client_root=args.client_root))
+        elif args.command == "automation":
+            config_file = args.config_file
+            if config_file is None:
+                try:
+                    raw = sys.stdin.buffer.read(4097)
+                    if len(raw) > 4096:
+                        raise ValueError
+                    bundle = PairingBundle.model_validate(parse_json(raw))
+                except (ValueError, PrivacyError):
+                    raise ClientSetupError("pairing_file_invalid") from None
+                imported = asyncio.run(import_bundle(bundle))
+                config_file = Path(imported["config_file"])
+            result = install_automation(config_file, agent=args.agent, workspace=args.workspace)
         elif args.command == "status":
             result = asyncio.run(client_status(args.config_file, check_remote=args.check_remote))
         elif args.command == "mcp-config":

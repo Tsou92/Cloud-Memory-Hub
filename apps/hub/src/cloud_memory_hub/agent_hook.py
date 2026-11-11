@@ -1,4 +1,4 @@
-"""Explicit-workspace Claude capture with relevant memory and fresh original recall."""
+"""Project-bound native hooks for automatic capture and session continuation."""
 
 import asyncio
 import hashlib
@@ -17,6 +17,7 @@ from cloud_memory_hub.transport import TransportError
 MAX_HOOK_BYTES = 64 * 1024
 HOOK_NETWORK_DEADLINE = 8.0
 EVENTS = {"UserPromptSubmit": ("prompt", "user"), "Stop": ("last_assistant_message", "assistant")}
+TURN_FIELDS = {"claude-code": "prompt_id", "codex": "turn_id"}
 SILENT = {"continue": True, "suppressOutput": True}
 DENIED = {
     "device_authentication_required",
@@ -37,9 +38,9 @@ def _identity(*parts):
     return str(UUID(bytes=hashlib.sha256(value).digest()[:16], version=4))
 
 
-def visible_message(raw, workspace):
+def visible_message(raw, workspace, *, adapter="claude-code"):
     """Validate the binding before touching private configuration or native helpers."""
-    if type(raw) is not dict:
+    if type(raw) is not dict or adapter not in TURN_FIELDS:
         raise AgentAccessError("hook_input_invalid")
     event = raw.get("hook_event_name")
     if event not in EVENTS or "cursor_version" in raw:
@@ -55,7 +56,8 @@ def visible_message(raw, workspace):
     ):
         raise AgentAccessError("hook_workspace_mismatch")
     session = _identifier(raw.get("session_id"))
-    prompt = _identifier(raw.get("prompt_id"))
+    turn_field = TURN_FIELDS[adapter]
+    prompt = _identifier(raw.get(turn_field))
     field, role = EVENTS[event]
     text = raw.get(field)
     if type(text) is not str:
@@ -65,7 +67,7 @@ def visible_message(raw, workspace):
     from one_memory.live_capture import _messages
 
     # Do not pass transcript paths, alternate identities, tools or role lists.
-    rows = _messages("claude-code", {"hook_event_name": event, field: text, "prompt_id": prompt})
+    rows = _messages(adapter, {"hook_event_name": event, field: text, turn_field: prompt})
     if not rows:
         return None
     if len(rows) != 1 or rows[0][0] != role:
@@ -73,19 +75,34 @@ def visible_message(raw, workspace):
     return event, role, rows[0][2], session, prompt
 
 
-async def _recall(service, text):
+async def _recall(service, text, conversation_id):
     try:
         query, truncated = prepare_search_query(service.scope_id, text, service.privacy)
     except TransportError as error:
         raise AgentAccessError(error.code) from None
     requests = (
+        (
+            "session-briefs",
+            {"query": query.query, "limit": 3, "exclude_conversation_id": conversation_id},
+        ),
         ("memory-search", query.model_dump(mode="json")),
-        ("history-list", {"limit": 5, "offset": 0}),
     )
     results = await asyncio.gather(
         *(service._read(operation, request) for operation, request in requests),
         return_exceptions=True,
     )
+    if (
+        isinstance(results[0], AgentAccessError)
+        and results[0].code == "remote_endpoint_unavailable"
+    ):
+        # Older Hubs can still recall their original scoped history.
+        requests = (("history-list", {"limit": 5, "offset": 0}), requests[1])
+        results[0] = (
+            await asyncio.gather(
+                service._read(*requests[0]),
+                return_exceptions=True,
+            )
+        )[0]
     errors = [result for result in results if isinstance(result, BaseException)]
     for error in errors:
         if isinstance(error, AgentAccessError) and (not error.retryable or error.code in DENIED):
@@ -112,7 +129,7 @@ async def _recall(service, text):
     )
 
 
-async def process_message(service, message):
+async def process_message(service, message, *, adapter="claude-code"):
     event, role, text, native_session, native_prompt = message
     binding = (
         service.connection.instance_id,
@@ -121,6 +138,7 @@ async def process_message(service, message):
         service.source_id,
     )
     arguments = {
+        "adapter_id": adapter,
         "role": role,
         "text": text,
         "request_id": _identity(*binding, native_session, native_prompt, role),
@@ -141,7 +159,7 @@ async def process_message(service, message):
                 status["capture_error"] = delivery_error.code
             if event == "UserPromptSubmit":
                 try:
-                    context = await _recall(service, text)
+                    context = await _recall(service, text, arguments["session_id"])
                     output = output_context(context.text)
                     status.update(
                         recall=context.state, records=context.records, truncated=context.truncated
@@ -167,7 +185,7 @@ async def process_message(service, message):
     return output, status
 
 
-def run_hook_process(config_file, workspace):
+def run_hook_process(config_file, workspace, *, adapter="claude-code"):
     event = None
     try:
         data = sys.stdin.buffer.read(MAX_HOOK_BYTES + 1)
@@ -176,12 +194,12 @@ def run_hook_process(config_file, workspace):
         raw = parse_json(data)
         if type(raw) is dict and raw.get("hook_event_name") in EVENTS:
             event = raw["hook_event_name"]
-        message = visible_message(raw, workspace)
+        message = visible_message(raw, workspace, adapter=adapter)
         if message is None:
             print(json.dumps(SILENT))
             return 0
         service = AgentSettings.from_file(config_file).open()
-        output, status = asyncio.run(process_message(service, message))
+        output, status = asyncio.run(process_message(service, message, adapter=adapter))
     except Exception as error:
         code = (
             error.code

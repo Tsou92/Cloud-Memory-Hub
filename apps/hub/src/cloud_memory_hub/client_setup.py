@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import sys
@@ -13,8 +14,22 @@ from pydantic import Field, model_validator
 
 from cloud_memory_hub.agent_config import AgentSettings
 from cloud_memory_hub.client_processing import read_processing_sample
+from cloud_memory_hub.client_service import ClientServiceError, service_install, service_start
 from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.local_outbox import LocalOutbox
+from cloud_memory_hub.onboarding.connect import (
+    ConnectError,
+    Installation,
+    atomic_write,
+    automation_workspace,
+    checked_path,
+    ensure_dir,
+    exclusive_lock,
+    json_bytes,
+    json_config,
+    read_file,
+    stable_automation_python,
+)
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError, parse_json
 from cloud_memory_hub.remote_access import ScopeGrant
 from cloud_memory_hub.transport import RemoteConnection, TransportError, verify_connection
@@ -106,14 +121,39 @@ def _existing_client(target, bundle):
         or settings.state_dir != target / "state"
         or settings.scope_id != bundle.scope_id
         or settings.source_id != bundle.source_id
-        or RemoteConnection.from_file(settings.connection_file) != bundle.connection()
     ):
         raise ClientSetupError("existing_client_binding_conflict")
+    existing = RemoteConnection.from_file(settings.connection_file)
+    connection = bundle.connection()
+    if existing.model_copy(update={"network_mode": connection.network_mode}) != connection:
+        raise ClientSetupError("existing_client_binding_conflict")
     settings.open()  # Validate the retained queue; never reinitialize it.
+    if (
+        "network_mode" not in bundle.model_fields_set
+        or existing.network_mode == connection.network_mode
+    ):
+        return False
+    try:
+        with exclusive_lock(target.parent):
+            raw = read_file(settings.connection_file, private=True)
+            if raw is None or RemoteConnection.model_validate(parse_json(raw)) != existing:
+                raise ClientSetupError("existing_client_binding_conflict")
+            updated = parse_json(raw)
+            updated["network_mode"] = connection.network_mode
+            if read_file(settings.connection_file, private=True) != raw:
+                raise ClientSetupError("existing_client_binding_conflict")
+            atomic_write(settings.connection_file, json_bytes(updated))
+    except ConnectError as error:
+        raise ClientSetupError(str(error)) from None
+    return True
 
 
 async def import_pairing(path, *, client_root=None, transport=None):
     bundle = PairingBundle.from_download(path)
+    return await import_bundle(bundle, client_root=client_root, transport=transport)
+
+
+async def import_bundle(bundle, *, client_root=None, transport=None):
     connection = bundle.connection()
     root = (client_root or default_client_root()).absolute()
     target = root / f"{bundle.instance_id}-{bundle.device_id}"
@@ -122,8 +162,11 @@ async def import_pairing(path, *, client_root=None, transport=None):
     )
     _private_directory(root)
     if target.exists() or target.is_symlink():
-        _existing_client(target, bundle)
-        return {"status": "already_installed", "config_file": str(target / "agent.json")}
+        changed = _existing_client(target, bundle)
+        result = {"status": "already_installed", "config_file": str(target / "agent.json")}
+        if changed:
+            result["connection_updated"] = True
+        return result
     stage = Path(tempfile.mkdtemp(prefix=".pairing-", dir=root))
     try:
         raw_connection = connection.model_dump(mode="json")
@@ -158,6 +201,134 @@ async def import_pairing(path, *, client_root=None, transport=None):
         if stage.exists():
             shutil.rmtree(stage)
     return {"status": "installed", "config_file": str(target / "agent.json")}
+
+
+_HOOK_TARGETS = {"claude": ".claude/settings.local.json", "codex": ".codex/hooks.json"}
+
+
+def _managed_hook_command(value):
+    if type(value) is not str:
+        return False
+    try:
+        parts = shlex.split(value)
+    except ValueError:
+        return False
+    return bool(
+        parts
+        and Path(parts[0]).name == "cloud-memory-agent"
+        and "--config-file" in parts
+        and ("claude-hook" in parts or "codex-hook" in parts)
+    )
+
+
+def _merge_automation_hooks(raw, command):
+    document = json_config(raw)
+    hooks = document.setdefault("hooks", {})
+    if type(hooks) is not dict:
+        raise ClientSetupError("automation_configuration_conflict")
+    changed = False
+    for event in ("UserPromptSubmit", "Stop"):
+        entries = hooks.setdefault(event, [])
+        if type(entries) is not list:
+            raise ClientSetupError("automation_configuration_conflict")
+        matching = 0
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                raise ClientSetupError("automation_configuration_conflict")
+            for hook in entry["hooks"]:
+                value = hook.get("command") if isinstance(hook, dict) else None
+                if value == command and hook.get("type") == "command":
+                    matching += 1
+                elif _managed_hook_command(value):
+                    raise ClientSetupError("automation_configuration_conflict")
+        if matching > 1:
+            raise ClientSetupError("automation_configuration_conflict")
+        if not matching:
+            entries.append({"hooks": [{"type": "command", "command": command, "timeout": 12}]})
+            changed = True
+    return json_bytes(document) if changed else raw
+
+
+def _automation_agent_executable():
+    command = Path(sys.executable).absolute().with_name("cloud-memory-agent")
+    release = command.parent.parent.parent
+    stable_automation_python()
+    temporary = (Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve())
+    if (
+        command.parent != release / "venv/bin"
+        or any(release.resolve().is_relative_to(root) for root in temporary)
+        or read_file(release / "installation.json", private=True) is None
+    ):
+        raise ClientSetupError("automation_runtime_unavailable")
+    return command
+
+
+def install_automation(config_file, *, agent, workspace, home=None, executable=None):
+    """Install the selected project's native hooks using its existing local queue."""
+    if agent not in _HOOK_TARGETS:
+        raise ClientSetupError("automation_agent_unsupported")
+    home = Path(home or Path.home()).absolute()
+    try:
+        project = automation_workspace(workspace, home)
+        config_file = checked_path(config_file)
+        _private_directory(config_file.parent)
+        AgentSettings.from_file(config_file).open()
+        command = checked_path(executable or _automation_agent_executable())
+        info = command.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid not in {os.getuid(), 0}
+            or info.st_mode & 0o022
+            or not os.access(command, os.X_OK)
+            or any(ord(char) < 32 or ord(char) == 127 for char in str(command) + str(config_file))
+        ):
+            raise ClientSetupError("automation_runtime_unavailable")
+        invocation = shlex.join(
+            [
+                str(command),
+                "--config-file",
+                str(config_file),
+                f"{agent}-hook",
+                "--workspace",
+                str(project),
+            ]
+        )
+        target = project / _HOOK_TARGETS[agent]
+        directory = ensure_dir(config_file.parent / "automation", private=True)
+        binding = {
+            "schema_version": 1,
+            "workspace": str(project),
+            "agent": agent,
+            "command": invocation,
+        }
+        with exclusive_lock(config_file.parent.parent):
+            saved = read_file(directory / "pending.json", private=True)
+            state = parse_json(saved) if saved is not None else {**binding, "plans": {}}
+            if (
+                type(state) is not dict
+                or any(state.get(key) != value for key, value in binding.items())
+                or type(state.get("plans")) is not dict
+            ):
+                raise ClientSetupError("automation_configuration_conflict")
+            installation = Installation(directory, state)
+            if agent not in state["plans"]:
+                original = read_file(target)
+                proposed = _merge_automation_hooks(original, invocation)
+                installation.plan(agent, [(target, proposed, original)])
+            installation.apply(agent, {target})
+    except ConnectError as error:
+        raise ClientSetupError(str(error)) from None
+
+    background = "unavailable"
+    if sys.platform == "darwin":
+        try:
+            service_install(config_file, home=home)
+            status = service_start(config_file, home=home)
+            if status["loaded"] and status["state"] != "needs_attention":
+                background = "running" if status["running"] else "waiting"
+        except ClientServiceError:
+            pass
+    return {"status": "configured", "background_delivery": background}
 
 
 async def client_status(config_file, *, check_remote=False, transport=None):

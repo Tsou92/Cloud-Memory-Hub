@@ -1,5 +1,13 @@
 # 验证计划与需求追踪
 
+2026-11-11 自动会话接续（FR-01～05、FR-07、FR-08、FR-12）：用 `make probe-automatic-session-handoff` 验证普通对话自动采集、另一会话先读摘要后按需读 Markdown、已有会话下一轮更新。合成契约还覆盖同项目限定、原文修订、忘记／删除、长文续页和安装复用。实际宿主及发行边界见[自动接续验收](reviews/2026-11-11-automatic-session-handoff.md)。
+
+2026-11-11 用户后台样式合并（FR-12、ENG-01）：按独立编辑副本基线核对并复用现有网页，补丁 0044 覆盖文档滚动、表单、按钮和设置菜单的样式兼容；桌面浏览器与 390px 窄屏检查范围见[合并验收记录](reviews/2026-11-11-user-console-style-merge.md)。
+
+2026-11-11 代理环境接入（FR-02、FR-03、FR-07、FR-12、ENG-01）：补充环境／直接线路、无凭证探测、代理必需、双路失败、HTTP 回环不外发、写请求不重放、安装脚本两层下载及精确规则恢复验证，见 [ADR-0068](adr/0068-proxy-aware-agent-onboarding.md) 和[修复记录](reviews/2026-11-11-proxy-aware-onboarding.md)。
+
+2026-11-11 管理员凭证修改（FR-07、FR-12、ENG-01）：验收覆盖当前凭证再认证、精确同源、请求预算、限速、并发轮换、私有文件写入失败、旧凭证与全部旧会话失效、新凭证重启后有效、派生请求的动态凭证过滤，以及设置表单的校验与错误恢复。设计见 [ADR-0067](adr/0067-administrator-credential-change.md)；实际执行结果在完成验证后记录，不计为 v0.1.3 已有能力。
+
 2026-11-10 当前主线补充：按 [ADR-0065](adr/0065-one-link-remote-agent-onboarding.md)，
 主体运行在 NAS Docker；电脑默认使用一次性链接、一条命令或 Agent 安装指令添加轻量
 远程 MCP／Skill，无需另装图形 App。旧 JSON、stdio 与采集连接器保留为高级入口；

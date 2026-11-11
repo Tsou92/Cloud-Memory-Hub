@@ -56,8 +56,9 @@ def test_connection_resources_need_origin_but_not_administrator(tmp_path):
     asyncio.run(scenario())
 
 
-def test_downloads_are_bound_to_served_connector_and_configured_origin(tmp_path):
+def test_downloads_are_bound_to_served_connector_and_configured_origin(tmp_path, monkeypatch):
     config = configuration(tmp_path)
+    monkeypatch.setattr("cloud_memory_hub.onboarding_api.version", lambda _package: "0.1.4")
 
     async def core(scope, receive, send):
         raise AssertionError("must not enter Core")
@@ -69,6 +70,7 @@ def test_downloads_are_bound_to_served_connector_and_configured_origin(tmp_path)
         ) as client:
             connector = await client.get("/hub/connect.py")
             assert connector.status_code == 200
+            assert "CLIENT_RELEASE_TAG = 'v0.1.4'" in connector.text
             digest = hashlib.sha256(connector.content).hexdigest()
             for path in ("/hub/install.sh", "/hub/install.ps1"):
                 reply = await client.get(path)
@@ -78,6 +80,16 @@ def test_downloads_are_bound_to_served_connector_and_configured_origin(tmp_path)
                 assert "__CMH_" not in reply.text
                 assert "0.12.5" in reply.text
                 assert "3.12.13" in reply.text
+                assert "proxy-and-network.md" in reply.text
+                if path.endswith(".sh"):
+                    assert "cmh_client_release=v0.1.4" in reply.text
+                    assert "curl -q --fail --silent" in reply.text
+                    assert "--noproxy '*'" in reply.text
+                    assert "--show-error" not in reply.text
+                else:
+                    assert "MaximumRedirection = 0" in reply.text
+                    assert "$cmhRequest.Proxy = $null" in reply.text
+                    assert "$cmhRequest.AllowAutoRedirect = $false" in reply.text
             page = await client.get("/hub/connect")
             script = re.search(r"<script>(.*?)</script>", page.text, re.S).group(1)
             script_hash = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
@@ -91,6 +103,9 @@ def test_downloads_are_bound_to_served_connector_and_configured_origin(tmp_path)
             assert "localStorage" not in script and "sessionStorage" not in script
             assert "history.replaceState" in script
             assert "fetch(" not in script
+            assert "__CMH_HUB_" not in script
+            assert "cmh_fetch_hub" in script and "Get-CmhHubFile" in script
+            assert "proxy-and-network.md" in script
             assert "__SCRIPT__" not in page.text and "__ORIGIN__" not in page.text
 
     asyncio.run(scenario())

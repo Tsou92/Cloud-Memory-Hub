@@ -16,19 +16,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from cloud_memory_hub.onboarding.connect import SESSION_TOOL_NAMES, TOOL_NAMES
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from probe_claude_recall import LiveHub
 
-TOOLS = {
-    "memory_search",
-    "memory_recent",
-    "memory_remember",
-    "handoff_save",
-    "handoff_load",
-    "memory_status",
-    "memory_sync",
-}
+TOOLS = TOOL_NAMES | SESSION_TOOL_NAMES
 SECRET = "CMH_SYNTHETIC_PASSWORD_ONLY"  # pragma: allowlist secret -- synthetic filtering fixture
 
 

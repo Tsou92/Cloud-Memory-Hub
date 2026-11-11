@@ -4,6 +4,7 @@ import json
 import math
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
@@ -88,10 +89,10 @@ _HEADERS = re.compile(
 )
 _BEARER = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
 _EXTRA_TOKEN = re.compile(
-    r"\b(?:cmhdev_v1_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}|"
-    r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|"
+    r"\b(?:cmhdev_v1_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|"
+    r"(?:eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|"
     r"(?:AKIA|ASIA)[A-Z0-9]{16}|glpat-[A-Za-z0-9_-]{20,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|gh[ousr]_[A-Za-z0-9]{20,})\b"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|gh[ousr]_[A-Za-z0-9]{20,})\b)"
 )
 _URL = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^\s<>\"']+")
 _INLINE_MEDIA = re.compile(r"(?i)\bdata:[^\s,]*;base64,")
@@ -134,8 +135,15 @@ class FilteredContent:
 @dataclass(frozen=True)
 class CredentialFilter:
     known_credentials: tuple[str, ...] = field(default=(), repr=False)
+    known_credentials_source: Callable[[], tuple[str, ...]] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self):
+        if self.known_credentials_source is not None and not callable(
+            self.known_credentials_source
+        ):
+            raise PrivacyError("invalid_known_credentials_source")
         if len(self.known_credentials) > 256 or any(
             not isinstance(value, str) or not value or "\0" in value
             for value in self.known_credentials
@@ -145,6 +153,8 @@ class CredentialFilter:
             raise PrivacyError("known_credentials_too_large")
 
     def protect(self, content: object) -> FilteredContent:
+        if self.known_credentials_source is not None:
+            return self._snapshot().protect(content)
         try:
             original = json.dumps(content, ensure_ascii=False, allow_nan=False)
             if len(original.encode()) > MAX_CONTENT_BYTES:
@@ -164,6 +174,8 @@ class CredentialFilter:
         The producer must filter the complete original before pagination. Consumers
         reassembling structured data must filter that complete document again.
         """
+        if self.known_credentials_source is not None:
+            return self._snapshot().protect_text_fragment(text)
         try:
             if not isinstance(text, str) or len(text.encode()) > MAX_CONTENT_BYTES:
                 raise PrivacyError("content_too_large")
@@ -173,6 +185,15 @@ class CredentialFilter:
             return result
         except (ValueError, TypeError, UnicodeError, RecursionError):
             raise PrivacyError("invalid_content") from None
+
+    def _snapshot(self):
+        try:
+            known = tuple(
+                dict.fromkeys((*self.known_credentials, *self.known_credentials_source()))
+            )
+            return CredentialFilter(known)
+        except Exception:
+            raise PrivacyError("known_credentials_unavailable") from None
 
     def _walk(self, value, *, depth: int, budget: list[int]):
         budget[0] -= 1

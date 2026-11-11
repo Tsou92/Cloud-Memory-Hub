@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from cloud_memory_hub.agent_config import _private_json
+from cloud_memory_hub.onboarding.connect import TOOL_NAMES
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from probe_agent_access import TOOLS, call
@@ -133,7 +134,8 @@ async def connect(arguments):
                 initialized = await session.initialize()
                 assert initialized.server_info.name == "Cloud Memory Hub", "mcp_identity_invalid"
                 advertised = await session.list_tools()
-                assert {tool.name for tool in advertised.tools} == TOOLS, "mcp_tools_incomplete"
+                names = {tool.name for tool in advertised.tools}
+                assert names in (TOOL_NAMES, TOOLS), "mcp_tools_incomplete"
                 yield session
 
 
@@ -146,7 +148,7 @@ def same_project(first, second):
 
 async def exercise(first, second):
     """Shared behavioral checks; local fixture runs do not certify two hosts/TLS."""
-    checks = ["both_installed_mcp_servers_and_seven_tools"]
+    checks = ["both_installed_mcp_servers_and_tools_verified"]
     nonce = uuid4().hex
     async with connect(first) as a, connect(second) as b:
         same_project(await call(a, "memory_status"), await call(b, "memory_status"))

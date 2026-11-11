@@ -1,0 +1,137 @@
+"""Atomic administrator credential replacement without changing device identities."""
+
+from __future__ import annotations
+
+import hmac
+import os
+import stat
+import tempfile
+import threading
+
+from cloud_memory_hub.config import HubConfig, read_private_file
+from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
+
+
+class AdminCredentialError(Exception):
+    """Only a fixed public code and status; never include submitted credentials."""
+
+    def __init__(self, code: str, status: int):
+        self.code = code
+        self.status = status
+        super().__init__(code)
+
+
+def valid_new_credential(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and 32 <= len(value) <= 256
+        and all(33 <= ord(character) <= 126 for character in value)
+    )
+
+
+class AdminCredentials:
+    """One serving process owns the config volume under the existing storage lease.
+
+    The small synchronous critical section serializes reauthentication, persistence
+    and the shared privacy-filter source. It never yields between those steps.
+    """
+
+    def __init__(self, config: HubConfig):
+        self._directory = config.config_dir
+        self._token = config.admin_token
+        self._known = (config.admin_token, config.encryption_key.decode())
+        self._available = True
+        self._lock = threading.RLock()
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def valid(self, value: object) -> bool:
+        with self._lock:
+            return (
+                self._available
+                and isinstance(value, str)
+                and value.isascii()
+                and hmac.compare_digest(value, self._token)
+            )
+
+    def known_credentials(self) -> tuple[str, ...]:
+        with self._lock:
+            if not self._available:
+                raise PrivacyError("known_credentials_unavailable")
+            return self._known
+
+    def change(
+        self,
+        current: object,
+        replacement: object,
+    ) -> None:
+        with self._lock:
+            if not self._available:
+                raise AdminCredentialError("admin_credential_unavailable", 503)
+            if not self.valid(current):
+                raise AdminCredentialError("current_credential_incorrect", 403)
+            if not valid_new_credential(replacement) or hmac.compare_digest(
+                replacement, self._token
+            ):
+                raise AdminCredentialError("invalid_new_credential", 422)
+            known = tuple(dict.fromkeys((*self._known, replacement)))
+            try:
+                # Console reads add one opaque browser session to this set.
+                CredentialFilter((*known, "x" * 43))
+            except PrivacyError:
+                raise AdminCredentialError("credential_change_unavailable", 503) from None
+            path = self._directory / "admin-token"
+            temporary = None
+            try:
+                info = self._directory.lstat()
+                if (
+                    not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or info.st_mode & 0o077
+                ):
+                    raise ValueError("unsafe_configuration_directory")
+                existing = read_private_file(path).decode("ascii").strip()
+                if not hmac.compare_digest(existing, self._token):
+                    self._available = False
+                    raise AdminCredentialError("admin_credential_unavailable", 503)
+                descriptor, temporary = tempfile.mkstemp(
+                    prefix=".admin-token-", dir=self._directory
+                )
+                with os.fdopen(descriptor, "wb") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write(replacement.encode("ascii") + b"\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+                descriptor = os.open(self._directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            except AdminCredentialError:
+                raise
+            except Exception:
+                # A failing replace/fsync can occur after publication. Determine
+                # the actual authority rather than silently keeping a stale token.
+                try:
+                    actual = read_private_file(path).decode("ascii").strip()
+                except Exception:
+                    self._available = False
+                    raise AdminCredentialError("admin_credential_unavailable", 503) from None
+                if not hmac.compare_digest(actual, replacement):
+                    if not hmac.compare_digest(actual, self._token):
+                        self._available = False
+                    raise AdminCredentialError("credential_change_unavailable", 503) from None
+            finally:
+                if temporary is not None:
+                    try:
+                        os.unlink(temporary)
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        # A leftover private file does not undo a known publication.
+                        pass
+            self._token = replacement
+            self._known = known

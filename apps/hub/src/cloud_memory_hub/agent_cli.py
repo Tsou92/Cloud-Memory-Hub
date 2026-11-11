@@ -16,6 +16,8 @@ from cloud_memory_hub.transport import TransportError
 COMMANDS = {
     "search": ("search", {"query", "limit"}),
     "recent": ("recent", {"limit", "offset"}),
+    "session-briefs": ("session_briefs", {"query", "limit"}),
+    "session-markdown": ("session_markdown", {"session_ref", "cursor"}),
     "remember": ("remember", {"text", "request_id", "session_id"}),
     "handoff-save": (
         "handoff_save",
@@ -58,18 +60,19 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(prog="cloud-memory-agent")
     parser.add_argument("--config-file", type=Path, required=True)
-    parser.add_argument("command", choices=["init", "upgrade-outbox", "claude-hook", *COMMANDS])
+    hooks = {"claude-hook": "claude-code", "codex-hook": "codex"}
+    parser.add_argument("command", choices=["init", "upgrade-outbox", *hooks, *COMMANDS])
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--backup-file", type=Path)
     args = parser.parse_args()
     if (args.command == "upgrade-outbox") != (args.backup_file is not None):
         parser.error("--backup-file is required only for upgrade-outbox")
-    if args.command == "claude-hook":
+    if args.command in hooks:
         from cloud_memory_hub.agent_hook import run_hook_process
 
-        return run_hook_process(args.config_file, args.workspace)
+        return run_hook_process(args.config_file, args.workspace, adapter=hooks[args.command])
     if args.workspace is not None:
-        parser.error("--workspace is only accepted by claude-hook")
+        parser.error("--workspace is only accepted by an Agent hook")
     try:
         settings = AgentSettings.from_file(args.config_file)
         if args.command == "upgrade-outbox":

@@ -1,5 +1,11 @@
 # Hy-Memory / MemHub 复用评估
 
+2026-11-11 自动会话接续：复用固定上游 `one_memory.live_capture._messages` 的 Claude／Codex 可见消息处理、已安装客户端私有队列和 macOS 补传服务，以及现有原文接纳、读取授权和 SDK 模型整理。固定上游摘要函数未接入 Hub 的接纳队列，已有手动交接合同也只读取显式交接原文；因此增加从现有归档投影的接续摘录与 Markdown 分页，避免另存一份正文或让接续等待记忆产物。见 [ADR-0069](../adr/0069-automatic-session-handoff.md)。
+
+2026-11-11 代理环境接入：继续复用独立 stdlib 安装器的 Remote、配对、MCP 验证和可恢复配置安装，以及现有 POSIX／PowerShell 下载模板。原 Remote 强制直连，与原生 HTTP MCP 宿主的环境代理不一致，需在 Hub 安装层补充选路检测、首层下载回退和明确恢复引导。上游高级连接组件需要不同运行时且同样固定忽略环境代理，不能通过默认切换 stdio 解决此问题。无需新代理服务或宿主私有配置字段。设计见 [ADR-0068](../adr/0068-proxy-aware-agent-onboarding.md)。
+
+2026-11-11 管理员凭证修改：复用上游 `UISessionStore`、Hub 既有 Origin／登录限速、私有文件检查与凭证过滤，以及现有 R6Settings 分组和表单。固定上游没有管理员凭证轮换；Hub 初始化刻意拒绝覆盖，因此在 Hub 边界补充原子凭证更新和会话失效，前端以独立小补丁接入。无需账户数据库、设备协议迁移或备份运行时重构。设计见 [ADR-0067](../adr/0067-administrator-credential-change.md)。
+
 2026-11-10 首次 GitHub Core 回归暴露了安装边界问题：原 `core-pr` runner 的独立环境安装注册表 SDK，缺少本项目已登记的 Anthropic 补丁。保留原 runner、隔离 HOME 和测试选择，仅为测试进程绑定校验后的固定 SDK 包，并在 pytest 启动时核对实际模块来源。补丁 0033 将 Core 中现存 SDK 直连收回已有 `hy_memory_bridge`，复用原协议转换、异常和文件维护原语；不复制解析器、不改变锁顺序或数据格式，也不放宽原架构检查。子进程测试保留已绑定的 SDK 搜索路径，缺密钥场景改为已有 Anthropic 支持下的准确错误。验证见[冷环境 CI 记录](../reviews/2026-11-10-cold-core-ci.md)。
 
 2026-11-10 本地投递终态设计：NAS 安装验证证明已遗忘内容被正确拒绝，但 Mac 网络 outbox 队首阻塞后续事件。继续扩展既有 LocalOutbox、HTTP 传输和 capture 原子事务；上游 `memory_write_jobs` 是服务端模型处理队列，不替代跨设备上传及本地身份绑定。新增本地拒绝索引和显式格式升级，无新上游补丁、无 NAS 业务库迁移；边界见 [ADR-0055](../adr/0055-terminal-upload-rejections.md)。
@@ -164,3 +170,5 @@ Linux CI 随后暴露本地来源根目录 inode 复用。继续复用固定 Cor
 
 
 2026-11-10 参考图改版继续复用既有 HubConsole、HubContext、SdkMemoryLibrary、SdkRawHistory、ModelSettings、连接／备份／问答／治理组件。固定上游没有按 Hub 项目授权显示的协作网络和接纳统计，因此补丁 0040 只重组壳层、总览与样式，并复用 summary/device 分页和既有响应校验。Hub 新增只读投影复用来源、grant、事件回执、Core 队列元数据及 ScopeGrant 校验；不复制记忆核心，不引入监控或心跳服务。接口及兼容说明见 [ADR-0066](../adr/0066-reference-dashboard.md)。
+
+补丁 0044 复用用户已确认的 Hub 控制台样式修改；复制基线、来源摘要与补丁 0043 后的 CSS 完全一致，原样接入滚动、表单和深色控件调整，仅对 Hub 模型表单菜单补充普通选项透明背景和浅色文字、让主按钮规则排除菜单项，并提高服务商按钮及菜单状态的局部选择器优先级，修复既有通用样式覆盖导致的深底深字和浅色按钮。不新增组件或接口，不改变原生客户端样式。

@@ -16,7 +16,11 @@ from cloud_memory_hub.governance_execution import ExecuteRequest
 from cloud_memory_hub.governance_plan import PreviewRequest
 from cloud_memory_hub.governance_preview import GovernancePreview
 from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, PrivacyError, parse_json
-from cloud_memory_hub.read_contract import READ_OPERATIONS
+from cloud_memory_hub.read_contract import (
+    READ_OPERATIONS,
+    SESSION_MARKDOWN_PATH,
+    SessionMarkdownRequest,
+)
 from cloud_memory_hub.remote_access import (
     AccessError,
     DeviceAccessStore,
@@ -246,7 +250,12 @@ def create_remote_api(
             credential = device_credential(request)
             await run_in_threadpool(store.authenticate, credential)
             body = await read_body(request, model)
-            return response(await reads.read(credential, operation, body))
+            try:
+                guarded = operation.startswith("session-") and admission is not None
+                async with admission.operation() if guarded else nullcontext():
+                    return response(await reads.read(credential, operation, body))
+            except HyMemoryBridgeError:
+                raise AccessError("read_unavailable", 503) from None
 
         return read
 
@@ -275,6 +284,11 @@ def create_remote_api(
             Route("/hub/v1/sources/{source_id:uuid}/access", source_access, methods=["GET"]),
             Route("/hub/v1/events", events, methods=["POST"]),
             Route("/hub/v1/events/{event_id:uuid}", event_status, methods=["GET"]),
+            Route(
+                SESSION_MARKDOWN_PATH,
+                read_endpoint("session-markdown", SessionMarkdownRequest),
+                methods=["POST"],
+            ),
             *[
                 Route(path, read_endpoint(operation, model), methods=["POST"])
                 for operation, (path, model) in READ_OPERATIONS.items()

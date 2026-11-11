@@ -13,9 +13,9 @@ import test_transport
 from cloud_memory_hub.agent_access import AgentAccessError
 from cloud_memory_hub.agent_hook import MAX_HOOK_BYTES, SILENT, process_message, visible_message
 from cloud_memory_hub.privacy import CredentialFilter
-from cloud_memory_hub.read_contract import ReadItem, ReadReply
+from cloud_memory_hub.read_contract import SESSION_MARKDOWN_CHARS, ReadItem, ReadReply
 from cloud_memory_hub.transport import RemoteConnection, TransportError
-from test_agent_access import access_for, read_grants
+from test_agent_access import access_for, read_grants, second_device
 from test_transport import bind_live, connection_data
 
 live_hub = test_transport.live_hub
@@ -73,6 +73,34 @@ def test_native_helper_uses_only_visible_field_and_prompt_identity(tmp_path, mon
     )
     stop = visible_message(payload(workspace, event="Stop", text="Final answer."), workspace)
     assert stop[:3] == ("Stop", "assistant", "Final answer.")
+
+
+@pytest.mark.parametrize("event,role", [("UserPromptSubmit", "user"), ("Stop", "assistant")])
+def test_codex_native_hook_uses_turn_id(tmp_path, monkeypatch, event, role):
+    monkeypatch.chdir(tmp_path)
+    raw = payload(tmp_path, event=event)
+    raw["turn_id"] = raw.pop("prompt_id")
+    message = visible_message(raw, tmp_path, adapter="codex")
+    assert message == (
+        event,
+        role,
+        "Synthetic visible text.",
+        "native-synthetic-session",
+        "native-synthetic-turn",
+    )
+    service = service_for(tmp_path)
+
+    async def read(operation, _request):
+        return read_reply(service, operation, ())
+
+    monkeypatch.setattr(service, "_deliver", no_delivery)
+    monkeypatch.setattr(service, "_read", read)
+    asyncio.run(process_message(service, message, adapter="codex"))
+    captured = json.loads(service.outbox.pending()[0].payload)
+    assert captured["content"]["metadata"]["adapter_id"] == "codex"
+    raw["prompt_id"] = raw.pop("turn_id")
+    with pytest.raises(AgentAccessError, match="hook_identity_missing_or_invalid"):
+        visible_message(raw, tmp_path, adapter="codex")
 
 
 @pytest.mark.parametrize("field", ["session_id", "prompt_id"])
@@ -211,7 +239,7 @@ def test_unexpected_network_failure_preserves_capture_without_error_text(tmp_pat
     assert "private synthetic" not in json.dumps([output, status])
 
 
-def test_combined_empty_and_original_paging_remain_explicit(tmp_path, monkeypatch):
+def test_old_hub_fallback_preserves_authorized_original_paging(tmp_path, monkeypatch):
     service = service_for(tmp_path)
     calls = []
 
@@ -220,6 +248,8 @@ def test_combined_empty_and_original_paging_remain_explicit(tmp_path, monkeypatc
 
     async def reader(operation, request):
         calls.append((operation, request))
+        if operation == "session-briefs":
+            raise AgentAccessError("remote_endpoint_unavailable")
         return ReadReply(
             instance_id=service.connection.instance_id,
             device_id=service.connection.device_id,
@@ -239,10 +269,14 @@ def test_combined_empty_and_original_paging_remain_explicit(tmp_path, monkeypatc
     assert "recent-history list and relevant-memory search returned no records" in text
     assert "Do not infer that no memories exist" in text
     assert status["capture"] == "queued" and status["recall"] == "empty" and status["truncated"]
-    assert [operation for operation, _ in calls] == ["memory-search", "history-list"]
+    assert [operation for operation, _ in calls] == [
+        "session-briefs",
+        "memory-search",
+        "history-list",
+    ]
     assert calls[0][1]["query"] == "visible"
-    assert calls[0][1]["scope_id"] == service.scope_id
-    assert calls[1][1] == {"limit": 5, "offset": 0}
+    assert calls[1][1]["scope_id"] == service.scope_id
+    assert calls[2][1] == {"limit": 5, "offset": 0}
 
 
 def read_reply(service, operation, texts=("SYNTHETIC_REFERENCE",), **updates):
@@ -255,7 +289,8 @@ def read_reply(service, operation, texts=("SYNTHETIC_REFERENCE",), **updates):
         items=tuple(
             ReadItem(
                 record_id=f"{operation}:{index}",
-                kind="history" if operation == "history-list" else "memory",
+                kind="history" if operation in {"history-list", "session-briefs"} else "memory",
+                layer="session_summary" if operation == "session-briefs" else None,
                 content=text,
                 content_offset=0,
                 agent_id="synthetic",
@@ -266,9 +301,7 @@ def read_reply(service, operation, texts=("SYNTHETIC_REFERENCE",), **updates):
     ).model_copy(update=updates)
 
 
-def test_current_question_recalls_older_decision_outside_recent_five_in_parallel(
-    tmp_path, monkeypatch
-):
+def test_session_summary_and_relevant_older_memory_are_combined_in_budget(tmp_path, monkeypatch):
     service = service_for(tmp_path)
     calls = {}
 
@@ -281,9 +314,9 @@ def test_current_question_recalls_older_decision_outside_recent_five_in_parallel
                 both_started.set()
             await asyncio.wait_for(both_started.wait(), 1)
             texts = (
-                ("OLDER_DECISION: navigation uses green.",)
+                ("OLDER_DECISION: navigation uses green.", "SECOND_DECISION", "THIRD_DECISION")
                 if operation == "memory-search"
-                else tuple(f"unrelated recent {index}" for index in range(5))
+                else tuple(f"recent summary {index}" for index in range(3))
             )
             return read_reply(service, operation, texts)
 
@@ -294,9 +327,10 @@ def test_current_question_recalls_older_decision_outside_recent_five_in_parallel
         text = output["hookSpecificOutput"]["additionalContext"]
         records = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
         assert status["recall"] == "retrieved" and status["records"] == 5
-        assert records[0]["content"] == "OLDER_DECISION: navigation uses green."
-        assert records[1]["content"] == "unrelated recent 0"
-        assert "unrelated recent 4" not in text
+        assert records[0]["content"] == "recent summary 0"
+        assert records[0]["session_ref"] == "session-briefs:0"
+        assert records[1]["content"] == "OLDER_DECISION: navigation uses green."
+        assert "THIRD_DECISION" not in text
         assert status["truncated"]
 
     monkeypatch.setattr(service, "_deliver", no_delivery)
@@ -308,7 +342,7 @@ async def no_delivery():
     return None
 
 
-@pytest.mark.parametrize("failed_operation", ["memory-search", "history-list"])
+@pytest.mark.parametrize("failed_operation", ["memory-search", "session-briefs"])
 @pytest.mark.parametrize("empty", [True, False])
 def test_one_temporary_failure_has_explicit_partial_context(
     tmp_path, monkeypatch, failed_operation, empty
@@ -438,7 +472,7 @@ def test_read_deadline_discards_finished_context_and_cancels_other_read(tmp_path
     monkeypatch.setattr("cloud_memory_hub.agent_hook.HOOK_NETWORK_DEADLINE", 0.02)
 
     async def reader(operation, request):
-        if operation == "history-list":
+        if operation == "session-briefs":
             return read_reply(service, operation)
         try:
             await asyncio.Event().wait()
@@ -467,15 +501,54 @@ def test_real_http_visible_turn_replay_recent_update_and_revocation(live_hub, tm
             await read_grants(client, admin, connection.device_id, raw["scope_id"])
             turn1 = ("UserPromptSubmit", "user", "synthetic user text", "session", "turn-1")
             output, status = await process_message(service, turn1)
-            assert status["capture"] == "accepted" and status["recall"] == "retrieved"
-            assert "synthetic user text" in output["hookSpecificOutput"]["additionalContext"]
-            stop = ("Stop", "assistant", "synthetic final reply", "session", "turn-1")
+            assert status["capture"] == "accepted" and status["recall"] == "empty"
+            assert "synthetic user text" not in output["hookSpecificOutput"]["additionalContext"]
+            lead = "synthetic final reply "
+            remaining = SESSION_MARKDOWN_CHARS - len(("## 助手\n\n" + lead).encode())
+            fragment = '{"example":"continued"}\n\nMore Markdown.'
+            stop = ("Stop", "assistant", lead + "x" * remaining + fragment, "session", "turn-1")
             assert (await process_message(service, stop))[0] == SILENT
             count = len(uploaded)
             await process_message(service, stop)
             assert len(uploaded) == count
             assert service.outbox.status()["accepted"] == 2
-            await service.remember("OTHER_DEVICE_STYLE_UPDATE: use green navigation.")
+            other_connection, other_source = await second_device(
+                client, admin, connection, raw["scope_id"]
+            )
+            other = access_for(tmp_path / "other", other_connection, other_source)
+            _, other_status = await process_message(
+                other, ("UserPromptSubmit", "user", "Continue this work", "other-session", "one")
+            )
+            assert other_status["recall"] == "retrieved", other_status
+            briefs = await other.session_briefs(query="synthetic final reply")
+            ref = next(
+                item["record_id"]
+                for item in briefs["items"]
+                if "synthetic final reply" in item["content"]
+            )
+            page = await other.session_markdown(ref)
+            markdown = page["markdown"]
+            saw_fragment = False
+            for _ in range(4):
+                if page["next_cursor"] is None:
+                    break
+                page = await other.session_markdown(ref, cursor=page["next_cursor"])
+                saw_fragment |= page["markdown"].startswith(fragment)
+                markdown += page["markdown"]
+            else:
+                pytest.fail("Synthetic two-record session did not finish paging")
+            assert "synthetic user text" in markdown and "synthetic final reply" in markdown
+            assert saw_fragment
+            await process_message(
+                other,
+                (
+                    "Stop",
+                    "assistant",
+                    "OTHER_DEVICE_STYLE_UPDATE: use green navigation.",
+                    "other-session",
+                    "one",
+                ),
+            )
             output, status = await process_message(service, (*turn1[:4], "turn-2"))
             assert status["recall"] == "retrieved"
             assert "OTHER_DEVICE_STYLE_UPDATE" in output["hookSpecificOutput"]["additionalContext"]

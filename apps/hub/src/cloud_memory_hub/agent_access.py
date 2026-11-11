@@ -14,6 +14,7 @@ from cloud_memory_hub.transport import (
     TransportError,
     read_original_remote,
     read_remote,
+    read_session_markdown_remote,
     send_pending,
 )
 
@@ -176,6 +177,22 @@ class AgentOperations:
         reply = await self._read("history-list", {"limit": limit, "offset": offset})
         return reply.model_dump(mode="json")
 
+    async def session_briefs(self, *, query: str | None = None, limit: int = 3) -> dict:
+        reply = await self._read("session-briefs", {"query": query, "limit": limit})
+        return reply.model_dump(mode="json")
+
+    async def session_markdown(self, session_ref: str, *, cursor: str | None = None) -> dict:
+        try:
+            reply = await read_session_markdown_remote(
+                self.connection,
+                {"scope_id": self.scope_id, "session_ref": session_ref, "cursor": cursor},
+                privacy=self.privacy,
+                transport=self.transport,
+            )
+        except TransportError as error:
+            raise AgentAccessError(error.code, retryable=error.retryable) from None
+        return reply.model_dump(mode="json")
+
     async def handoff_load(self, handoff_id: str) -> dict:
         try:
             if not isinstance(handoff_id, str) or not handoff_id.startswith("cmhe:"):
@@ -263,11 +280,14 @@ class AgentAccess(AgentOperations):
         self.source_id = source_id
         self.transport = transport
 
-    async def capture_message(self, role: str, text: str, *, request_id, session_id) -> dict:
+    async def capture_message(
+        self, role: str, text: str, *, request_id, session_id, adapter_id="claude-code"
+    ) -> dict:
         """Persist one visible host message; the hook separately bounds network work."""
         try:
             if (
                 role not in {"user", "assistant"}
+                or adapter_id not in {"claude-code", "codex"}
                 or not isinstance(text, str)
                 or not text.strip()
                 or len(text.encode()) > MAX_CAPTURE_BYTES
@@ -279,7 +299,7 @@ class AgentAccess(AgentOperations):
             {
                 "messages": [{"role": role, "text": text}],
                 "metadata": {
-                    "adapter_id": "claude-code",
+                    "adapter_id": adapter_id,
                     "capture_kind": "visible_hook",
                     "capture_version": 1,
                 },

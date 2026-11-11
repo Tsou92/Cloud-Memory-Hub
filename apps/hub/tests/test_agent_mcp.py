@@ -146,6 +146,8 @@ def test_real_mcp_two_devices_share_updates_and_complete_handoff(live_hub, tmp_p
                 assert {item.name for item in tools.tools} == {
                     "memory_search",
                     "memory_recent",
+                    "session_briefs",
+                    "session_markdown",
                     "memory_remember",
                     "handoff_save",
                     "handoff_load",

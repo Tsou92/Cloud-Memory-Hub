@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shlex
 import tomllib
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +17,7 @@ from cloud_memory_hub.client_setup import (
     PairingBundle,
     client_status,
     import_pairing,
+    install_automation,
 )
 from cloud_memory_hub.transport import TransportError
 from test_agent_access import read_grants
@@ -110,6 +112,14 @@ def test_repeat_import_keeps_pending_event_and_original_binding(tmp_path):
     assert result["status"] == "already_installed"
     assert settings.state_dir.joinpath("outbox.sqlite3").read_bytes() == before
     assert settings.open().outbox.status()["queued"] == 1
+    raw["network_mode"] = "environment"
+    path.write_text(json.dumps(raw))
+    changed = asyncio.run(
+        import_pairing(path, client_root=config.parent.parent, transport=authorized(raw))
+    )
+    assert changed["connection_updated"] is True
+    assert settings.open().connection.network_mode == "environment"
+    assert settings.state_dir.joinpath("outbox.sqlite3").read_bytes() == before
     raw["source_id"] = str(uuid4())
     path.write_text(json.dumps(raw))
     with pytest.raises(ClientSetupError, match="existing_client_binding_conflict"):
@@ -117,6 +127,70 @@ def test_repeat_import_keeps_pending_event_and_original_binding(tmp_path):
             import_pairing(path, client_root=config.parent.parent, transport=authorized(raw))
         )
     assert settings.state_dir.joinpath("outbox.sqlite3").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "agent, relative", [("claude", ".claude/settings.local.json"), ("codex", ".codex/hooks.json")]
+)
+def test_automation_merges_only_the_bound_project_and_keeps_the_queue(
+    tmp_path, monkeypatch, agent, relative
+):
+    import cloud_memory_hub.client_setup as setup
+
+    _, raw, config = install(tmp_path)
+    workspace = tmp_path / "project with spaces"
+    target = workspace / relative
+    target.parent.mkdir(parents=True)
+    foreign = {"hooks": [{"type": "command", "command": "printf synthetic"}]}
+    target.write_text(json.dumps({"hooks": {"Stop": [foreign]}}))
+    executable = tmp_path / "cloud-memory-agent"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    service = AgentSettings.from_file(config).open()
+    _, event = queue_for(tmp_path / "synthetic", service.connection)
+    event.update(source_id=raw["source_id"], scope_id=raw["scope_id"])
+    service.outbox.enqueue(event)
+    calls = []
+    monkeypatch.setattr(setup.sys, "platform", "darwin")
+    monkeypatch.setattr(setup, "service_install", lambda config, **_: calls.append(config))
+    monkeypatch.setattr(
+        setup,
+        "service_start",
+        lambda *_args, **_: {"loaded": True, "running": True, "state": "running"},
+    )
+    kwargs = {"agent": agent, "workspace": workspace, "home": tmp_path, "executable": executable}
+    assert install_automation(config, **kwargs) == {
+        "status": "configured",
+        "background_delivery": "running",
+    }
+    first = target.read_text()
+    assert raw["credential"] not in first
+    hooks = json.loads(first)["hooks"]
+    assert hooks["Stop"][0] == foreign
+    for event in ("UserPromptSubmit", "Stop"):
+        assert shlex.split(hooks[event][-1]["hooks"][0]["command"]) == [
+            str(executable),
+            "--config-file",
+            str(config),
+            f"{agent}-hook",
+            "--workspace",
+            str(workspace),
+        ]
+    assert install_automation(config, **kwargs)["status"] == "configured"
+    assert target.read_text() == first
+    assert calls == [config, config]
+    assert service.outbox.status()["queued"] == 1
+
+    other = tmp_path / "other project"
+    other.mkdir()
+    with pytest.raises(ClientSetupError, match="automation_configuration_conflict"):
+        install_automation(config, **{**kwargs, "workspace": other})
+    assert not (other / relative).exists()
+    concurrent = '{"hooks":{"Stop":[]},"other":true}'
+    target.write_text(concurrent)
+    with pytest.raises(ClientSetupError, match="managed_configuration_conflict"):
+        install_automation(config, **kwargs)
+    assert target.read_text() == concurrent
 
 
 @pytest.mark.parametrize(
