@@ -50,6 +50,8 @@ def synthetic_download(content, *, tls=False, path="/hub/connect.py", redirect=F
                 "/CN=localhost",
                 "-addext",
                 "subjectAltName=DNS:localhost,DNS:hub-proxy-only.invalid,IP:127.0.0.1",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
             ],
             check=True,
             capture_output=True,
@@ -214,6 +216,108 @@ function Invoke-WebRequest {
 """
 
 
+# Windows PowerShell 5.1 has no CustomRootTrust chain policy. Its test child
+# scopes an exact certificate pin to the fixture request and restores the callback.
+POWERSHELL_LEGACY_CERTIFICATE_PIN = r"""
+[Console]::Error.WriteLine('cmh_legacy_fixture_stage=pin_prepare')
+Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+
+public sealed class CmhTestCertificatePin
+{
+    private readonly X509Certificate2 expected;
+    private readonly byte[] expectedBytes;
+
+    public CmhTestCertificatePin(X509Certificate2 expected)
+    {
+        this.expected = expected;
+        expectedBytes = expected.GetRawCertData();
+    }
+
+    public RemoteCertificateValidationCallback Callback
+    {
+        get { return Validate; }
+    }
+
+    private bool Matches(X509Certificate certificate)
+    {
+        byte[] presented = certificate.GetRawCertData();
+        if (presented.Length != expectedBytes.Length) return false;
+        for (int index = 0; index < presented.Length; index++)
+        {
+            if (presented[index] != expectedBytes[index]) return false;
+        }
+        return true;
+    }
+
+    private bool HasServerAuth()
+    {
+        foreach (X509Extension extension in expected.Extensions)
+        {
+            if (extension.Oid.Value != "2.5.29.37") continue;
+            var usage = new X509EnhancedKeyUsageExtension(extension, extension.Critical);
+            foreach (Oid oid in usage.EnhancedKeyUsages)
+            {
+                if (oid.Value == "1.3.6.1.5.5.7.3.1") return true;
+            }
+        }
+        return false;
+    }
+
+    private bool Validate(
+        object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors)
+    {
+        try
+        {
+            if (certificate == null ||
+                (errors & SslPolicyErrors.RemoteCertificateNotAvailable) != 0) return false;
+            if (!Matches(certificate))
+            {
+                Console.Error.WriteLine("cmh_legacy_pin=certificate_mismatch");
+                return false;
+            }
+            if ((errors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0)
+            {
+                Console.Error.WriteLine("cmh_legacy_pin=hostname_mismatch");
+                return false;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            if (now < expected.NotBefore.ToUniversalTime() ||
+                now > expected.NotAfter.ToUniversalTime() || !HasServerAuth()) return false;
+            if (errors == SslPolicyErrors.None) return true;
+
+            return errors == SslPolicyErrors.RemoteCertificateChainErrors &&
+                chain != null && chain.ChainElements.Count == 1 &&
+                Matches(chain.ChainElements[0].Certificate) &&
+                chain.ChainStatus.Length == 1 &&
+                chain.ChainStatus[0].Status == X509ChainStatusFlags.UntrustedRoot;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+}
+'@
+$cmhTestExpected = [Security.Cryptography.X509Certificates.X509Certificate2]::new('__CA__')
+$cmhTestPrevious = [Net.ServicePointManager]::ServerCertificateValidationCallback
+try {
+    [Net.ServicePointManager]::ServerCertificateValidationCallback =
+        [CmhTestCertificatePin]::new($cmhTestExpected).Callback
+    [Console]::Error.WriteLine('cmh_legacy_fixture_stage=legacy_download')
+    __COMMAND__
+} finally {
+    [Console]::Error.WriteLine('cmh_legacy_fixture_stage=pin_restore')
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = $cmhTestPrevious
+    $cmhTestExpected.Dispose()
+}
+"""
+
+
 def windows_test_ca(command, ca_file, *, legacy=False):
     if os.name == "nt":
         command = (
@@ -227,29 +331,7 @@ def windows_test_ca(command, ca_file, *, legacy=False):
         # Test-only session policy: real IWR/TLS/proxy transport, one private root.
         # Hostname, expiry and chain validation remain enabled; no OS trust mutation.
         return POWERSHELL_PRIVATE_CA.replace("__CA__", cert) + command
-    if (
-        os.name != "nt"
-        or os.environ.get("GITHUB_ACTIONS") != "true"
-        or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
-    ):
-        raise unittest.SkipTest("PS5 TLS fixture trust is restricted to disposable Windows CI")
-    return (
-        "$cmhTestCert = [Security.Cryptography.X509Certificates.X509Certificate2]::new('"
-        + cert
-        + "'); "
-        "$cmhTestStore = "
-        "[Security.Cryptography.X509Certificates.X509Store]::new('Root','CurrentUser'); "
-        "[Console]::Error.WriteLine('cmh_legacy_fixture_stage=trust_open'); "
-        "$cmhTestStore.Open('ReadWrite'); try { "
-        "[Console]::Error.WriteLine('cmh_legacy_fixture_stage=trust_add'); "
-        "$cmhTestStore.Add($cmhTestCert); try { "
-        "[Console]::Error.WriteLine('cmh_legacy_fixture_stage=legacy_download'); "
-        + command
-        + " } finally { "
-        "[Console]::Error.WriteLine('cmh_legacy_fixture_stage=trust_remove'); "
-        "$cmhTestStore.Remove($cmhTestCert) } "
-        "} finally { $cmhTestStore.Close() }"
-    )
+    return POWERSHELL_LEGACY_CERTIFICATE_PIN.replace("__CA__", cert).replace("__COMMAND__", command)
 
 
 class BootstrapTests(unittest.TestCase):
@@ -396,7 +478,7 @@ class BootstrapTests(unittest.TestCase):
                     if isinstance(stderr, bytes):
                         stderr = stderr.decode("utf-8", errors="replace")
                     prefix = "cmh_legacy_fixture_stage="
-                    stages = {"trust_open", "trust_add", "legacy_download", "trust_remove"}
+                    stages = {"pin_prepare", "legacy_download", "pin_restore"}
                     seen = [
                         line.removeprefix(prefix)
                         for line in stderr.splitlines()
@@ -525,9 +607,30 @@ class BootstrapTests(unittest.TestCase):
             windows=True, valid=True, powershell_runtime="powershell", broken_candidate=True
         )
         self.run_installer(windows=True, valid=False, powershell_runtime="powershell")
-        self.run_installer(
-            windows=True, valid=True, proxy_mode="required", powershell_runtime="powershell"
-        )
+
+    @unittest.skipUnless(
+        os.name == "nt" and shutil.which("powershell"), "Requires real Windows PowerShell 5.1"
+    )
+    def test_windows_powershell_51_proxy_tls_pin(self):
+        options = {
+            "windows": True,
+            "valid": True,
+            "proxy_mode": "required",
+            "powershell_runtime": "powershell",
+        }
+        _, requests = self.run_installer(**options)
+        self.assertTrue(any(request.startswith("CONNECT ") for request in requests))
+
+        for fault, marker in (
+            ("untrusted", "certificate_mismatch"),
+            ("wrong_hostname", "hostname_mismatch"),
+        ):
+            with self.subTest(fault=fault):
+                result, requests = self.run_installer(
+                    **options, **{fault: True}, expect_success=False
+                )
+                self.assertTrue(any(request.startswith("CONNECT ") for request in requests))
+                self.assertIn(f"cmh_legacy_pin={marker}", result.stderr)
 
     @unittest.skipUnless(shutil.which("pwsh"), "Requires a real PowerShell runtime")
     def test_powershell_skips_a_stderr_failing_python_candidate(self):
