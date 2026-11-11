@@ -228,7 +228,7 @@
     {
       "path": "patches/0045-hub-managed-agent-workspace.patch",
       "scope": "default_agent_pairing_creates_a_scoped_workspace_with_explicit_existing_project_and_host_trust_guidance",
-      "digest": "sha256:34decd7fd5e2951747de11f039a77fdd74936c95c89a645949f543351f5101ef"
+      "digest": "sha256:962f033fb1ed52526b4ce9f2c73ffcdc5acb7756b19f70863cba4f16c0842e37"
     }
   ]
 }

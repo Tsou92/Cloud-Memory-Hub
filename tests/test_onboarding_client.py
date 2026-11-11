@@ -296,6 +296,9 @@ class ClientTests(unittest.TestCase):
             patch.object(client, "installed_automation_setup", return_value=executable),
             patch.object(client.subprocess, "run", side_effect=run),
         ):
+            original = client.connect(LINK, "codex", home=self.home, remote_factory=self.remote)
+            self.assertEqual(original["automation"]["status"], "automation_workspace_required")
+            self.assertFalse(projects.exists())
             for _ in range(2):
                 result = client.connect(
                     LINK,

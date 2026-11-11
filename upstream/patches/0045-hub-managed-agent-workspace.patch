@@ -117,3 +117,20 @@ diff --git a/memhub/apps/web/src/hub-invitation.test.ts b/memhub/apps/web/src/hu
  printf 'executed' > "$CMH_EXECUTION_MARK"
  [ "$CMH_TEST_MODE" != 'installer_failed' ] || exit 19
  SYNTHETIC_INSTALLER
+diff --git a/memhub/apps/web/src/HubAgentConnect.test.tsx b/memhub/apps/web/src/HubAgentConnect.test.tsx
+--- a/memhub/apps/web/src/HubAgentConnect.test.tsx
++++ b/memhub/apps/web/src/HubAgentConnect.test.tsx
+@@ -121,9 +121,11 @@
+   await userEvent.click(
+     await screen.findByRole("button", { name: "复制给 Agent 的一句话" }),
+   );
++  expect(copy.mock.calls[0][0]).toContain("为 Hermes 安装 MCP 和 Skill 并验证连接");
+   expect(copy.mock.calls[0][0]).toContain(
+-    `为Hermes安装MCP和Skill并验证连接：https://synthetic.example/hub/connect#pairing_id=${id}&secret=${secret}`,
+-  );
++    `https://synthetic.example/hub/connect#pairing_id=${id}&secret=${secret}`,
++  );
++  expect(copy.mock.calls[0][0]).not.toContain("--managed-workspace");
+   expect(sessionStorage.getItem(invitationKey(instance, scope))).toBe(
+     JSON.stringify({ version: 1, pairing_id: id }),
+   );
