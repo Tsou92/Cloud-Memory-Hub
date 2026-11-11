@@ -110,6 +110,8 @@ Claude 可另行启用[当前轮自动共享](agent-turn-hooks.md)，自动保�
 | `memory_status` | 纯本机队列状态，不是网络连通检查或提炼完成证明 |
 | `memory_recent` | 可选 `limit`、`offset`，读取本项目最近接纳的原文，无需等待模型提炼 |
 | `memory_search` | `query`、可选 `limit`，在配置的项目内检索相关记忆 |
+| `session_briefs` | 可选 `query`、`limit`，读取本项目的近期会话摘要 |
+| `session_markdown` | 按摘要返回的 `session_ref` 读取已采集会话的 Markdown，需要更多时用 `next_cursor` 续读 |
 | `memory_remember` | `text`，过滤并保存新事实、决定或关键进度，沿已有队列上传 |
 | `handoff_save` | 保存结构清楚的任务交接，成功接纳后给出精确交接 ID |
 | `handoff_load` | 按 ID 读取同项目已接纳的交接正文 |
@@ -117,7 +119,7 @@ Claude 可另行启用[当前轮自动共享](agent-turn-hooks.md)，自动保�
 
 先在隔离客户端配置中接入并验证，再自行选择日常客户端的接入位置。各客户端 MCP 配置格式不同，本项目不覆盖其已有设置。工具可单独使用；Skill 补充“会话开始读、关键进度写、切换前交接、下一轮重新读”的工作约定。
 
-要安装 Skill，将整个 `packages/agent-skill/cloud-memory-hub` 目录复制到目标 Agent **已配置的 Skill 目录**。目录内只含通用说明，不含凭证或个人路径。目标已经存在同名 Skill 时先比较内容，不直接覆盖。安装后确认该客户端实际发现 `cloud-memory-hub`，并能看到已配置的七个工具；不支持 Skill 的客户端仍可显式调用 MCP。本文操作说明不会自动修改任何日常配置。
+要安装 Skill，将整个 `packages/agent-skill/cloud-memory-hub` 目录复制到目标 Agent **已配置的 Skill 目录**。目录内只含通用说明，不含凭证或个人路径。目标已经存在同名 Skill 时先比较内容，不直接覆盖。安装后确认客户端能发现 `cloud-memory-hub` 并列出工具。支持会话接续的 Hub 会额外提供 `session_briefs` 和 `session_markdown`，旧版 Hub 保留原有七个工具。不支持 Skill 的客户端仍可显式调用 MCP。本文操作说明不会自动修改任何日常配置。
 
 需要 CLI 备用入口时，在已安装的 Skill 内生成私有 `references/local-connection.md`，只记录该机器已安装 CLI 的绝对路径、已配对 Agent 配置文件的绝对路径及 JSON stdin 用法。该文件不含连接凭证，属于本机配置，不进入 Git 或通用 Skill 发布包。这样尚未加载 MCP 的对话也能按明确绑定使用 CLI，不必搜索其他 Agent 配置。
 
