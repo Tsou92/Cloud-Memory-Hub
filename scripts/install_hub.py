@@ -473,6 +473,10 @@ def show_client_result(result, agent):
 
 
 def main(argv=None):
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="在本机 Docker 或 NAS 部署 Cloud Memory Hub。")
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--nas", help="已有 SSH 别名，或 用户名@NAS地址")

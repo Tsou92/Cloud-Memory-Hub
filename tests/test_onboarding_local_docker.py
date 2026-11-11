@@ -1,5 +1,6 @@
 """Exercise the local setup and safety checks without a Docker daemon."""
 
+import contextlib
 import hashlib
 import io
 import json
@@ -86,6 +87,7 @@ class FakeDocker:
 
 class LocalInstallTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         temporary = tempfile.TemporaryDirectory(prefix="cmh-local-install-test-")
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name).resolve()
