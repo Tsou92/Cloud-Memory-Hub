@@ -33,7 +33,7 @@ jobs:
       version: ${{ steps.source.outputs.version }}
       commit: ${{ steps.source.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -63,7 +63,7 @@ jobs:
       SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
       CMH_IMAGE: cloud-memory-hub:${{ needs.preflight.outputs.tag }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
@@ -100,7 +100,7 @@ jobs:
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
@@ -138,7 +138,7 @@ jobs:
       RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
       SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
@@ -177,7 +177,7 @@ jobs:
       RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
       SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
