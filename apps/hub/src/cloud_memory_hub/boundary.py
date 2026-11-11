@@ -7,7 +7,6 @@ will be a separate capability, not a reuse of the administrator credential.
 
 from __future__ import annotations
 
-import hmac
 import json
 import time
 from collections import deque
@@ -17,11 +16,13 @@ from one_memory.ui_session import UISessionStore
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from cloud_memory_hub.admin_credentials import AdminCredentialError, AdminCredentials
 from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_boundary import guarded_call
 from cloud_memory_hub.onboarding_api import PUBLIC_CONNECT_PATHS, public_connection_response
 
 STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg"})
+ADMIN_CREDENTIAL_PATH = "/hub/v1/admin/credential"
 
 LOGIN_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -53,13 +54,21 @@ required maxlength="256"><button>登录</button></form></main></html>"""
 
 class CloudBoundary:
     def __init__(
-        self, core, config: HubConfig, internal_token: str, *, remote_api=None, governance=None
+        self,
+        core,
+        config: HubConfig,
+        internal_token: str,
+        *,
+        remote_api=None,
+        governance=None,
+        admin_credentials: AdminCredentials | None = None,
     ) -> None:
         self.core = core
         self.config = config
         self.internal_token = internal_token
         self.remote_api = remote_api
         self.governance = governance
+        self.admin_credentials = admin_credentials or AdminCredentials(config)
         self.sessions = UISessionStore(instance_id=internal_token)
         self.failed_logins: deque[float] = deque(maxlen=20)
 
@@ -113,7 +122,11 @@ class CloudBoundary:
         scheme, _, supplied = authorization.partition(" ")
         bearer = scheme.lower() == "bearer" and self._valid_token(supplied)
         cookie = request.cookies.get("cmh_session", "")
-        session = self.sessions.valid_session(cookie)
+        session = self.admin_credentials.available and self.sessions.valid_session(cookie)
+        if path == ADMIN_CREDENTIAL_PATH:
+            response = await self._change_credential(request, authenticated=bearer or session)
+            await self._respond(response, scope, receive, send)
+            return
         if path == "/hub/v1" or path.startswith("/hub/v1/"):
             if session and not bearer and request.method not in {"GET", "HEAD"}:
                 if origin != self.config.public_origin:
@@ -203,7 +216,50 @@ class CloudBoundary:
             await self.core(forwarded, receive, send)
 
     def _valid_token(self, value: str) -> bool:
-        return value.isascii() and hmac.compare_digest(value, self.config.admin_token)
+        return self.admin_credentials.valid(value)
+
+    def _login_limited(self) -> bool:
+        now = time.monotonic()
+        while self.failed_logins and self.failed_logins[0] < now - 60:
+            self.failed_logins.popleft()
+        return len(self.failed_logins) >= 20
+
+    async def _change_credential(self, request: Request, *, authenticated: bool):
+        if request.method != "POST":
+            return JSONResponse({"detail": "method_not_allowed"}, status_code=405)
+        if request.headers.get("origin") != self.config.public_origin:
+            return JSONResponse({"detail": "origin_required"}, status_code=403)
+        if not authenticated:
+            return JSONResponse({"detail": "authentication_required"}, status_code=401)
+        if self._login_limited():
+            return JSONResponse({"detail": "login_rate_limited"}, status_code=429)
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 4096:
+                return JSONResponse({"detail": "request_too_large"}, status_code=413)
+        try:
+            value = json.loads(body)
+        except (ValueError, UnicodeError):
+            value = None
+        if not isinstance(value, dict) or set(value) != {"current_credential", "new_credential"}:
+            return JSONResponse({"detail": "invalid_request"}, status_code=400)
+        try:
+            self.admin_credentials.change(value["current_credential"], value["new_credential"])
+        except AdminCredentialError as error:
+            if error.code == "current_credential_incorrect":
+                self.failed_logins.append(time.monotonic())
+            response = JSONResponse({"detail": error.code}, status_code=error.status)
+            if not self.admin_credentials.available:
+                self.sessions = UISessionStore(instance_id=self.internal_token)
+                response.delete_cookie("cmh_session", path="/")
+            return response
+        self.sessions = UISessionStore(instance_id=self.internal_token)
+        response = JSONResponse(
+            {"schema_version": 1, "state": "credential_changed", "login_required": True}
+        )
+        response.delete_cookie("cmh_session", path="/")
+        return response
 
     async def _login(self, request: Request):
         if request.method == "GET":
@@ -212,10 +268,7 @@ class CloudBoundary:
             return JSONResponse({"detail": "method_not_allowed"}, status_code=405)
         if request.headers.get("origin") != self.config.public_origin:
             return JSONResponse({"detail": "origin_required"}, status_code=403)
-        now = time.monotonic()
-        while self.failed_logins and self.failed_logins[0] < now - 60:
-            self.failed_logins.popleft()
-        if len(self.failed_logins) >= 20:
+        if self._login_limited():
             return self._login_error(request, "login_rate_limited", 429)
         body = bytearray()
         async for chunk in request.stream():
@@ -230,7 +283,7 @@ class CloudBoundary:
         except (ValueError, UnicodeError, AttributeError):
             value = ""
         if not isinstance(value, str) or not self._valid_token(value):
-            self.failed_logins.append(now)
+            self.failed_logins.append(time.monotonic())
             return self._login_error(request, "invalid_credential", 401)
         code, _ = self.sessions.issue_exchange()
         session_id = self.sessions.consume_exchange(code)

@@ -15,6 +15,7 @@ def create_hub(config: HubConfig):
     from one_memory.config import Settings
     from pydantic import SecretStr
 
+    from cloud_memory_hub.admin_credentials import AdminCredentials
     from cloud_memory_hub.backup_api import backup_routes
     from cloud_memory_hub.boundary import CloudBoundary
     from cloud_memory_hub.console_api import console_routes
@@ -43,6 +44,7 @@ def create_hub(config: HubConfig):
     governance = open_authority(config)
     governance.require_ready()
     internal_token = secrets.token_urlsafe(48)
+    admin_credentials = AdminCredentials(config)
     settings = Settings(
         _env_file=None,
         data_dir=config.data_dir,
@@ -126,7 +128,7 @@ def create_hub(config: HubConfig):
     previews = GovernancePreview(
         governance,
         lambda: _sdk_library_bridge(core),
-        CredentialFilter((config.admin_token, config.encryption_key.decode())),
+        CredentialFilter(known_credentials_source=admin_credentials.known_credentials),
         lineage,
     )
     core.state.cmh_previews = previews
@@ -168,7 +170,7 @@ def create_hub(config: HubConfig):
         devices,
         ingest,
         reads,
-        CredentialFilter((config.admin_token, config.encryption_key.decode())),
+        CredentialFilter(known_credentials_source=admin_credentials.known_credentials),
     )
     core.state.cmh_console = console
     remote_api = create_remote_api(
@@ -193,4 +195,5 @@ def create_hub(config: HubConfig):
         internal_token,
         remote_api=remote_api,
         governance=governance,
+        admin_credentials=admin_credentials,
     )

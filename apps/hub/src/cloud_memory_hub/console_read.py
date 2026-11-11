@@ -56,7 +56,10 @@ class ConsoleRead:
     def request_privacy(self, session_credential=""):
         known = self.privacy.known_credentials
         try:
-            return CredentialFilter((*known, session_credential) if session_credential else known)
+            return CredentialFilter(
+                (*known, session_credential) if session_credential else known,
+                known_credentials_source=self.privacy.known_credentials_source,
+            )
         except PrivacyError:
             raise AccessError("console_unavailable", 503) from None
 

@@ -2,6 +2,14 @@
 
 本页为 schema_version 1 的 Hub 控制台合同；设计见 [ADR-0057](adr/0057-administrator-console-reads.md)。使用现有管理员 Bearer 或 `/hub/login` 创建的浏览器会话。设备凭据不能调用；浏览器 POST 必须带当前 Hub 的 Origin。响应不缓存，错误只返回固定 `detail`。
 
+## 修改管理员凭证
+
+包含 [ADR-0067](adr/0067-administrator-credential-change.md) 的版本提供 `POST /hub/v1/admin/credential`，v0.1.3 没有此能力。JSON 请求只接收 `current_credential` 与 `new_credential`，不把凭证放入 URL。所有调用都要求精确 Origin、管理员身份及当前凭证再次验证，请求体最多 4096 字节。
+
+成功返回 `{"schema_version":1,"state":"credential_changed","login_required":true}`，不返回新旧凭证，并清除当前会话。旧管理员凭证与全部旧后台会话失效；新凭证立即及重启后有效。设备凭证不变。
+
+当前凭证错误为 403 `current_credential_incorrect`；新值必须是 32–256 个无空白的可打印 ASCII 字符且不同于旧值，否则为 422 `invalid_new_credential`。非同源、超大请求、限速与存储不可用均使用固定安全错误，不回显请求正文。网络中断时客户端不得假定修改失败或自动重试，应提示尝试以新凭证登录。
+
 ## 启动与项目选择
 
 `GET /hub/v1/console/bootstrap?limit=50&offset=0`。limit 范围 1–50，offset 非负；未知参数拒绝。响应：
