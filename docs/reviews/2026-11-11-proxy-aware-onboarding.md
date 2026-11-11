@@ -25,3 +25,9 @@
 两次工程门禁在新增测试中的合成邀请／代理字面量上触发秘密扫描。已改为具名合成 fixture，未添加扫描器排除或降低规则；最终结果以完整 `make check` 为准。真实设备域名、地址、设备凭证、代理内容及原始日志只留在忽略的私有验证目录，没有写入公开测试或本文。
 
 本记录不是远程 CI、最终 Linux 发行镜像或生产 NAS 升级已完成的证明。用户当前旧 Claude 进程需要退出，重新加载其 shell 环境后启动，既有进程不会自动获得新环境。
+
+## 首轮跨平台 CI 反馈
+
+[运行 42938506806](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42938506806) 保留首轮失败：Linux 与 Ubuntu 安装检查发现 PowerShell 外层 catch 吞掉了 helper 的安全恢复指导；macOS 的 .NET 不使用 `SSL_CERT_FILE`，测试 CA 尚未进入其信任来源；Windows 测试默认 cp1252，读取 UTF-8 中文源码或 Node 输出时报错。
+
+修复保留原测试和断言：安全指导先写 stderr，再抛固定错误；测试源码和管道显式使用 UTF-8，PS5 临时脚本带 UTF-8 BOM；临时 CA 信任只允许可丢弃的 GitHub-hosted runner，结束时删除精确证书并验证 keychain 搜索列表未变。本机信任设置与生产 TLS 策略不变。最终跨平台结果待修复后的 CI 确认，不将这轮失败记为通过。

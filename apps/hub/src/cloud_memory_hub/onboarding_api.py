@@ -202,11 +202,13 @@ HUB_POWERSHELL_FETCH = r"""function Get-CmhHubFile {
         }
         return
     } catch {
-        throw ('无法下载连接组件。请先确认 NAS 服务可访问；使用 Tailscale 时也要确认已连接。' +
+        [Console]::Error.WriteLine(
+            ('无法下载连接组件。请先确认 NAS 服务可访问；使用 Tailscale 时也要确认已连接。' +
             '如用局域网或 Tailscale，在 Clash/Shadowrocket 为服务的精确域名添加 DIRECT 规则。' +
             '如 Hub 必须通过代理访问，请检查代理节点和规则。' +
             '然后重新打开 Agent，重试并验证 MCP 连接。排查指南：' +
-            'https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md')
+            'https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md'))
+        throw 'cmh_hub_download_failed'
     }
 }
 """

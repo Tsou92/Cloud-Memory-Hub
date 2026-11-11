@@ -11,6 +11,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -167,10 +168,18 @@ def isolated_proxy_environment(proxy, ca_file=None):
 
 
 def windows_test_ca(command, ca_file):
+    if os.name == "nt":
+        command = (
+            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
+            "$OutputEncoding = [Console]::OutputEncoding; " + command
+        )
     if os.name != "nt" or not ca_file:
         return command
     # Trust only this ephemeral test CA on the disposable CI runner, then remove it.
-    if os.environ.get("GITHUB_ACTIONS") != "true":
+    if (
+        os.environ.get("GITHUB_ACTIONS") != "true"
+        or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    ):
         raise unittest.SkipTest("Windows TLS fixture trust is restricted to disposable CI")
     cert = str(ca_file).replace("'", "''")
     return (
@@ -183,6 +192,65 @@ def windows_test_ca(command, ca_file):
         + command
         + " } finally { $cmhTestStore.Remove($cmhTestCert); $cmhTestStore.Close() }"
     )
+
+
+@contextmanager
+def powershell_test_ca(ca_file):
+    """macOS .NET reads Keychain trust rather than SSL_CERT_FILE."""
+    if sys.platform != "darwin" or not ca_file:
+        yield
+        return
+    if (
+        os.environ.get("GITHUB_ACTIONS") != "true"
+        or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+    ):
+        raise unittest.SkipTest("macOS test CA trust is restricted to disposable CI")
+    security = "/usr/bin/security"
+    store = "/Library/Keychains/System.keychain"
+    cert = str(ca_file)
+    fingerprint = (
+        hashlib.sha256(ssl.PEM_cert_to_DER_cert(ca_file.read_text(encoding="ascii")))
+        .hexdigest()
+        .upper()
+    )
+    search_list = subprocess.check_output([security, "list-keychains", "-d", "user"])
+    trusted = False
+    try:
+        subprocess.run(
+            [
+                "sudo",
+                "-n",
+                security,
+                "add-trusted-cert",
+                "-d",
+                "-r",
+                "trustRoot",
+                "-k",
+                store,
+                cert,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        trusted = True
+        yield
+    finally:
+        # Unique per-test CA; no existing certificate or search-list entry is replaced.
+        removal = subprocess.run(
+            ["sudo", "-n", security, "remove-trusted-cert", "-d", cert],
+            capture_output=True,
+            timeout=30,
+        )
+        deletion = subprocess.run(
+            ["sudo", "-n", security, "delete-certificate", "-Z", fingerprint, store],
+            capture_output=True,
+            timeout=30,
+        )
+        if trusted and (removal.returncode or deletion.returncode):
+            raise AssertionError("Ephemeral macOS test CA cleanup failed")
+        if subprocess.check_output([security, "list-keychains", "-d", "user"]) != search_list:
+            raise AssertionError("macOS test keychain search list changed")
 
 
 class BootstrapTests(unittest.TestCase):
@@ -216,7 +284,9 @@ class BootstrapTests(unittest.TestCase):
                 script = (RESOURCES / f"install.{suffix}").read_text(encoding="utf-8")
                 values = {
                     node.targets[0].id: ast.literal_eval(node.value)
-                    for node in ast.parse((RESOURCES.parent / "onboarding_api.py").read_text()).body
+                    for node in ast.parse(
+                        (RESOURCES.parent / "onboarding_api.py").read_text(encoding="utf-8")
+                    ).body
                     if isinstance(node, ast.Assign)
                     and isinstance(node.targets[0], ast.Name)
                     and node.targets[0].id in {"HUB_SHELL_FETCH", "HUB_POWERSHELL_FETCH"}
@@ -247,7 +317,7 @@ class BootstrapTests(unittest.TestCase):
                     hashlib.sha256(CONNECTOR if valid else b"other-release").hexdigest(),
                 )
                 path = Path(temporary) / f"install.{suffix}"
-                path.write_text(script, encoding="utf-8")
+                path.write_text(script, encoding="utf-8-sig" if windows else "utf-8")
                 # A non-secret placeholder also checks that shell metacharacters
                 # are preserved as argument data, never interpreted as commands.
                 link = origin + "/hub/connect#synthetic=A&B=literal with spaces"
@@ -270,18 +340,20 @@ class BootstrapTests(unittest.TestCase):
                     environment.pop("SSL_CERT_FILE", None)
                     curl_home = Path(temporary) / "curl settings"
                     curl_home.mkdir()
-                    (curl_home / ".curlrc").write_text("insecure\nlocation\n")
+                    (curl_home / ".curlrc").write_text("insecure\nlocation\n", encoding="ascii")
                     environment["CURL_HOME"] = str(curl_home)
-                result = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=480 if missing_python else 30,
-                    env=environment,
-                )
-                if expect_success if expect_success is not None else valid:
+                expected = expect_success if expect_success is not None else valid
+                with powershell_test_ca(ca_file if windows and expected else None):
+                    result = subprocess.run(
+                        command,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=480 if missing_python else 30,
+                        env=environment,
+                    )
+                if expected:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     markers = [
                         line for line in result.stdout.splitlines() if "bootstrap_probe" in line

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from test_onboarding_bootstrap import (
     isolated_proxy_environment,
+    powershell_test_ca,
     synthetic_download,
     synthetic_proxy,
     windows_test_ca,
@@ -107,6 +108,7 @@ class CopiedCommandTests(unittest.TestCase):
             [shutil.which("node"), "-e", NODE_HARNESS],
             input=json.dumps({"script": script, "fragment": fragment, "windows": windows}),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             timeout=30,
             check=True,
@@ -121,6 +123,7 @@ class CopiedCommandTests(unittest.TestCase):
                     # A previous interactive attempt must not execute stale code
                     # when this attempt fails to download a replacement.
                     command = "$cmhScript = \"Write-Output 'STALE_SCRIPT_EXECUTED'\"; " + command
+                    command = windows_test_ca(command, None)
                 executable = (
                     shutil.which(powershell_runtime)
                     if powershell_runtime
@@ -183,14 +186,15 @@ class CopiedCommandTests(unittest.TestCase):
                 if windows
                 else ["sh", "-c", command]
             )
-            result = subprocess.run(
-                arguments,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=30,
-                env=isolated_proxy_environment(proxy, ca_file),
-            )
+            with powershell_test_ca(ca_file if windows and not unavailable else None):
+                result = subprocess.run(
+                    arguments,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=30,
+                    env=isolated_proxy_environment(proxy, ca_file),
+                )
             self.assertTrue(requests)
             self.assertTrue(
                 all(
