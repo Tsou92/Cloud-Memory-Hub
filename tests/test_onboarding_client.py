@@ -675,6 +675,23 @@ class ClientTests(unittest.TestCase):
                     self.connect()
                 self.assertFalse(self.claude_path().exists())
 
+    def test_mcp_tool_catalog_rejects_unknown_partial_duplicate_and_invalid_entries(self):
+        legacy = [{"name": name} for name in sorted(client.TOOL_NAMES)]
+        for tools in (
+            legacy[:-1],
+            [*legacy, {"name": "unknown_tool"}],
+            [*legacy, {"name": "session_briefs"}],
+            [*legacy, legacy[0]],
+            [*legacy, {"name": ["session_briefs"]}],
+        ):
+            with self.subTest(tools=tools):
+                self.remote.transform = lambda stage, value, tools=tools: (
+                    {**value, "result": {"tools": tools}} if stage == "tools/list" else value
+                )
+                with self.assertRaisesRegex(client.ConnectError, "mcp_tools_invalid"):
+                    self.connect()
+                self.assertFalse(self.claude_path().exists())
+
     def test_only_claim_and_read_only_mcp_status_are_called(self):
         self.connect()
         tools = [

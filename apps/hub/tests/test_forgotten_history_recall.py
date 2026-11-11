@@ -32,8 +32,10 @@ async def history_page(web, headers, scope, *, limit=10, offset=0):
 
 
 def context_ids(context):
+    records = (json.loads(line) for line in context.text.splitlines() if line.startswith("{"))
     return {
-        json.loads(line)["memory_id"] for line in context.text.splitlines() if line.startswith("{")
+        row["session_ref"] if row["kind"] == "session_summary" else row["memory_id"]
+        for row in records
     }
 
 
@@ -82,7 +84,10 @@ def test_real_forget_excludes_automatic_history_but_keeps_explicit_get(tmp_path,
             service = access_for(
                 tmp_path / "agent", connection, event, transport=ASGITransport(app)
             )
-            assert original in context_ids(await _recall(service, "Synthetic fact"))
+            next_conversation = str(uuid4())
+            assert original in context_ids(
+                await _recall(service, "Synthetic fact", next_conversation)
+            )
 
             # Another authorized project's original must be unaffected by this forget.
             _, other_headers, _, other_event = await provision(web, config)
@@ -115,7 +120,7 @@ def test_real_forget_excludes_automatic_history_but_keeps_explicit_get(tmp_path,
                 explicit = await read(web, headers, scope, "history", identity)
                 assert explicit.status_code == 200
                 assert explicit.json() == originals[identity]
-            recalled = context_ids(await _recall(service, "Synthetic fact"))
+            recalled = context_ids(await _recall(service, "Synthetic fact", next_conversation))
             assert not recalled & selected
             assert recalled & unchanged
             assert await history_page(web, other_headers, other_event["scope_id"]) == other_before

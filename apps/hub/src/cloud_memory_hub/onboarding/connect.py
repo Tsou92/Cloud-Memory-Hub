@@ -49,6 +49,7 @@ TOOL_NAMES = {
     "handoff_load",
     "memory_sync",
 }
+SESSION_TOOL_NAMES = {"session_briefs", "session_markdown"}
 BUNDLE_KEYS = {
     "schema_version",
     "kind",
@@ -645,12 +646,13 @@ def verify_remote(remote, bundle, token):
         payload={"jsonrpc": "2.0", "method": "notifications/initialized"},
         notification=True,
     )
-    tools = rpc(2, "tools/list", {})
-    if (
-        not isinstance(tools.get("tools"), list)
-        or len(tools["tools"]) != len(TOOL_NAMES)
-        or {t.get("name") for t in tools["tools"] if isinstance(t, dict)} != TOOL_NAMES
+    tools = rpc(2, "tools/list", {}).get("tools")
+    if not isinstance(tools, list) or any(
+        not isinstance(tool, dict) or not isinstance(tool.get("name"), str) for tool in tools
     ):
+        fail("mcp_tools_invalid")
+    names = {tool["name"] for tool in tools}
+    if len(names) != len(tools) or names not in (TOOL_NAMES, TOOL_NAMES | SESSION_TOOL_NAMES):
         fail("mcp_tools_invalid")
     result = rpc(3, "tools/call", {"name": "memory_status", "arguments": {}})
     status = result.get("structuredContent")
