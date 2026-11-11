@@ -123,6 +123,8 @@ def create_hub(config: HubConfig):
         devices,
         lambda: UnifiedReadBridge(_sdk_library_bridge(core), originals, lineage),
         suppressions.suppressed,
+        originals=originals,
+        known_credentials_source=admin_credentials.known_credentials,
     )
     core.state.cmh_reads = reads
     previews = GovernancePreview(

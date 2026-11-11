@@ -91,6 +91,16 @@ def create_server(service=None, *, service_factory=None, remote=False):
         return await call(ctx, "recent", {"limit": limit, "offset": offset})
 
     @server.tool()
+    async def session_briefs(ctx: Context, query: str | None = None, limit: int = 3) -> dict:
+        """Read brief continuations from the current project before resuming a task."""
+        return await call(ctx, "session-briefs", {"query": query, "limit": limit})
+
+    @server.tool()
+    async def session_markdown(ctx: Context, session_ref: str, cursor: str | None = None) -> dict:
+        """Read captured session Markdown on demand; pass next_cursor to continue."""
+        return await call(ctx, "session-markdown", {"session_ref": session_ref, "cursor": cursor})
+
+    @server.tool()
     async def memory_remember(
         ctx: Context, text: str, request_id: str | None = None, session_id: str | None = None
     ) -> dict:

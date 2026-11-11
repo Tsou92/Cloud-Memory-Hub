@@ -57,5 +57,6 @@ def console_routes(console):
                 methods=["POST"],
             )
             for operation, (_, model) in READ_OPERATIONS.items()
+            if not operation.startswith("session-")
         ],
     ]

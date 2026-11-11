@@ -62,6 +62,8 @@ def test_remote_mcp_seven_tools_two_concurrent_devices_and_idempotent_handoff(li
                 assert {tool.name for tool in tools} == {
                     "memory_search",
                     "memory_recent",
+                    "session_briefs",
+                    "session_markdown",
                     "memory_remember",
                     "handoff_save",
                     "handoff_load",
