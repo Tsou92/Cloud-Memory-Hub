@@ -224,6 +224,11 @@
       "path": "patches/0044-hub-console-usability-polish.patch",
       "scope": "user_reviewed_hub_console_scroll_form_and_dark_control_polish_with_scoped_readable_provider_menus",
       "digest": "sha256:03eccfb20ef37d712b8e67c2ad2daf9fa2c141af6417a91d5ca25018eb13b34a"
+    },
+    {
+      "path": "patches/0045-hub-managed-agent-workspace.patch",
+      "scope": "default_agent_pairing_creates_a_scoped_workspace_with_explicit_existing_project_and_host_trust_guidance",
+      "digest": "sha256:962f033fb1ed52526b4ce9f2c73ffcdc5acb7756b19f70863cba4f16c0842e37"
     }
   ]
 }

@@ -4,12 +4,30 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
+import secrets
 import stat
 import tempfile
 import threading
 
 from cloud_memory_hub.config import HubConfig, read_private_file
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
+
+ADMIN_SETUP_PREFIX = "cmh_admin_setup_v1_"
+_SETUP_TOKEN = re.compile(ADMIN_SETUP_PREFIX + r"[A-Za-z0-9_-]{64}")
+_SETUP_PROOF_DOMAIN = b"cloud-memory-hub/administrator/setup/v1"
+
+
+def new_initial_admin_token() -> str:
+    """Generate the private bearer and persist pending setup in its format."""
+    return ADMIN_SETUP_PREFIX + secrets.token_urlsafe(48)
+
+
+def initial_admin_setup_proof(token: str) -> str | None:
+    """Derive the browser setup capability without revealing the private bearer."""
+    if not _SETUP_TOKEN.fullmatch(token):
+        return None
+    return hmac.digest(token.encode("ascii"), _SETUP_PROOF_DOMAIN, "sha256").hex()
 
 
 class AdminCredentialError(Exception):
@@ -25,6 +43,7 @@ def valid_new_credential(value: object) -> bool:
     return (
         isinstance(value, str)
         and 32 <= len(value) <= 256
+        and not value.startswith(ADMIN_SETUP_PREFIX)
         and all(33 <= ord(character) <= 126 for character in value)
     )
 
@@ -40,12 +59,19 @@ class AdminCredentials:
         self._directory = config.config_dir
         self._token = config.admin_token
         self._known = (config.admin_token, config.encryption_key.decode())
+        if (proof := initial_admin_setup_proof(self._token)) is not None:
+            self._known = (*self._known, proof)
         self._available = True
         self._lock = threading.RLock()
 
     @property
     def available(self) -> bool:
         return self._available
+
+    @property
+    def setup_pending(self) -> bool:
+        with self._lock:
+            return _SETUP_TOKEN.fullmatch(self._token) is not None
 
     def valid(self, value: object) -> bool:
         with self._lock:
@@ -61,6 +87,26 @@ class AdminCredentials:
             if not self._available:
                 raise PrivacyError("known_credentials_unavailable")
             return self._known
+
+    def complete_initial_setup(self, password: object, proof: object, replacement: object) -> None:
+        with self._lock:
+            if not self._available:
+                raise AdminCredentialError("admin_credential_unavailable", 503)
+            expected = initial_admin_setup_proof(self._token)
+            if expected is None:
+                raise AdminCredentialError("initial_setup_not_pending", 409)
+            password_matches = (
+                isinstance(password, str)
+                and password.isascii()
+                and hmac.compare_digest(password, "admin")
+            )
+            proof_matches = (
+                isinstance(proof, str) and proof.isascii() and hmac.compare_digest(proof, expected)
+            )
+            if not password_matches or not proof_matches:
+                raise AdminCredentialError("invalid_initial_credential", 401)
+            # The nested lock keeps verification and the durable replacement in one operation.
+            self.change(self._token, replacement)
 
     def change(
         self,

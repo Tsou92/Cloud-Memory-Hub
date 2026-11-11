@@ -1,5 +1,7 @@
 # Hy-Memory / MemHub 复用评估
 
+2026-11-11 一次首装：既有发行 Compose 和 Hub 初始化负责服务安装，现有项目／邀请 API 和一次性链接安装器负责首台接入。固定上游的桌面初始化不部署独立 NAS，也不串联 Hub 的 SSH、持久卷和设备授权，因此增加小型入口编排，继续使用原鉴权和采集。见 [ADR-0070](../adr/0070-first-install.md)。
+
 2026-11-11 自动会话接续：复用固定上游 `one_memory.live_capture._messages` 的 Claude／Codex 可见消息处理、已安装客户端私有队列和 macOS 补传服务，以及现有原文接纳、读取授权和 SDK 模型整理。固定上游摘要函数未接入 Hub 的接纳队列，已有手动交接合同也只读取显式交接原文；因此增加从现有归档投影的接续摘录与 Markdown 分页，避免另存一份正文或让接续等待记忆产物。见 [ADR-0069](../adr/0069-automatic-session-handoff.md)。
 
 2026-11-11 代理环境接入：继续复用独立 stdlib 安装器的 Remote、配对、MCP 验证和可恢复配置安装，以及现有 POSIX／PowerShell 下载模板。原 Remote 强制直连，与原生 HTTP MCP 宿主的环境代理不一致，需在 Hub 安装层补充选路检测、首层下载回退和明确恢复引导。上游高级连接组件需要不同运行时且同样固定忽略环境代理，不能通过默认切换 stdio 解决此问题。无需新代理服务或宿主私有配置字段。设计见 [ADR-0068](../adr/0068-proxy-aware-agent-onboarding.md)。

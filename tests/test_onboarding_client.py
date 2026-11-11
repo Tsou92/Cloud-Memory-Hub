@@ -270,6 +270,101 @@ class ClientTests(unittest.TestCase):
         runtime.assert_not_called()
         self.assertEqual(result["automation"], {"status": "automation_workspace_required"})
 
+    @unittest.skipIf(os.name == "nt", "Native project automation uses POSIX ownership")
+    def test_managed_pairing_from_home_installs_hooks_only_for_the_verified_source(self):
+        executable = self.home / "stable runtime/cloud-memory-setup"
+        projects = self.home / "Cloud Memory Hub Projects"
+        runs = []
+
+        def run(command, **options):
+            if command[-1] == "--help":
+                return client.subprocess.CompletedProcess(command, 0, stdout=b"")
+            workspace = options["cwd"]
+            self.assertEqual(command[-2:], ["--workspace", str(workspace)])
+            self.assertEqual(workspace.parent, projects)
+            self.assertEqual(workspace.stat().st_mode & 0o777, 0o700)
+            source = json.loads(options["input"])
+            self.assertEqual(source["scope_id"], BUNDLE["scope_id"])
+            self.assertEqual(source["source_id"], BUNDLE["source_id"])
+            runs.append(workspace)
+            return client.subprocess.CompletedProcess(
+                command, 0, stdout=b'{"status":"configured","background_delivery":"running"}'
+            )
+
+        with (
+            contextlib.chdir(self.home),
+            patch.object(client, "installed_automation_setup", return_value=executable),
+            patch.object(client.subprocess, "run", side_effect=run),
+        ):
+            original = client.connect(LINK, "codex", home=self.home, remote_factory=self.remote)
+            self.assertEqual(original["automation"]["status"], "automation_workspace_required")
+            self.assertFalse(projects.exists())
+            for _ in range(2):
+                result = client.connect(
+                    LINK,
+                    "codex",
+                    home=self.home,
+                    remote_factory=self.remote,
+                    managed_workspace=True,
+                )
+                self.assertEqual(result["automation"]["workspace"], str(runs[-1]))
+                self.assertTrue(result["automation"]["host_review_required"])
+            for scope in (BUNDLE["scope_id"], str(uuid.uuid4())):
+                other_link = LINK.replace(PAIRING_ID, str(uuid.uuid4()))
+                with patch.dict(
+                    BUNDLE,
+                    scope_id=scope,
+                    source_id=str(uuid.uuid4()),
+                    device_id=str(uuid.uuid4()),
+                ):
+                    result = client.connect(
+                        other_link,
+                        "codex",
+                        home=self.home,
+                        remote_factory=FakeRemote(),
+                        managed_workspace=True,
+                    )
+                    self.assertEqual(result["automation"]["workspace"], str(runs[-1]))
+        self.assertEqual(len(self.remote.claim_secrets), 1)
+        self.assertEqual(runs[0], runs[1])
+        self.assertEqual(len(set(runs)), 3)
+        self.assertFalse((self.home / ".codex/hooks.json").exists())
+
+    @unittest.skipIf(os.name == "nt", "Native project automation uses POSIX ownership")
+    def test_managed_workspace_rejects_a_planted_directory_symlink(self):
+        outside = self.home / "unrelated"
+        outside.mkdir()
+        (self.home / "Cloud Memory Hub Projects").symlink_to(outside, target_is_directory=True)
+        with (
+            patch.object(client, "installed_automation_setup", return_value=Path("/test")),
+            patch.object(client.subprocess, "run") as hook,
+        ):
+            result = client.connect(
+                LINK, "codex", home=self.home, remote_factory=self.remote, managed_workspace=True
+            )
+        self.assertEqual(result["automation"], {"status": "unsafe_path"})
+        hook.assert_not_called()
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_managed_pairing_cli_reports_when_capture_was_not_installed(self):
+        result = {
+            "status": "configured",
+            "agent": "codex",
+            "server": "synthetic",
+            "automation": {"status": "automation_runtime_unavailable"},
+        }
+        output = io.StringIO()
+        with (
+            patch.object(client, "connect", return_value=result) as connect,
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(
+                client.main(["--link", LINK, "--agent", "codex", "--managed-workspace"]), 3
+            )
+        self.assertTrue(connect.call_args.kwargs["managed_workspace"])
+        self.assertIsNone(connect.call_args.kwargs["workspace"])
+        self.assertIn("自动采集尚未配置", output.getvalue())
+
     @unittest.skipIf(os.name == "nt", "Mac release discovery uses POSIX ownership")
     def test_automation_prepares_only_the_verified_matching_release(self):
         tag, version = "v1.2.3", "1.2.3"
@@ -787,6 +882,102 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(client.main(["--agent", "claude", "--link", LINK]), 1)
         self.assertNotIn(INVITATION, output.getvalue() + errors.getvalue())
         self.assertIn("network_unavailable", errors.getvalue())
+
+    def test_stdin_json_reports_first_use_steps_without_configuration_details(self):
+        for agent, automation, status, mcp, readiness in (
+            (
+                "codex",
+                {"status": "configured", "host_review_required": True},
+                "pending_host_trust",
+                "configured",
+                "pending_host_trust",
+            ),
+            (
+                "claude",
+                {"status": "configured", "host_review_required": False},
+                "pending_host_reload",
+                "configured",
+                "hooks_installed",
+            ),
+            (
+                "claude",
+                {"status": "automation_runtime_unavailable"},
+                "mcp_configured",
+                "configured",
+                "not_configured",
+            ),
+            (
+                "hermes",
+                {"status": "unsupported_agent"},
+                "mcp_configured",
+                "configured",
+                "unsupported",
+            ),
+            (
+                "generic",
+                {"status": "unsupported_agent"},
+                "manual_import_required",
+                "manual_import_required",
+                "unsupported",
+            ),
+        ):
+            with self.subTest(agent=agent, readiness=readiness):
+                result = {
+                    "status": "configured",
+                    "automation": automation,
+                    "private_state": LINK,
+                    "remote_verified": True,
+                    "host_connection_verified": False,
+                    "host_reload_required": True,
+                }
+                output, errors = io.StringIO(), io.StringIO()
+                with (
+                    io.TextIOWrapper(io.BytesIO((LINK + "\r\n").encode())) as stream,
+                    patch.object(client.sys, "stdin", stream),
+                    patch.object(client, "connect", return_value=result) as connect,
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    self.assertEqual(
+                        client.main(["--agent", agent, "--link-stdin", "--json-status"]), 0
+                    )
+                connect.assert_called_once_with(
+                    LINK, agent, home=None, network="auto", workspace=None, managed_workspace=False
+                )
+                report = json.loads(output.getvalue())
+                self.assertEqual(
+                    (report["status"], report["mcp"], report["automation"]),
+                    (status, mcp, readiness),
+                )
+                self.assertTrue(report["remote_verified"])
+                self.assertFalse(report["host_connection_verified"])
+                self.assertNotIn(INVITATION, output.getvalue() + errors.getvalue())
+                self.assertEqual(errors.getvalue(), "")
+
+    def test_stdin_rejects_unbounded_or_multiline_input_before_pairing(self):
+        for data in (b"", (LINK + "\n" + LINK).encode(), b"x" * (client.MAX_LINK_BYTES + 1)):
+            with (
+                self.subTest(length=len(data)),
+                io.TextIOWrapper(io.BytesIO(data)) as stream,
+                patch.object(client.sys, "stdin", stream),
+                patch.object(client, "connect") as connect,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(
+                    client.main(["--agent", "codex", "--link-stdin", "--json-status"]), 1
+                )
+                self.assertEqual(json.loads(output.getvalue())["error"], "invalid_link_input")
+            connect.assert_not_called()
+
+    def test_json_failure_does_not_pass_through_error_text(self):
+        with (
+            patch.object(client, "connect", side_effect=client.ConnectError(LINK)),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(client.main(["--agent", "codex", "--link", LINK, "--json-status"]), 1)
+        self.assertEqual(json.loads(output.getvalue())["error"], "connection_failed")
+        self.assertNotIn(INVITATION, output.getvalue() + errors.getvalue())
 
     def test_windows_acl_command_never_interpolates_path(self):
         path = Path('synthetic " $(bad) secret path')

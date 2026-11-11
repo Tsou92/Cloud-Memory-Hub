@@ -30,6 +30,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 
 MAX_BYTES = 1024 * 1024
+MAX_LINK_BYTES = 4096
 CLIENT_RELEASE_TAG = None  # CMH_RELEASE_TAG_PLACEHOLDER
 CLIENT_RELEASE_ROOT = "Library/Application Support/CloudMemoryHub/client-releases"
 CLIENT_RELEASE_ORIGIN = "https://github.com/Tsou92/Cloud-Memory-Hub/releases/download"
@@ -1066,6 +1067,14 @@ def automation_workspace(value, home):
     return project
 
 
+def managed_automation_workspace(home, bundle):
+    # A new source cannot silently replace hooks installed for an older connection.
+    identity = "\n".join(bundle[key] for key in ("instance_id", "scope_id", "source_id"))
+    root = ensure_dir(home / "Cloud Memory Hub Projects", private=True)
+    project = ensure_dir(root / ("project-" + digest(identity.encode())[:24]), private=True)
+    return automation_workspace(project, home)
+
+
 def automation_release_version():
     if (
         sys.platform != "darwin"
@@ -1227,7 +1236,27 @@ def unpack_client_release(archive_path, directory, prefix):
     return directory / prefix
 
 
-def prepare_automation_setup(home, env):
+def copy_client_release_asset(source, destination, limit):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(checked_path(source), flags), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
+            fail("automation_release_asset_invalid")
+        hasher = hashlib.sha256()
+        count = 0
+        with destination.open("xb") as output:
+            while block := stream.read(64 * 1024):
+                count += len(block)
+                if count > limit:
+                    fail("automation_release_asset_invalid")
+                output.write(block)
+                hasher.update(block)
+        if count != info.st_size:
+            fail("automation_release_asset_invalid")
+    return hasher.hexdigest()
+
+
+def prepare_automation_setup(home, env, *, release_assets=None):
     version = automation_release_version()
     if version is None:
         return None
@@ -1246,11 +1275,19 @@ def prepare_automation_setup(home, env):
             staging = Path(stage)
             checksums = staging / "SHA256SUMS"
             archive_path = staging / filename
-            download_client_asset(opener, release_url + "/SHA256SUMS", checksums, 64 * 1024)
+            if release_assets is None:
+                download_client_asset(opener, release_url + "/SHA256SUMS", checksums, 64 * 1024)
+            else:
+                copy_client_release_asset(release_assets / "SHA256SUMS", checksums, 64 * 1024)
             expected = client_archive_checksum(checksums, filename)
-            actual = download_client_asset(
-                opener, release_url + "/" + filename, archive_path, CLIENT_COMPRESSED_LIMIT
-            )
+            if release_assets is None:
+                actual = download_client_asset(
+                    opener, release_url + "/" + filename, archive_path, CLIENT_COMPRESSED_LIMIT
+                )
+            else:
+                actual = copy_client_release_asset(
+                    release_assets / filename, archive_path, CLIENT_COMPRESSED_LIMIT
+                )
             if actual != expected:
                 fail("automation_release_checksum_mismatch")
             package = unpack_client_release(archive_path, staging, prefix)
@@ -1281,20 +1318,37 @@ def prepare_automation_setup(home, env):
     return installed_automation_setup(home)
 
 
-def configure_automation(agent, home, env, bundle, token, workspace, network_status):
+def configure_automation(
+    agent,
+    home,
+    env,
+    bundle,
+    token,
+    workspace,
+    network_status,
+    *,
+    managed_workspace=False,
+    release_assets=None,
+):
     if agent not in {"claude", "codex"}:
         return {"status": "unsupported_agent"}
-    if workspace is None:
+    if workspace is None and not managed_workspace:
         return {"status": "automation_workspace_required"}
     environment = env.copy()
     for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"):
         environment.pop(name, None)
     environment["PYTHONNOUSERSITE"] = "1"
     try:
-        project = automation_workspace(workspace, home)
-        command = installed_automation_setup(home) or prepare_automation_setup(home, environment)
+        if not managed_workspace:
+            project = automation_workspace(workspace, home)
+        install_options = {"release_assets": release_assets} if release_assets is not None else {}
+        command = installed_automation_setup(home) or prepare_automation_setup(
+            home, environment, **install_options
+        )
         if command is None:
             return {"status": "automation_runtime_unavailable"}
+        if managed_workspace:
+            project = managed_automation_workspace(home, bundle)
         probe = subprocess.run(
             [str(command), "automation", "--help"],
             env=environment,
@@ -1345,7 +1399,20 @@ def configure_automation(agent, home, env, bundle, token, workspace, network_sta
     return {"status": "automation_setup_failed"}
 
 
-def connect(link, agent, *, home=None, remote_factory=None, network="auto", workspace=None):
+def connect(
+    link,
+    agent,
+    *,
+    home=None,
+    remote_factory=None,
+    network="auto",
+    workspace=None,
+    managed_workspace=False,
+    expected_scope_id=None,
+    release_assets=None,
+):
+    if managed_workspace and workspace is not None:
+        fail("automation_workspace_conflict")
     origin, pairing_id, invitation = parse_link(link)
     explicit_home = home is not None
     home = checked_path(Path(home).expanduser() if explicit_home else Path.home())
@@ -1408,14 +1475,28 @@ def connect(link, agent, *, home=None, remote_factory=None, network="auto", work
                     "claimant_secret": state["claimant_secret"],
                 },
             )
-            state["bundle"] = validate_bundle(value, origin)
+            bundle = validate_bundle(value, origin)
+            if expected_scope_id is not None and bundle["scope_id"] != expected_scope_id:
+                fail("pairing_scope_mismatch")
+            state["bundle"] = bundle
             installation.save()
         bundle = validate_bundle(state["bundle"], origin)
+        if expected_scope_id is not None and bundle["scope_id"] != expected_scope_id:
+            fail("pairing_scope_mismatch")
         token = "cmhdev_v1_" + bundle["device_id"] + "_" + state["claimant_secret"]
         verify_remote(remote, bundle, token)
         name = configure(installation, agent, home, env, bundle, token)
+        install_options = {"release_assets": release_assets} if release_assets is not None else {}
         automation = configure_automation(
-            agent, home, env, bundle, token, workspace, network_status
+            agent,
+            home,
+            env,
+            bundle,
+            token,
+            workspace,
+            network_status,
+            managed_workspace=managed_workspace,
+            **install_options,
         )
         return {
             "status": "configured",
@@ -1517,6 +1598,89 @@ def show_recovery_directory(args):
         pass
 
 
+def read_link_stdin():
+    if sys.stdin.isatty():
+        fail("invalid_link_input")
+    data = sys.stdin.buffer.read(MAX_LINK_BYTES + 1)
+    if len(data) > MAX_LINK_BYTES:
+        fail("invalid_link_input")
+    data = data.removesuffix(b"\n").removesuffix(b"\r")
+    if not data or not data.isascii() or any(byte < 33 or byte == 127 for byte in data):
+        fail("invalid_link_input")
+    return data.decode("ascii")
+
+
+def write_connection_status(agent, result=None, *, error=None):
+    """Expose fixed readiness states to another installer, never the full result."""
+    result = result or {}
+    status = {
+        "status": "failed",
+        "agent": agent,
+        "mcp": "not_configured",
+        "automation": "not_configured",
+        "remote_verified": result.get("remote_verified") is True,
+        "host_connection_verified": result.get("host_connection_verified") is True,
+        "host_reload_required": result.get("host_reload_required") is True,
+    }
+    if error is not None:
+        known_errors = {
+            "agent_not_installed",
+            "authorization_failed",
+            "file_changed",
+            "hermes_profile_requires_review",
+            "https_required",
+            "installation_busy",
+            "invalid_link",
+            "invalid_link_input",
+            "local_state_unavailable",
+            "managed_configuration_conflict",
+            "mcp_tools_invalid",
+            "network_unavailable",
+            "opencode_custom_config_requires_review",
+            "pairing_conflict",
+            "pairing_expired",
+            "permission_denied",
+            "python_311_required",
+            "unsafe_path",
+        }
+        status["error"] = error if error in known_errors else "connection_failed"
+    elif result.get("status") == "network_action_required":
+        status["status"] = "network_action_required"
+    elif result.get("status") == "configured":
+        automation = result.get("automation", {})
+        if agent == "generic":
+            status.update(
+                status="manual_import_required",
+                mcp="manual_import_required",
+                automation="unsupported",
+            )
+        else:
+            status.update(status="mcp_configured", mcp="configured")
+            if automation.get("status") == "configured":
+                if automation.get("host_review_required") is True:
+                    status.update(status="pending_host_trust", automation="pending_host_trust")
+                else:
+                    status.update(status="pending_host_reload", automation="hooks_installed")
+                delivery = automation.get("background_delivery")
+                if delivery in ("running", "waiting", "unavailable"):
+                    status["background_delivery"] = delivery
+            elif automation.get("status") == "unsupported_agent":
+                status["automation"] = "unsupported"
+            else:
+                reasons = {
+                    "automation_workspace_required",
+                    "automation_runtime_unavailable",
+                    "automation_release_checksum_mismatch",
+                    "automation_release_installation_failed",
+                    "automation_setup_failed",
+                    "private_permissions_required",
+                    "unsafe_path",
+                }
+                reason = automation.get("status")
+                status["error"] = reason if reason in reasons else "automation_setup_failed"
+    print(json.dumps(status, sort_keys=True))
+
+
 def main(argv=None):
     # Downloaded scripts may run under a Windows console or a captured Agent pipe.
     for stream in (sys.stdout, sys.stderr):
@@ -1525,12 +1689,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="将当前 Agent 连接至 Cloud Memory Hub；不安装本地记忆核心。"
     )
-    parser.add_argument("--link", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--link")
+    source.add_argument("--link-stdin", action="store_true", help="从管道读取一条私有连接链接")
+    parser.add_argument("--json-status", action="store_true", help="只输出不含凭证的 JSON 状态")
     parser.add_argument(
         "--agent", choices=("claude", "codex", "opencode", "hermes", "generic"), required=True
     )
     parser.add_argument("--home", type=Path, help="隔离安装根目录（测试或显式独立配置用）")
-    parser.add_argument("--workspace", type=Path, help="自动采集绑定的项目目录，默认为当前目录")
+    workspace = parser.add_mutually_exclusive_group()
+    workspace.add_argument("--workspace", type=Path, help="把自动采集绑定到指定的已有项目目录")
+    workspace.add_argument(
+        "--managed-workspace", action="store_true", help="为本次连接自动准备专用项目目录"
+    )
     parser.add_argument(
         "--network",
         choices=("auto", "environment", "direct"),
@@ -1541,10 +1712,20 @@ def main(argv=None):
     try:
         if sys.version_info < (3, 11):  # noqa: UP036 - downloaded standalone script
             fail("python_311_required")
+        if args.link_stdin:
+            args.link = read_link_stdin()
         result = connect(
-            args.link, args.agent, home=args.home, network=args.network, workspace=args.workspace
+            args.link,
+            args.agent,
+            home=args.home,
+            network=args.network,
+            workspace=args.workspace,
+            managed_workspace=args.managed_workspace,
         )
     except ConnectError as error:
+        if args.json_status:
+            write_connection_status(args.agent, error=str(error))
+            return 2 if str(error) == "network_action_required" else 1
         print(f"连接未完成（{error}）。" + recovery_message(str(error)), file=sys.stderr)
         show_recovery_directory(args)
         if str(error) in {
@@ -1559,11 +1740,25 @@ def main(argv=None):
                 pass
         return 1
     except (OSError, ValueError, TypeError, KeyError):
+        if args.json_status:
+            write_connection_status(args.agent, error="local_state_unavailable")
+            return 1
         print(
             "连接未完成（local_state_unavailable）。保留现场后重试，不要删除配对进度。",
             file=sys.stderr,
         )
         return 1
+    automation = result.get("automation", {})
+    automation_incomplete = (
+        args.managed_workspace
+        and args.agent in {"claude", "codex"}
+        and automation.get("status") != "configured"
+    )
+    if args.json_status:
+        write_connection_status(args.agent, result)
+        if result.get("status") == "network_action_required":
+            return 2
+        return 3 if automation_incomplete else 0
     if result.get("status") == "network_action_required":
         origin, _, _ = parse_link(args.link)
         print(network_guidance(origin, args.agent), file=sys.stderr)
@@ -1572,9 +1767,9 @@ def main(argv=None):
         print("远程 MCP 及身份验证通过，已生成通用配置；仍需将它添加到对应 Agent。")
     else:
         print(f"远程 MCP 及身份验证通过，已配置 {result['agent']} 的连接 {result['server']}。")
-    automation = result.get("automation", {})
     if automation.get("status") == "configured":
         print("已配置自动采集与接续。共享目录：" + repr(automation["workspace"]))
+        print("请在 Agent 中打开这个目录，随后在该项目里开始聊天。")
         if automation["host_review_required"]:
             print("请在 Codex 首次审查并信任当前项目的 Cloud Memory Hub 钩子。")
         if automation["background_delivery"] == "unavailable":
@@ -1585,6 +1780,8 @@ def main(argv=None):
             "automation_runtime_unavailable": "当前没有可用的配套自动采集客户端。",
             "automation_release_checksum_mismatch": "发行客户端校验失败，请重新执行同一链接。",
             "automation_release_installation_failed": "安装失败，请检查网络和磁盘空间后重试。",
+            "private_permissions_required": "专用目录须为当前用户私有，请检查权限后重试。",
+            "unsafe_path": "专用目录路径不能包含符号链接，请检查后重试。",
         }
         print(
             "自动采集尚未配置。"
@@ -1593,7 +1790,7 @@ def main(argv=None):
     print("请重新连接 MCP 或重启该 Agent，让当前会话加载新连接与 Skill。尚未验证宿主实际调用。")
     if args.agent == "generic":
         print("通用 MCP 配置保存在私有目录：" + result["private_state"])
-    return 0
+    return 3 if automation_incomplete else 0
 
 
 if __name__ == "__main__":

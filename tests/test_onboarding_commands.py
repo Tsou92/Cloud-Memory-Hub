@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import unittest
 from contextlib import contextmanager
@@ -26,7 +27,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 const elements = new Map();
 const document = {getElementById(id) {
   if (!elements.has(id)) elements.set(id, {
-    value: id === 'agent' ? 'codex' : 'unix', selectedOptions: [{text:'Codex'}],
+    value: id === 'agent' ? input.agent : 'unix', selectedOptions: [{text:'Codex'}],
     addEventListener() {}, focus() {}, select() {}
   });
   return elements.get(id);
@@ -36,15 +37,21 @@ vm.runInNewContext(input.script, {
   location: {hash: input.fragment, pathname:'/hub/connect'},
   history: {replaceState() {}}, navigator: {userAgent: input.windows ? 'Windows' : 'Mac'}
 });
-process.stdout.write(elements.get('command').value);
+process.stdout.write(JSON.stringify({
+  command: elements.get('command').value, prompt: elements.get('prompt').value
+}));
 """
 
 
 @contextmanager
-def bootstrap_server(mode, windows):
+def bootstrap_server(mode, windows, *, expect_managed=None):
     marker = "Write-Output 'BOOTSTRAP_EXECUTED'" if windows else "echo BOOTSTRAP_EXECUTED"
     if mode == "installer_failure":
         marker += "\nthrow 'synthetic_install_failure'" if windows else "\nexit 19"
+    if expect_managed is True:
+        marker += '\n[ "$#" -eq 5 ] && [ "$5" = --managed-workspace ] || exit 91'
+    elif expect_managed is False:
+        marker += '\n[ "$#" -eq 4 ] || exit 91'
     content = b"" if mode == "empty" else (marker + "\n").encode()
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -83,7 +90,7 @@ def bootstrap_server(mode, windows):
 
 @unittest.skipUnless(shutil.which("node"), "Command generation needs a JavaScript runtime")
 class CopiedCommandTests(unittest.TestCase):
-    def command(self, origin, *, windows):
+    def instructions(self, origin, *, windows, agent="codex"):
         assignment = next(
             node
             for node in ast.parse(SOURCE.read_text(encoding="utf-8")).body
@@ -105,14 +112,62 @@ class CopiedCommandTests(unittest.TestCase):
         fragment = "#pairing_id=00000000-0000-4000-8000-000000000001&secret=" + "A" * 43
         result = subprocess.run(
             [shutil.which("node"), "-e", NODE_HARNESS],
-            input=json.dumps({"script": script, "fragment": fragment, "windows": windows}),
+            input=json.dumps(
+                {"script": script, "fragment": fragment, "windows": windows, "agent": agent}
+            ),
             text=True,
             encoding="utf-8",
             capture_output=True,
             timeout=30,
             check=True,
         )
-        return result.stdout
+        return json.loads(result.stdout)
+
+    def command(self, origin, *, windows):
+        return self.instructions(origin, windows=windows)["command"]
+
+    @unittest.skipIf(os.name == "nt", "POSIX command is exercised on Mac/Linux")
+    def test_copied_command_only_requests_workspace_for_supported_macs(self):
+        for system, architecture, agent, expect_managed in (
+            ("Darwin", "arm64", "codex", True),
+            ("Darwin", "arm64", "claude", True),
+            ("Darwin", "x86_64", "codex", False),
+            ("Linux", "aarch64", "codex", False),
+            ("Darwin", "arm64", "opencode", False),
+        ):
+            with (
+                self.subTest(system=system, architecture=architecture, agent=agent),
+                tempfile.TemporaryDirectory() as temp,
+                bootstrap_server("complete", False, expect_managed=expect_managed) as origin,
+            ):
+                uname = Path(temp) / "uname"
+                uname.write_text(
+                    f'#!/bin/sh\ncase "$1" in -s) echo {system} ;; '
+                    f"-m) echo {architecture} ;; esac\n"
+                )
+                uname.chmod(0o700)
+                instructions = self.instructions(origin, windows=False, agent=agent)
+                result = subprocess.run(
+                    ["sh", "-c", instructions["command"]],
+                    cwd=temp,
+                    env={**os.environ, "PATH": temp + os.pathsep + os.environ["PATH"]},
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("BOOTSTRAP_EXECUTED", result.stdout)
+
+    def test_install_prompt_explains_opening_the_reported_workspace_and_first_review(self):
+        origin = "https://example.invalid"
+        prompt = self.instructions(origin, windows=False)["prompt"]
+        self.assertIn("--managed-workspace", prompt)
+        self.assertIn("--workspace", prompt)
+        self.assertIn("打开哪个目录", prompt)
+        self.assertIn("审查并信任钩子", prompt)
+        windows = self.instructions(origin, windows=True)
+        self.assertNotIn("--managed-workspace", windows["prompt"])
+        self.assertNotIn("--managed-workspace", windows["command"])
 
     def check_download(self, *, windows, powershell_runtime=None):
         for mode in ("not_found", "partial", "empty", "redirect", "complete", "installer_failure"):

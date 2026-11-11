@@ -1,0 +1,61 @@
+#!/bin/sh
+# Bootstrap a persistent Python for the NAS installer and its project hooks.
+set -eu
+umask 077
+
+cmh_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+for cmh_python in python3.12 python3; do
+    if command -v "$cmh_python" >/dev/null 2>&1 && \
+        "$cmh_python" -I -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 12))' >/dev/null 2>&1; then
+        exec "$cmh_python" -I "$cmh_root/scripts/install_hub.py" "$@"
+    fi
+done
+
+# Same pinned uv release and architecture checksums as the existing one-link bootstrap.
+cmh_version=0.12.5
+cmh_runtime=3.12.13
+cmh_uv=$(command -v uv || true)
+if [ -n "$cmh_uv" ]; then
+    cmh_existing=$("$cmh_uv" python find --no-python-downloads 3.12 2>/dev/null || true)
+    if [ -n "$cmh_existing" ] && [ -x "$cmh_existing" ]; then
+        exec "$cmh_existing" -I "$cmh_root/scripts/install_hub.py" "$@"
+    fi
+fi
+if [ "$(uname -s)" = Darwin ]; then
+    cmh_runtime_dir="$HOME/Library/Application Support/CloudMemoryHub/python"
+else
+    cmh_runtime_dir="$HOME/.cloud-memory-hub/python"
+fi
+if [ -n "$cmh_uv" ] && [ "$("$cmh_uv" --version | cut -d ' ' -f 2)" = "$cmh_version" ]; then
+    exec env UV_PYTHON_INSTALL_DIR="$cmh_runtime_dir" "$cmh_uv" run --no-project \
+        --no-config --no-env-file --isolated --managed-python --python "$cmh_runtime" \
+        python -I "$cmh_root/scripts/install_hub.py" "$@"
+fi
+
+case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) cmh_target=aarch64-apple-darwin; cmh_digest=5bb0e5fe008a773c3dbcb97ff79cd89e1241464fe9d2f986d52ad8f1b037bd62 ;;
+    Darwin-x86_64) cmh_target=x86_64-apple-darwin; cmh_digest=b3b2137477cf96c9686ebfb71524614cec780c673fd73e59bce099aef02e70e8 ;;
+    Linux-x86_64) cmh_target=x86_64-unknown-linux-gnu; cmh_digest=68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2 ;;
+    Linux-aarch64) cmh_target=aarch64-unknown-linux-gnu; cmh_digest=9bf43b4d1a07665bf64d4c4e710930b382321a785e0eb10aac07f46471f86a31 ;;
+    *) printf '%s\n' '当前电脑暂不支持自动准备运行环境。' >&2; exit 1 ;;
+esac
+cmh_temp=$(mktemp -d "${TMPDIR:-/tmp}/cmh-first-install.XXXXXXXX")
+trap 'rm -rf -- "$cmh_temp"' EXIT
+trap 'exit 1' HUP INT TERM
+printf '%s\n' '正在准备安装环境。' >&2
+curl -q -fLsS --proto '=https' --proto-redir '=https' --max-redirs 3 --connect-timeout 15 --max-time 180 \
+    "https://github.com/astral-sh/uv/releases/download/$cmh_version/uv-$cmh_target.tar.gz" \
+    -o "$cmh_temp/uv.tar.gz"
+if command -v sha256sum >/dev/null 2>&1; then
+    cmh_actual=$(sha256sum "$cmh_temp/uv.tar.gz" | cut -d ' ' -f 1)
+else
+    cmh_actual=$(shasum -a 256 "$cmh_temp/uv.tar.gz" | cut -d ' ' -f 1)
+fi
+if [ "$cmh_actual" != "$cmh_digest" ]; then
+    printf '%s\n' '安装环境校验失败，请检查下载路径后重试。' >&2
+    exit 1
+fi
+tar -xzf "$cmh_temp/uv.tar.gz" -C "$cmh_temp" "uv-$cmh_target/uv"
+UV_PYTHON_INSTALL_DIR="$cmh_runtime_dir" "$cmh_temp/uv-$cmh_target/uv" run --no-project \
+    --no-config --no-env-file --isolated --managed-python --python "$cmh_runtime" \
+    python -I "$cmh_root/scripts/install_hub.py" "$@"

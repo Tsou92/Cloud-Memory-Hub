@@ -13,7 +13,13 @@ docker compose up -d --no-build hub &&
 docker compose ps hub
 ```
 
-初始化只做一次。启动后通过自己的 HTTPS 入口打开管理页，管理员凭证在 NAS 本机终端查看：
+初始化只做一次。包含首次设置功能的镜像启动后，可在电脑上运行 `scripts/install-hub --nas nas --open-admin` 打开初始化页面。手动部署时，也可在 NAS 自己的终端取一次性链接：
+
+```sh
+docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub setup-link
+```
+
+只在自己的浏览器打开该链接，输入 `admin` 并设置新密码。旧镜像仍按原来的方式，在 NAS 本机终端查看私有管理员凭证：
 
 ```sh
 docker compose exec hub cat /config/admin-token
@@ -43,10 +49,10 @@ Apple Silicon 开发主机可为 Compose 命令设置 `DOCKER_DEFAULT_PLATFORM=l
 
 Compose 支持用 `CMH_IMAGE` 指定本次已验证的镜像标签，默认仍为 `cloud-memory-hub:development`。NAS 验证使用独立的提交标签，并设置独立 Compose 项目名；不得复用已有服务的数据卷。构建时传入 `--build-arg CMH_REVISION=<提交编号>`，可在镜像标签中追踪来源。`CMH_IMAGE` 同时作用于初始化、服务和禁网模型检查，避免混用版本。
 
-打开 `http://localhost:8800`，输入初始化产生的管理员凭证。可在自己的终端查看：
+在自己的终端生成初始化链接，然后在本机浏览器打开它并设置新密码：
 
 ```sh
-docker compose exec hub cat /config/admin-token
+docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub setup-link
 ```
 
 不要把该输出粘贴到公开日志、Issue 或聊天。网页通过受限会话访问；容器重启后重新登录。模型配置界面来自上游，真实模型的测试／激活会访问相应提供商，当前验证使用未激活的合成配置。

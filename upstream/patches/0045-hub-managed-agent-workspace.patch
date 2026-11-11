@@ -1,0 +1,136 @@
+diff --git a/memhub/apps/web/src/HubAgentConnect.tsx b/memhub/apps/web/src/HubAgentConnect.tsx
+--- a/memhub/apps/web/src/HubAgentConnect.tsx
++++ b/memhub/apps/web/src/HubAgentConnect.tsx
+@@ -221,6 +221,10 @@
+       <p>
+         无需独立 App。把一句话交给 Agent，或在目标设备运行一条命令，安装 MCP 和
+         Skill。新设备仅获得当前项目的上传、记忆读取和历史读取权限。
++      </p>
++      <p>
++        Apple Silicon Mac 上的 Claude Code CLI 和 Codex 可为当前 Hub 项目准备专用目录。
++        安装后，在 Agent 中打开结果显示的目录。Codex 首次按界面提示审查并信任项目钩子。
+       </p>
+       {project.scope_id === "global" ? (
+         <p>请先选择或创建一个项目；全局偏好不能用于设备配对。</p>
+@@ -321,7 +325,8 @@
+                       复制 PowerShell 命令
+                     </R6Button>
+                     <p>
+-                      宿主和系统的支持情况以实际安装检查为准；脚本存在不代表该宿主已通过验收。
++                      Linux、Windows 和其他 Agent 可使用 MCP。要在支持自动化的 Mac 上沿用已有项目，
++                      可以先在 Agent 中打开项目目录，再交给它安装。
+                     </p>
+                   </details>
+                   <R6Button
+diff --git a/memhub/apps/web/src/hub-invitation.ts b/memhub/apps/web/src/hub-invitation.ts
+--- a/memhub/apps/web/src/hub-invitation.ts
++++ b/memhub/apps/web/src/hub-invitation.ts
+@@ -211,14 +211,24 @@
+   return `'${value.replaceAll("'", "'\\''")}'`;
+ }
+ const unixInstallProgram =
+-  'umask 077; cmh_file=$(mktemp) || exit 1; trap \'rm -f -- "$cmh_file"\' EXIT; curl -fsSL --proto-redir \'=https\' "$1/hub/install.sh" -o "$cmh_file" && sh "$cmh_file" --link "$2" --agent "$3"';
++  'umask 077; cmh_file=$(mktemp) || exit 1; trap \'rm -f -- "$cmh_file"\' EXIT; curl -fsSL --proto-redir \'=https\' "$1/hub/install.sh" -o "$cmh_file" || exit $?; set -- --link "$2" --agent "$3"; ';
+ export function invitationInstructions(invitation: Invitation, agent: Agent) {
+   const origin = safeOrigin(invitation.origin);
+   const link = `${origin}/hub/connect#pairing_id=${invitation.pairing_id}&secret=${invitation.invitation_secret}`;
++  const projectAutomation = agent === "claude" || agent === "codex";
++  const workspaceOption = projectAutomation
++    ? 'if [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ]; then set -- "$@" --managed-workspace; fi; '
++    : "";
++  const program = unixInstallProgram + workspaceOption + 'sh "$cmh_file" "$@"';
++  const workspace = projectAutomation
++    ? "在 Apple Silicon Mac 上，如果我已明确打开要共享的本地项目目录，请用 --workspace 指定该目录。" +
++      "其他情况下请用 --managed-workspace 为这个 Hub 项目准备专用目录。完成后告诉我在 Agent 中打开哪个目录。" +
++      "Codex 首次由我按界面提示审查并信任钩子。"
++    : "";
+   return {
+     link,
+-    prompt: `请按此连接页说明，使用连接器为${agents[agent]}安装MCP和Skill并验证连接：${link}。保留其他配置，不输出长期凭证，需要重新加载时告诉我。`,
+-    unix: `sh -c ${shellQuote(unixInstallProgram)} cmh-connect ${shellQuote(origin)} ${shellQuote(link)} ${agent}`,
++    prompt: `请按连接页说明，使用官方连接器为 ${agents[agent]} 安装 MCP 和 Skill 并验证连接。请打开下面的连接页。\n${link}\n${workspace}保留其他配置，不输出长期凭证，需要重新加载时告诉我。`,
++    unix: `sh -c ${shellQuote(program)} cmh-connect ${shellQuote(origin)} ${shellQuote(link)} ${agent}`,
+     powershell: `& { $ErrorActionPreference = 'Stop'; $cmhScript = irm -ErrorAction Stop '${origin}/hub/install.ps1'; & ([scriptblock]::Create($cmhScript)) -Link '${link}' -Agent ${agent} }`,
+   };
+ }
+diff --git a/memhub/apps/web/src/hub-invitation.test.ts b/memhub/apps/web/src/hub-invitation.test.ts
+--- a/memhub/apps/web/src/hub-invitation.test.ts
++++ b/memhub/apps/web/src/hub-invitation.test.ts
+@@ -66,11 +66,26 @@
+   expect(instructions.powershell).toBe(
+     `& { $ErrorActionPreference = 'Stop'; $cmhScript = irm -ErrorAction Stop 'https://synthetic.example/hub/install.ps1'; & ([scriptblock]::Create($cmhScript)) -Link '${instructions.link}' -Agent codex }`,
+   );
+-  expect(instructions.prompt).toContain("为Codex安装MCP和Skill并验证连接");
+-});
++  expect(instructions.prompt).toContain("为 Codex 安装 MCP 和 Skill 并验证连接");
++  expect(instructions.prompt).toContain("请用 --workspace 指定该目录");
++  expect(instructions.prompt).toContain("请用 --managed-workspace");
++  expect(instructions.prompt).toContain("打开哪个目录");
++  expect(instructions.unix).toContain("--managed-workspace");
++  expect(instructions.powershell).not.toContain("--managed-workspace");
++});
++
++it.each(["opencode", "hermes", "generic"] as const)(
++  "offers MCP pairing without a project workspace flag for %s",
++  (agent) => {
++    const instructions = invitationInstructions(issued, agent);
++    expect(instructions.unix).not.toContain("--managed-workspace");
++    expect(instructions.prompt).not.toContain("--managed-workspace");
++  },
++);
+
+ it.each([
+   ["success", 0, true],
++  ["linux", 0, true],
+   ["http404", 22, false],
+   ["offline", 7, false],
+   ["partial", 18, false],
+@@ -83,6 +98,19 @@
+     const executionMarker = join(directory, "executed");
+     const instructions = invitationInstructions(issued, "codex");
+     try {
++      writeFileSync(
++        join(directory, "uname"),
++        `#!/bin/sh
++case "$CMH_TEST_MODE:$1" in
++  linux:-s) echo Linux ;;
++  linux:-m) echo x86_64 ;;
++  *:-s) echo Darwin ;;
++  *:-m) echo arm64 ;;
++  *) exit 1 ;;
++esac
++`,
++        { mode: 0o700 },
++      );
+       writeFileSync(
+         join(directory, "curl"),
+         `#!/bin/sh
+@@ -101,6 +129,11 @@
+ esac
+ cat > "$cmh_output" <<'SYNTHETIC_INSTALLER'
+ [ "$1" = '--link' ] && [ "$2" = "$CMH_EXPECTED_LINK" ] && [ "$3" = '--agent' ] && [ "$4" = 'codex' ] || exit 92
++if [ "$CMH_TEST_MODE" = linux ]; then
++  [ "$#" -eq 4 ] || exit 93
++else
++  [ "$#" -eq 5 ] && [ "$5" = '--managed-workspace' ] || exit 93
++fi
+ printf 'executed' > "$CMH_EXECUTION_MARK"
+ [ "$CMH_TEST_MODE" != 'installer_failed' ] || exit 19
+ SYNTHETIC_INSTALLER
+diff --git a/memhub/apps/web/src/HubAgentConnect.test.tsx b/memhub/apps/web/src/HubAgentConnect.test.tsx
+--- a/memhub/apps/web/src/HubAgentConnect.test.tsx
++++ b/memhub/apps/web/src/HubAgentConnect.test.tsx
+@@ -121,9 +121,11 @@
+   await userEvent.click(
+     await screen.findByRole("button", { name: "复制给 Agent 的一句话" }),
+   );
++  expect(copy.mock.calls[0][0]).toContain("为 Hermes 安装 MCP 和 Skill 并验证连接");
+   expect(copy.mock.calls[0][0]).toContain(
+-    `为Hermes安装MCP和Skill并验证连接：https://synthetic.example/hub/connect#pairing_id=${id}&secret=${secret}`,
+-  );
++    `https://synthetic.example/hub/connect#pairing_id=${id}&secret=${secret}`,
++  );
++  expect(copy.mock.calls[0][0]).not.toContain("--managed-workspace");
+   expect(sessionStorage.getItem(invitationKey(instance, scope))).toBe(
+     JSON.stringify({ version: 1, pairing_id: id }),
+   );

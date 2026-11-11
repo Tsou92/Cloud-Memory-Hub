@@ -4,7 +4,7 @@
 
 服务通过 **Docker 部署在自己的 NAS**，电脑无需安装独立 App。
 
-运行 Hub 生成的一条命令，或把安装话术交给 Agent，即可配置 **MCP 和 Skill**。
+在电脑运行一条命令，即可部署 NAS 服务、创建共享项目，并配对这台电脑。
 
 [![最新发行版](https://img.shields.io/github/v/release/Tsou92/Cloud-Memory-Hub?style=flat-square&color=8b5cf6&logo=github)](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-64748b?style=flat-square)](LICENSE)
@@ -15,34 +15,31 @@
 
 [产品主页](https://memoryhub.tsounas.cn) · [下载发行版](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest) · [接入指南](docs/client-installation.md) · [问题反馈](https://github.com/Tsou92/Cloud-Memory-Hub/issues)
 
-安装前请确认发行页已有公开的正式版本；发行包更新期间，请等待新版，不使用旧归档或测试制品代替。
-
 <a id="在-nas-安装发行版"></a>
 
-## 🚀 三步部署
+## 🚀 一次完成 NAS 首装与首台接入
 
-**推荐让电脑上的 Agent 帮你安装，不需要自己输入 Docker 命令。**
+在 NAS 开启 Docker Compose 和 SSH，并准备已登录的 Tailscale 或可访问的 HTTPS 入口。使用 Mac 或 Linux 电脑打开要共享的项目目录，把 `USER@NAS` 换成 NAS 的 SSH 用户名与地址，或你已有的 SSH 别名。
 
-1. **在 NAS 开启 Docker 和 SSH。** Docker 通常在「应用中心／容器管理」中；SSH 通常在「控制面板／终端」中。记下 NAS 地址、登录用户名和 SSH 端口。当前发行镜像适用于 Intel / AMD NAS（Linux amd64）。
-2. **复制下面的话给 Agent。** 使用电脑上能够执行终端命令的 Claude Code、Codex 等。替换三个括号里的信息；首次登录和必要授权按 Agent 提示在本机完成，密码不要发进聊天。
-3. **打开 Agent 返回的管理页面。** 在网页中配置模型、创建项目，然后连接各台设备上的 Agent。
+命令使用 [v0.1.5 的正式附件](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.5)。
 
-```text
-请帮我把 Cloud Memory Hub 部署到 NAS。
-NAS 地址：[填写地址]；SSH 用户名：[填写用户名]；SSH 端口：[填写端口，通常为 22]。
-请先阅读 https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/nas-installation.md ，
-按官方指南使用最新已发布版本，完成下载校验、Docker 部署、可访问的 HTTPS 入口和健康检查。
-已有实例请先备份，保留原数据和配置。需要我登录或授权时，请指导我在本机完成，不要让我把密码或密钥发到聊天。
-完成后给我管理页面地址，并指导我安全登录和连接 Agent。
+```sh
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && curl -q -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.5/scripts/bootstrap-install.sh -o "$cmh_installer" && sh "$cmh_installer" --nas USER@NAS --agent codex)
 ```
 
-[不清楚 SSH 在哪里？查看安装说明](docs/nas-installation.md) · [熟悉 Docker？查看手动安装](docs/nas-installation.md#手动安装)
+也可以对能执行终端命令的 Agent 说：「请用 Cloud Memory Hub 的官方安装命令，把 Hub 部署到我的 NAS `USER@NAS`，并接入当前 Codex 项目。」SSH 登录和权限确认按原界面提示完成。
+
+1. 安装器校验正式发行包、启动 NAS、创建项目并配对电脑。
+2. 在安装器打开的受保护初始化页输入 `admin`，设置新密码后进入后台。
+3. 在 Codex 打开安装结果显示的共享目录，按 **Review hooks** 提示信任一次，随后正常聊天。其他电脑从后台的「连接 Agent」加入同一个项目。
+
+Tailscale 在 NAS 的 Docker 容器中时，加 `--tailscale-container tailscale`。已有 HTTPS 反代用 `--origin https://hub.example.com`。Claude Code CLI 用 `--agent claude`。[首装参数、其他 Agent 和手动部署](docs/nas-installation.md) · [已有实例升级](docs/development-runtime.md#已有实例升级保持配置和身份)
 
 ## 🔌 三步使用
 
 1. **生成连接。** 在 Hub 的「连接 Agent」中选择项目、填写设备名称并选择 Agent。每台电脑分别生成链接，共享同一个项目。
-2. **安装连接。** 在目标电脑运行页面生成的一条命令，或把安装话术交给 Agent。按提示重新加载 MCP，并确认实际连接成功；详细步骤见[一次性链接接入](docs/client-installation.md#默认一次性链接接入)。
-3. **开始共享。** 支持自动接续的版本在项目接入后，正常对话即可共享进展。另一端先收到会话摘要，需要细节时再读 Markdown 原文。具体版本和宿主见[接入指南](docs/client-installation.md)。
+2. **安装连接。** 在目标电脑运行页面生成的一条命令，或把安装话术交给 Agent。Apple Silicon Mac 上的 Claude Code CLI 和 Codex 默认准备专用共享目录。要沿用已有项目，可以先在 Agent 中打开项目，再把话术发给它。
+3. **开始共享。** 在 Agent 中打开安装结果显示的目录。Codex 首次按界面提示信任已安装的钩子一次，然后正常对话即可。另一端先收到会话摘要，需要细节时再读 Markdown 原文。其他宿主可通过 MCP 接入。详见[接入指南](docs/client-installation.md)。
 
 会话接续传递任务上下文。通用 MCP 也提供显式读取和交接工具；本机旧历史与其他宿主的采集范围见[接入指南](docs/client-installation.md)。
 
@@ -51,7 +48,7 @@ NAS 地址：[填写地址]；SSH 用户名：[填写用户名]；SSH 端口：[
 | 能力 | 已做到什么 |
 | --- | --- |
 | 跨设备共享与交接 | 已有真实 NAS、两台 Mac 的 MCP 读写与任务交接验证；不同版本的复验范围见[验收记录](docs/reviews/2026-11-10-final-artifact-acceptance.md)。 |
-| Claude Code CLI / Codex 桌面 | 已有真实宿主的 MCP 读写与交接实测；**自动采集、逐轮触发和已有对话召回，仍按 Agent 分别配置与验证**。 |
+| Claude Code CLI / Codex 桌面 | Apple Silicon Mac 可安装项目钩子。Codex 桌面已在 NAS 上用两个真实聊天验证自动上传与接续；新项目首次按宿主提示信任钩子。 |
 | 更多 Agent | 提供通用 MCP / Skill 接口；OpenCode、Hermes 等可按接口接入，但尚未完成所有宿主的读写实测。 |
 | 网页与备份 | 管理项目、记忆、原文、设备连接和备份；恢复操作与演练范围见[备份与恢复](docs/backup-and-recovery.md)。 |
 

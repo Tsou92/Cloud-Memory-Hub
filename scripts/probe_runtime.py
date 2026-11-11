@@ -60,6 +60,38 @@ def probe(phase: str) -> None:
     assert request("/api/v1/health", headers={**auth, "Host": "invalid.test"})[0] == 403
 
     if phase == "before":
+        from cloud_memory_hub.admin_credentials import initial_admin_setup_proof
+
+        proof = initial_admin_setup_proof(token)
+        if proof is not None:
+            origin = {"Origin": BASE}
+            assert request("/hub/setup")[0] == 200
+            assert (
+                request("/hub/login", method="POST", body={"credential": "admin"}, headers=origin)[
+                    0
+                ]
+                != 200
+            )
+            assert request("/api/v1/model-profiles")[0] == 401
+            replacement = secrets.token_urlsafe(48)
+            status, _ = request(
+                "/hub/setup",
+                method="POST",
+                body={
+                    "password": "admin",  # pragma: allowlist secret -- public bootstrap password
+                    "proof": proof,
+                    "new_credential": replacement,
+                    "confirm_credential": replacement,
+                },
+                headers=origin,
+            )
+            assert status == 200, "First administrator setup failed"
+            assert (
+                request("/api/v1/health", headers={**auth, "Cookie": "cmh_session=invalid"})[0]
+                == 401
+            )
+            token = replacement
+            auth = {"Authorization": "Bearer " + token}
         value = secrets.token_urlsafe(48)
         status, body = request(
             "/api/v1/model-profiles",
