@@ -11,11 +11,10 @@ import shutil
 import socket
 import ssl
 import subprocess
-import sys
 import tempfile
 import threading
 import unittest
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -167,21 +166,58 @@ def isolated_proxy_environment(proxy, ca_file=None):
     return environment
 
 
-def windows_test_ca(command, ca_file):
+POWERSHELL_PRIVATE_CA = r"""
+function Invoke-WebRequest {
+    [CmdletBinding()]
+    param([switch]$UseBasicParsing, [Uri]$Uri, [string]$OutFile,
+          [int]$TimeoutSec = 180, [int]$MaximumRedirection = 0,
+          [switch]$PassThru, [switch]$NoProxy)
+    $session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+    try {
+        $flags = [Reflection.BindingFlags]'Instance,Public,NonPublic'
+        $type = $session.GetType()
+        $type.GetProperty('NoProxy', $flags).SetValue($session, $NoProxy.IsPresent)
+        $type.GetProperty('ConnectionTimeout', $flags).SetValue(
+            $session, [TimeSpan]::FromSeconds($TimeoutSec))
+        $session.MaximumRedirection = $MaximumRedirection
+        $arguments = [object[]]@($false, $false)
+        $client = $type.GetMethod('GetHttpClient', $flags).Invoke($session, $arguments)
+        # Fixture-only deadline keeps intentional DNS/CONNECT failures bounded.
+        $client.Timeout = [TimeSpan]::FromSeconds(10)
+        $handler = [Net.Http.HttpMessageInvoker].GetField('_handler', $flags).GetValue($client)
+        $policy = [Security.Cryptography.X509Certificates.X509ChainPolicy]::new()
+        $policy.TrustMode =
+            [Security.Cryptography.X509Certificates.X509ChainTrustMode]::CustomRootTrust
+        $policy.RevocationMode = $handler.SslOptions.CertificateRevocationCheckMode
+        $null = $policy.ApplicationPolicy.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1'))
+        $null = $policy.CustomTrustStore.Add(
+            [Security.Cryptography.X509Certificates.X509Certificate2]::new('__CA__'))
+        $handler.SslOptions.CertificateChainPolicy = $policy
+        Microsoft.PowerShell.Utility\Invoke-WebRequest @PSBoundParameters -WebSession $session
+    } finally { $session.Dispose() }
+}
+"""
+
+
+def windows_test_ca(command, ca_file, *, legacy=False):
     if os.name == "nt":
         command = (
             "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
             "$OutputEncoding = [Console]::OutputEncoding; " + command
         )
-    if os.name != "nt" or not ca_file:
+    if not ca_file:
         return command
-    # Trust only this ephemeral test CA on the disposable CI runner, then remove it.
+    cert = str(ca_file).replace("'", "''")
+    if not legacy:
+        # Test-only session policy: real IWR/TLS/proxy transport, one private root.
+        # Hostname, expiry and chain validation remain enabled; no OS trust mutation.
+        return POWERSHELL_PRIVATE_CA.replace("__CA__", cert) + command
     if (
-        os.environ.get("GITHUB_ACTIONS") != "true"
+        os.name != "nt"
+        or os.environ.get("GITHUB_ACTIONS") != "true"
         or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
     ):
-        raise unittest.SkipTest("Windows TLS fixture trust is restricted to disposable CI")
-    cert = str(ca_file).replace("'", "''")
+        raise unittest.SkipTest("PS5 TLS fixture trust is restricted to disposable Windows CI")
     return (
         "$cmhTestCert = [Security.Cryptography.X509Certificates.X509Certificate2]::new('"
         + cert
@@ -192,65 +228,6 @@ def windows_test_ca(command, ca_file):
         + command
         + " } finally { $cmhTestStore.Remove($cmhTestCert); $cmhTestStore.Close() }"
     )
-
-
-@contextmanager
-def powershell_test_ca(ca_file):
-    """macOS .NET reads Keychain trust rather than SSL_CERT_FILE."""
-    if sys.platform != "darwin" or not ca_file:
-        yield
-        return
-    if (
-        os.environ.get("GITHUB_ACTIONS") != "true"
-        or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
-    ):
-        raise unittest.SkipTest("macOS test CA trust is restricted to disposable CI")
-    security = "/usr/bin/security"
-    store = "/Library/Keychains/System.keychain"
-    cert = str(ca_file)
-    fingerprint = (
-        hashlib.sha256(ssl.PEM_cert_to_DER_cert(ca_file.read_text(encoding="ascii")))
-        .hexdigest()
-        .upper()
-    )
-    search_list = subprocess.check_output([security, "list-keychains", "-d", "user"])
-    trusted = False
-    try:
-        subprocess.run(
-            [
-                "sudo",
-                "-n",
-                security,
-                "add-trusted-cert",
-                "-d",
-                "-r",
-                "trustRoot",
-                "-k",
-                store,
-                cert,
-            ],
-            check=True,
-            capture_output=True,
-            timeout=30,
-        )
-        trusted = True
-        yield
-    finally:
-        # Unique per-test CA; no existing certificate or search-list entry is replaced.
-        removal = subprocess.run(
-            ["sudo", "-n", security, "remove-trusted-cert", "-d", cert],
-            capture_output=True,
-            timeout=30,
-        )
-        deletion = subprocess.run(
-            ["sudo", "-n", security, "delete-certificate", "-Z", fingerprint, store],
-            capture_output=True,
-            timeout=30,
-        )
-        if trusted and (removal.returncode or deletion.returncode):
-            raise AssertionError("Ephemeral macOS test CA cleanup failed")
-        if subprocess.check_output([security, "list-keychains", "-d", "user"]) != search_list:
-            raise AssertionError("macOS test keychain search list changed")
 
 
 class BootstrapTests(unittest.TestCase):
@@ -266,8 +243,13 @@ class BootstrapTests(unittest.TestCase):
         untrusted=False,
         redirect=False,
         powershell_runtime=None,
+        broken_candidate=False,
+        wrong_hostname=False,
     ):
-        with tempfile.TemporaryDirectory(prefix="cmh bootstrap test ") as temporary:
+        with (
+            tempfile.TemporaryDirectory(prefix="cmh bootstrap test ") as temporary,
+            ExitStack() as extra,
+        ):
             with (
                 synthetic_download(CONNECTOR, tls=bool(proxy_mode), redirect=redirect) as (
                     origin,
@@ -280,6 +262,11 @@ class BootstrapTests(unittest.TestCase):
             ):
                 if unreachable or proxy_mode == "required":
                     origin = "https://hub-proxy-only.invalid:65531"
+                if wrong_hostname:
+                    origin = "https://wrong-host.invalid:65531"
+                client_ca = ca_file
+                if windows and untrusted:
+                    _, client_ca = extra.enter_context(synthetic_download(b"unused", tls=True))
                 suffix = "ps1" if windows else "sh"
                 script = (RESOURCES / f"install.{suffix}").read_text(encoding="utf-8")
                 values = {
@@ -295,6 +282,12 @@ class BootstrapTests(unittest.TestCase):
                 script = script.replace(
                     "__CMH_HUB_POWERSHELL_FETCH__", values["HUB_POWERSHELL_FETCH"]
                 )
+                if broken_candidate:
+                    self.assertTrue(windows)
+                    script = script.replace(
+                        "@('python3.12', 'python3', 'python')",
+                        "@('cmh-broken-python-probe', 'python3.12', 'python3', 'python')",
+                    )
                 if missing_python:
                     # Simulate only interpreter discovery. Download verification,
                     # extraction, uv and its Python preparation execute unchanged.
@@ -330,11 +323,31 @@ class BootstrapTests(unittest.TestCase):
                         "-NoProfile",
                         "-NonInteractive",
                         "-Command",
-                        windows_test_ca(f"& '{escaped_path}' -Link '{link}' -Agent codex", ca_file),
+                        windows_test_ca(
+                            f"& '{escaped_path}' -Link '{link}' -Agent codex",
+                            client_ca,
+                            legacy=powershell_runtime == "powershell",
+                        ),
                     ]
                 else:
                     command = ["sh", str(path), "--link", link, "--agent", "codex"]
                 environment = isolated_proxy_environment(proxy, ca_file)
+                if broken_candidate:
+                    probe_bin = Path(temporary) / "candidate bin"
+                    probe_bin.mkdir()
+                    probe = probe_bin / (
+                        "cmh-broken-python-probe.cmd"
+                        if os.name == "nt"
+                        else "cmh-broken-python-probe"
+                    )
+                    probe.write_text(
+                        "@echo off\necho SYNTHETIC_UNAVAILABLE_PROBE 1>&2\nexit /b 19\n"
+                        if os.name == "nt"
+                        else "#!/bin/sh\necho SYNTHETIC_UNAVAILABLE_PROBE >&2\nexit 19\n",
+                        encoding="ascii",
+                    )
+                    probe.chmod(0o700)
+                    environment["PATH"] = str(probe_bin) + os.pathsep + environment.get("PATH", "")
                 if untrusted:
                     environment.pop("CURL_CA_BUNDLE", None)
                     environment.pop("SSL_CERT_FILE", None)
@@ -343,16 +356,15 @@ class BootstrapTests(unittest.TestCase):
                     (curl_home / ".curlrc").write_text("insecure\nlocation\n", encoding="ascii")
                     environment["CURL_HOME"] = str(curl_home)
                 expected = expect_success if expect_success is not None else valid
-                with powershell_test_ca(ca_file if windows and expected else None):
-                    result = subprocess.run(
-                        command,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=480 if missing_python else 30,
-                        env=environment,
-                    )
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=480 if missing_python else 30,
+                    env=environment,
+                )
                 if expected:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     markers = [
@@ -369,6 +381,7 @@ class BootstrapTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertNotIn("bootstrap_probe", result.stdout)
                     self.assertNotIn(link, result.stdout + result.stderr)
+                self.assertNotIn("SYNTHETIC_UNAVAILABLE_PROBE", result.stdout + result.stderr)
                 self.assertTrue(
                     all("#" not in url and "synthetic=" not in url for url in proxy_requests)
                 )
@@ -465,11 +478,39 @@ class BootstrapTests(unittest.TestCase):
         os.name == "nt" and shutil.which("powershell"), "Requires real Windows PowerShell 5.1"
     )
     def test_windows_powershell_51_direct_download_and_integrity(self):
-        self.run_installer(windows=True, valid=True, powershell_runtime="powershell")
+        self.run_installer(
+            windows=True, valid=True, powershell_runtime="powershell", broken_candidate=True
+        )
         self.run_installer(windows=True, valid=False, powershell_runtime="powershell")
         self.run_installer(
             windows=True, valid=True, proxy_mode="required", powershell_runtime="powershell"
         )
+
+    @unittest.skipUnless(shutil.which("pwsh"), "Requires a real PowerShell runtime")
+    def test_powershell_skips_a_stderr_failing_python_candidate(self):
+        self.run_installer(windows=True, valid=True, broken_candidate=True)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "Requires a real PowerShell runtime")
+    def test_powershell_private_ca_policy_rejects_an_untrusted_server_ca(self):
+        _, requests = self.run_installer(
+            windows=True,
+            valid=True,
+            proxy_mode="required",
+            untrusted=True,
+            expect_success=False,
+        )
+        self.assertTrue(any(request.startswith("CONNECT ") for request in requests))
+
+    @unittest.skipUnless(shutil.which("pwsh"), "Requires a real PowerShell runtime")
+    def test_powershell_private_ca_policy_rejects_a_wrong_hostname(self):
+        _, requests = self.run_installer(
+            windows=True,
+            valid=True,
+            proxy_mode="required",
+            wrong_hostname=True,
+            expect_success=False,
+        )
+        self.assertTrue(any(request.startswith("CONNECT ") for request in requests))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ from urllib.parse import urlsplit
 
 from test_onboarding_bootstrap import (
     isolated_proxy_environment,
-    powershell_test_ca,
     synthetic_download,
     synthetic_proxy,
     windows_test_ca,
@@ -186,15 +185,14 @@ class CopiedCommandTests(unittest.TestCase):
                 if windows
                 else ["sh", "-c", command]
             )
-            with powershell_test_ca(ca_file if windows and not unavailable else None):
-                result = subprocess.run(
-                    arguments,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=30,
-                    env=isolated_proxy_environment(proxy, ca_file),
-                )
+            result = subprocess.run(
+                arguments,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+                env=isolated_proxy_environment(proxy, ca_file),
+            )
             self.assertTrue(requests)
             self.assertTrue(
                 all(

@@ -7,26 +7,40 @@ $cmhOrigin = __CMH_ORIGIN_POWERSHELL__
 $cmhScriptSha = '__CMH_CONNECT_SHA256__'
 $cmhTemp = Join-Path ([IO.Path]::GetTempPath()) ('cmh-connect-' + [Guid]::NewGuid().ToString('N'))
 $cmhFailure = $false
+$cmhStage = 'component_download'
 __CMH_HUB_POWERSHELL_FETCH__
 try {
     New-Item -ItemType Directory -Path $cmhTemp | Out-Null
     $cmhScript = Join-Path $cmhTemp 'connect.py'
     Get-CmhHubFile -Uri ($cmhOrigin + '/hub/connect.py') -OutFile $cmhScript
+    $cmhStage = 'checksum'
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $cmhScript).Hash.ToLowerInvariant() -ne $cmhScriptSha) {
         throw 'component_checksum_mismatch'
     }
+    $cmhStage = 'python_probe'
     $cmhPython = $null
     foreach ($cmhCandidate in @('python3.12', 'python3', 'python')) {
         $cmhExecutable = Get-Command $cmhCandidate -ErrorAction SilentlyContinue
         if ($cmhExecutable -and $cmhExecutable.Source -notlike '*\WindowsApps\*') {
-            & $cmhExecutable.Source -I -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' 2>$null
-            if ($LASTEXITCODE -eq 0) { $cmhPython = $cmhExecutable.Source; break }
+            $cmhProbePassed = $false
+            $cmhProbePreference = $ErrorActionPreference
+            try {
+                # PS 5.1 turns native stderr into ErrorRecords; a failed candidate
+                # must not prevent trying the next interpreter.
+                $ErrorActionPreference = 'Continue'
+                & $cmhExecutable.Source -I -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' 2>$null
+                $cmhProbePassed = $? -and $LASTEXITCODE -eq 0
+            } catch { $cmhProbePassed = $false }
+            finally { $ErrorActionPreference = $cmhProbePreference }
+            if ($cmhProbePassed) { $cmhPython = $cmhExecutable.Source; break }
         }
     }
     if ($cmhPython) {
+        $cmhStage = 'python_run'
         & $cmhPython -I $cmhScript --link $Link --agent $Agent
         $cmhExit = $LASTEXITCODE
     } else {
+        $cmhStage = 'runtime_prepare'
         $cmhArch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
         switch ($cmhArch) {
             'X64' { $cmhTarget = 'x86_64-pc-windows-msvc'; $cmhUvSha = '4c4d49d8738847d9b71ba319e49a5688c93eac0fe6204b1df24e98528dddf39a' } # pragma: allowlist secret
@@ -58,6 +72,9 @@ try {
 } catch {
     # Never echo the exception, invocation, URL fragment or long-term credential.
     $cmhFailure = $true
+    if ($cmhStage -in @('component_download','checksum','python_probe','python_run','runtime_prepare')) {
+        [Console]::Error.WriteLine('cmh_connect_stage=' + $cmhStage)
+    }
 } finally {
     if (Test-Path -LiteralPath $cmhTemp) { Remove-Item -LiteralPath $cmhTemp -Recurse -Force }
 }
