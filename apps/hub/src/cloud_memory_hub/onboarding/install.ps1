@@ -13,8 +13,10 @@ try {
     New-Item -ItemType Directory -Path $cmhTemp | Out-Null
     $cmhScript = Join-Path $cmhTemp 'connect.py'
     Get-CmhHubFile -Uri ($cmhOrigin + '/hub/connect.py') -OutFile $cmhScript
-    $cmhStage = 'checksum'
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $cmhScript).Hash.ToLowerInvariant() -ne $cmhScriptSha) {
+    $cmhStage = 'checksum_read'
+    $cmhActualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $cmhScript).Hash.ToLowerInvariant()
+    $cmhStage = 'checksum_compare'
+    if ($cmhActualSha -ne $cmhScriptSha) {
         throw 'component_checksum_mismatch'
     }
     $cmhStage = 'python_probe'
@@ -72,8 +74,9 @@ try {
 } catch {
     # Never echo the exception, invocation, URL fragment or long-term credential.
     $cmhFailure = $true
-    if ($cmhStage -in @('component_download','checksum','python_probe','python_run','runtime_prepare')) {
+    if ($cmhStage -in @('component_download','checksum_read','checksum_compare','python_probe','python_run','runtime_prepare')) {
         [Console]::Error.WriteLine('cmh_connect_stage=' + $cmhStage)
+        [Console]::Error.WriteLine('cmh_error_type=' + $_.Exception.GetType().FullName)
     }
 } finally {
     if (Test-Path -LiteralPath $cmhTemp) { Remove-Item -LiteralPath $cmhTemp -Recurse -Force }

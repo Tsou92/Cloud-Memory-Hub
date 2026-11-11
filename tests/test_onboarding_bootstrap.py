@@ -16,6 +16,7 @@ import threading
 import unittest
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 RESOURCES = Path(__file__).resolve().parents[1] / "apps/hub/src/cloud_memory_hub/onboarding"
@@ -150,7 +151,7 @@ def isolated_proxy_environment(proxy, ca_file=None):
     environment = {
         key: value
         for key, value in os.environ.items()
-        if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+        if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy", "psmodulepath"}
     }
     if proxy:
         environment.update(
@@ -172,19 +173,23 @@ function Invoke-WebRequest {
     param([switch]$UseBasicParsing, [Uri]$Uri, [string]$OutFile,
           [int]$TimeoutSec = 180, [int]$MaximumRedirection = 0,
           [switch]$PassThru, [switch]$NoProxy)
-    $session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+    $session = $null
+    $cmhTestStage = 'session'
     try {
+        $session = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
         $flags = [Reflection.BindingFlags]'Instance,Public,NonPublic'
         $type = $session.GetType()
         $type.GetProperty('NoProxy', $flags).SetValue($session, $NoProxy.IsPresent)
         $type.GetProperty('ConnectionTimeout', $flags).SetValue(
             $session, [TimeSpan]::FromSeconds($TimeoutSec))
         $session.MaximumRedirection = $MaximumRedirection
+        $cmhTestStage = 'client'
         $arguments = [object[]]@($false, $false)
         $client = $type.GetMethod('GetHttpClient', $flags).Invoke($session, $arguments)
         # Fixture-only deadline keeps intentional DNS/CONNECT failures bounded.
         $client.Timeout = [TimeSpan]::FromSeconds(10)
         $handler = [Net.Http.HttpMessageInvoker].GetField('_handler', $flags).GetValue($client)
+        $cmhTestStage = 'policy'
         $policy = [Security.Cryptography.X509Certificates.X509ChainPolicy]::new()
         $policy.TrustMode =
             [Security.Cryptography.X509Certificates.X509ChainTrustMode]::CustomRootTrust
@@ -193,8 +198,13 @@ function Invoke-WebRequest {
         $null = $policy.CustomTrustStore.Add(
             [Security.Cryptography.X509Certificates.X509Certificate2]::new('__CA__'))
         $handler.SslOptions.CertificateChainPolicy = $policy
+        $cmhTestStage = 'request'
         Microsoft.PowerShell.Utility\Invoke-WebRequest @PSBoundParameters -WebSession $session
-    } finally { $session.Dispose() }
+    } catch {
+        [Console]::Error.WriteLine('cmh_fixture_stage=' + $cmhTestStage)
+        [Console]::Error.WriteLine('cmh_fixture_error_type=' + $_.Exception.GetType().FullName)
+        throw
+    } finally { if ($session) { $session.Dispose() } }
 }
 """
 
@@ -460,7 +470,7 @@ class BootstrapTests(unittest.TestCase):
         result, requests = self.run_installer(
             windows=True, valid=True, proxy_mode="reject", unreachable=True, expect_success=False
         )
-        self.assertTrue(requests)
+        self.assertTrue(requests, f"exit={result.returncode}; stderr={result.stderr}")
         self.assertIn("DIRECT", result.stderr)
         self.assertNotIn("hub-proxy-only.invalid", result.stderr)
 
@@ -511,6 +521,12 @@ class BootstrapTests(unittest.TestCase):
             expect_success=False,
         )
         self.assertTrue(any(request.startswith("CONNECT ") for request in requests))
+
+    def test_child_environment_rebuilds_legacy_powershell_module_paths(self):
+        with patch.dict(os.environ, {"pSmOdUlEpAtH": "synthetic-parent-modules"}):
+            environment = isolated_proxy_environment(None)
+            self.assertFalse(any(key.lower() == "psmodulepath" for key in environment))
+            self.assertEqual(os.environ["pSmOdUlEpAtH"], "synthetic-parent-modules")
 
 
 if __name__ == "__main__":
