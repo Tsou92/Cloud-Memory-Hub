@@ -100,6 +100,7 @@ def test_known_token_formats_and_benign_identifiers():
         "sk-" + "synthetic" * 4,
         "ghp_" + "x" * 30,
         "cmhdev_v1_" + str(uuid4()) + "_" + "x" * 43,
+        "cmhdev_v1_" + str(uuid4()) + "_" + "x" * 42 + "-",
         "eyJ" + "x" * 15 + "." + "y" * 20 + "." + "z" * 20,
     ]
     privacy = CredentialFilter()

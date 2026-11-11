@@ -89,10 +89,10 @@ _HEADERS = re.compile(
 )
 _BEARER = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
 _EXTRA_TOKEN = re.compile(
-    r"\b(?:cmhdev_v1_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}|"
-    r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|"
+    r"\b(?:cmhdev_v1_[0-9a-f-]{36}_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|"
+    r"(?:eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|"
     r"(?:AKIA|ASIA)[A-Z0-9]{16}|glpat-[A-Za-z0-9_-]{20,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|gh[ousr]_[A-Za-z0-9]{20,})\b"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|gh[ousr]_[A-Za-z0-9]{20,})\b)"
 )
 _URL = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^\s<>\"']+")
 _INLINE_MEDIA = re.compile(r"(?i)\bdata:[^\s,]*;base64,")
