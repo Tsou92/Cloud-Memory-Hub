@@ -6,7 +6,7 @@ Cloud Memory Hub 主体运行在 NAS Docker。电脑只需为已有的 AI 应用
 
 使用 Clash、Shadowrocket 或终端代理时，参阅[代理与网络连接指南](proxy-and-network.md)。安装器的网络检查与 Agent 实际连接是两个阶段；需要调整白名单或重新启动宿主时，应先完成提示再验证 MCP。
 
-支持[自动会话接续](adr/0069-automatic-session-handoff.md)的版本，会为 Apple Silicon Mac 上的 Claude Code CLI 和 Codex 准备项目钩子。安装器默认在本机的 `Cloud Memory Hub Projects` 中准备专用目录，也可以绑定你明确选定的已有项目。
+支持[自动会话接续](adr/0069-automatic-session-handoff.md)的版本，会为 Apple Silicon Mac 上的 Claude Code CLI 和 Codex 准备项目钩子。DeepSeek Harness 没有 shell 钩子，改用随仓库提供的 DSH 插件转发同样的事件，见下方「DeepSeek Harness 自动采集」。安装器默认在本机的 `Cloud Memory Hub Projects` 中准备专用目录，也可以绑定你明确选定的已有项目。
 
 默认流程对应 [ADR-0065](adr/0065-one-link-remote-agent-onboarding.md)。正式支持的系统、实际验证的宿主及自动触发边界以发行说明和[接入验证](reviews/2026-11-10-one-link-onboarding.md)为准；接口通用不等于所有 Agent 都已实测。
 
@@ -21,6 +21,25 @@ Cloud Memory Hub 主体运行在 NAS Docker。电脑只需为已有的 AI 应用
 短时链接不要公开转发。长期设备凭证只写本机私有配置，不会显示在安装结果或写入 Skill。网络中断后重试同一链接，会恢复同一领取身份；不要为重试删除本地进度。链接过期或被其他设备领取时，在 NAS 生成新的链接。配置发生并发变化时，安装器保留原文件和备份并报告冲突，不覆盖新修改。
 
 页面的「已配对」表示设备身份已签发。安装结果会区分 MCP 已配置和项目自动化已配置；只有宿主加载钩子后才能自动收发。自动采集覆盖接入后的可见提示和最终回答。完整旧历史导入及其他宿主按各自适配验证；通用 MCP 仍可用 `session_briefs`、`session_markdown`、`handoff_save` 和 `handoff_load`。
+
+## DeepSeek Harness 自动采集
+
+DSH 通过 MCP 连接时只能在模型主动调用工具时写入。要每轮自动采集和召回，再加装 [DSH 插件](../packages/dsh-plugin)，设计见 [ADR-0072](adr/0072-deepseek-harness-capture.md)：
+
+1. 先按上面的流程或本地连接组件取得本机 `agent.json`。
+2. 为要共享的项目登记绑定（只写 `~/.cloud-memory-hub/dsh-capture.json`，不含凭证）：
+
+   ```sh
+   cloud-memory-setup automation --agent dsh --config-file /path/to/private/agent.json --workspace /path/to/project
+   ```
+
+3. 把插件加入正在使用的 DSH Profile，然后重启 DSH：
+
+   ```sh
+   dsh plugin --profile desktop add /path/to/Memory-Hub/packages/dsh-plugin
+   ```
+
+4. 在 DSH 中以该项目目录新建会话。每轮提问会先排队上传并带回召回上下文，回答结束后保存最终回答。其他目录的会话不采集。
 
 ## 高级：Mac 本地连接组件
 

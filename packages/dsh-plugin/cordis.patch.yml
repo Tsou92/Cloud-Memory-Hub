@@ -1,0 +1,9 @@
+# Cloud Memory Hub capture for DeepSeek Harness.
+#
+# Install into a profile with the official CLI:
+#   dsh plugin --profile <profile> add <path-to-this-package>
+# Project bindings live in ~/.cloud-memory-hub/dsh-capture.json and are written
+# by `cloud-memory-setup automation --agent dsh --workspace <project>`.
+- insert:
+    - id: cloud-memory-hub-capture
+      name: '@cloud-memory-hub/dsh-capture'

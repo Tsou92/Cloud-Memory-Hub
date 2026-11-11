@@ -75,12 +75,13 @@ def test_native_helper_uses_only_visible_field_and_prompt_identity(tmp_path, mon
     assert stop[:3] == ("Stop", "assistant", "Final answer.")
 
 
+@pytest.mark.parametrize("adapter", ["codex", "deepseek-harness"])
 @pytest.mark.parametrize("event,role", [("UserPromptSubmit", "user"), ("Stop", "assistant")])
-def test_codex_native_hook_uses_turn_id(tmp_path, monkeypatch, event, role):
+def test_turn_id_hooks_capture_under_their_adapter(tmp_path, monkeypatch, event, role, adapter):
     monkeypatch.chdir(tmp_path)
     raw = payload(tmp_path, event=event)
     raw["turn_id"] = raw.pop("prompt_id")
-    message = visible_message(raw, tmp_path, adapter="codex")
+    message = visible_message(raw, tmp_path, adapter=adapter)
     assert message == (
         event,
         role,
@@ -95,12 +96,12 @@ def test_codex_native_hook_uses_turn_id(tmp_path, monkeypatch, event, role):
 
     monkeypatch.setattr(service, "_deliver", no_delivery)
     monkeypatch.setattr(service, "_read", read)
-    asyncio.run(process_message(service, message, adapter="codex"))
+    asyncio.run(process_message(service, message, adapter=adapter))
     captured = json.loads(service.outbox.pending()[0].payload)
-    assert captured["content"]["metadata"]["adapter_id"] == "codex"
+    assert captured["content"]["metadata"]["adapter_id"] == adapter
     raw["prompt_id"] = raw.pop("turn_id")
     with pytest.raises(AgentAccessError, match="hook_identity_missing_or_invalid"):
-        visible_message(raw, tmp_path, adapter="codex")
+        visible_message(raw, tmp_path, adapter=adapter)
 
 
 @pytest.mark.parametrize("field", ["session_id", "prompt_id"])

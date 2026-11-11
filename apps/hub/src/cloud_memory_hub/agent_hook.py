@@ -17,7 +17,8 @@ from cloud_memory_hub.transport import TransportError
 MAX_HOOK_BYTES = 64 * 1024
 HOOK_NETWORK_DEADLINE = 8.0
 EVENTS = {"UserPromptSubmit": ("prompt", "user"), "Stop": ("last_assistant_message", "assistant")}
-TURN_FIELDS = {"claude-code": "prompt_id", "codex": "turn_id"}
+# DeepSeek Harness has no shell hooks; packages/dsh-plugin forwards the same events.
+TURN_FIELDS = {"claude-code": "prompt_id", "codex": "turn_id", "deepseek-harness": "turn_id"}
 SILENT = {"continue": True, "suppressOutput": True}
 DENIED = {
     "device_authentication_required",
