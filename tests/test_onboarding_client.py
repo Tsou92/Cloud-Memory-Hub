@@ -270,6 +270,98 @@ class ClientTests(unittest.TestCase):
         runtime.assert_not_called()
         self.assertEqual(result["automation"], {"status": "automation_workspace_required"})
 
+    @unittest.skipIf(os.name == "nt", "Native project automation uses POSIX ownership")
+    def test_managed_pairing_from_home_installs_hooks_only_for_the_verified_source(self):
+        executable = self.home / "stable runtime/cloud-memory-setup"
+        projects = self.home / "Cloud Memory Hub Projects"
+        runs = []
+
+        def run(command, **options):
+            if command[-1] == "--help":
+                return client.subprocess.CompletedProcess(command, 0, stdout=b"")
+            workspace = options["cwd"]
+            self.assertEqual(command[-2:], ["--workspace", str(workspace)])
+            self.assertEqual(workspace.parent, projects)
+            self.assertEqual(workspace.stat().st_mode & 0o777, 0o700)
+            source = json.loads(options["input"])
+            self.assertEqual(source["scope_id"], BUNDLE["scope_id"])
+            self.assertEqual(source["source_id"], BUNDLE["source_id"])
+            runs.append(workspace)
+            return client.subprocess.CompletedProcess(
+                command, 0, stdout=b'{"status":"configured","background_delivery":"running"}'
+            )
+
+        with (
+            contextlib.chdir(self.home),
+            patch.object(client, "installed_automation_setup", return_value=executable),
+            patch.object(client.subprocess, "run", side_effect=run),
+        ):
+            for _ in range(2):
+                result = client.connect(
+                    LINK,
+                    "codex",
+                    home=self.home,
+                    remote_factory=self.remote,
+                    managed_workspace=True,
+                )
+                self.assertEqual(result["automation"]["workspace"], str(runs[-1]))
+                self.assertTrue(result["automation"]["host_review_required"])
+            for scope in (BUNDLE["scope_id"], str(uuid.uuid4())):
+                other_link = LINK.replace(PAIRING_ID, str(uuid.uuid4()))
+                with patch.dict(
+                    BUNDLE,
+                    scope_id=scope,
+                    source_id=str(uuid.uuid4()),
+                    device_id=str(uuid.uuid4()),
+                ):
+                    result = client.connect(
+                        other_link,
+                        "codex",
+                        home=self.home,
+                        remote_factory=FakeRemote(),
+                        managed_workspace=True,
+                    )
+                    self.assertEqual(result["automation"]["workspace"], str(runs[-1]))
+        self.assertEqual(len(self.remote.claim_secrets), 1)
+        self.assertEqual(runs[0], runs[1])
+        self.assertEqual(len(set(runs)), 3)
+        self.assertFalse((self.home / ".codex/hooks.json").exists())
+
+    @unittest.skipIf(os.name == "nt", "Native project automation uses POSIX ownership")
+    def test_managed_workspace_rejects_a_planted_directory_symlink(self):
+        outside = self.home / "unrelated"
+        outside.mkdir()
+        (self.home / "Cloud Memory Hub Projects").symlink_to(outside, target_is_directory=True)
+        with (
+            patch.object(client, "installed_automation_setup", return_value=Path("/test")),
+            patch.object(client.subprocess, "run") as hook,
+        ):
+            result = client.connect(
+                LINK, "codex", home=self.home, remote_factory=self.remote, managed_workspace=True
+            )
+        self.assertEqual(result["automation"], {"status": "unsafe_path"})
+        hook.assert_not_called()
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_managed_pairing_cli_reports_when_capture_was_not_installed(self):
+        result = {
+            "status": "configured",
+            "agent": "codex",
+            "server": "synthetic",
+            "automation": {"status": "automation_runtime_unavailable"},
+        }
+        output = io.StringIO()
+        with (
+            patch.object(client, "connect", return_value=result) as connect,
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(
+                client.main(["--link", LINK, "--agent", "codex", "--managed-workspace"]), 3
+            )
+        self.assertTrue(connect.call_args.kwargs["managed_workspace"])
+        self.assertIsNone(connect.call_args.kwargs["workspace"])
+        self.assertIn("自动采集尚未配置", output.getvalue())
+
     @unittest.skipIf(os.name == "nt", "Mac release discovery uses POSIX ownership")
     def test_automation_prepares_only_the_verified_matching_release(self):
         tag, version = "v1.2.3", "1.2.3"
@@ -847,7 +939,7 @@ class ClientTests(unittest.TestCase):
                         client.main(["--agent", agent, "--link-stdin", "--json-status"]), 0
                     )
                 connect.assert_called_once_with(
-                    LINK, agent, home=None, network="auto", workspace=None
+                    LINK, agent, home=None, network="auto", workspace=None, managed_workspace=False
                 )
                 report = json.loads(output.getvalue())
                 self.assertEqual(

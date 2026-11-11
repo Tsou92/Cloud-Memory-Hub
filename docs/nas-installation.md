@@ -29,6 +29,14 @@ NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Ta
 
 首装完成后，安装器会打开受保护的初始化页。输入 `admin`，然后设置新密码。保存成功后进入后台。Mac 上要重新打开管理员入口，可把命令中的 `--agent codex` 换成 `--open-admin`。若已设密码，安装器会打开普通登录页并把现有凭证放到剪贴板。
 
+## 把其他设备接入已部署的 Hub
+
+在后台选择要共享的项目，进入「连接 Agent」，为目标设备生成一次性链接。把页面上的一句话发给 Agent，或在目标设备运行页面生成的命令。
+
+在 Apple Silicon Mac 上选择 Codex 或 Claude Code CLI 时，默认会在 `Cloud Memory Hub Projects` 中为本次接入准备专用目录。安装后在 Agent 中打开结果显示的共享目录，再开始新的聊天。要沿用已有的本地项目，可以先在 Agent 中打开该项目，再让 Agent 用 `--workspace` 指定目录。Codex 首次打开共享目录时，需要在界面审查并信任已安装的钩子。
+
+Linux、Windows 和其他 Agent 可使用 MCP。按安装结果重新加载连接，并验证能从 Hub 读写同一个项目。
+
 下面保留已有发行版的逐步部署和手动安装说明。
 
 推荐让能执行终端命令的电脑端 Agent 帮你部署。你负责开启 NAS 连接、完成登录；下载、校验和启动服务交给 Agent。

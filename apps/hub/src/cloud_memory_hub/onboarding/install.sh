@@ -31,7 +31,7 @@ for cmh_arg in "$@"; do
   case "$cmh_arg" in
     --agent) cmh_read_agent=1 ;;
     --agent=*) cmh_agent=${cmh_arg#*=} ;;
-    --workspace|--workspace=*) cmh_has_workspace=1 ;;
+    --workspace|--workspace=*|--managed-workspace) cmh_has_workspace=1 ;;
   esac
 done
 cmh_auto=0

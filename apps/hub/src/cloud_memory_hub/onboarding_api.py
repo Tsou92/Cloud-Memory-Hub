@@ -34,8 +34,8 @@ PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>连接 Agent · Cloud Memory Hub</title><style>__STYLE__</style>
 <main><h1>把你的 Agent 连接到 Cloud Memory Hub</h1>
-<p>记忆保存在 NAS。请在要共享的项目目录接入。
-受支持的 Claude Code 与 Codex 会自动共享该目录中的可见对话并接续，无须安装独立 App。</p>
+<p>记忆保存在 NAS。Apple Silicon Mac 上的 Claude Code CLI 和 Codex 支持自动共享对话和接续。
+安装器可为这个 Hub 项目准备专用目录，无须安装独立 App。</p>
 <p>请确保这台设备能访问你的 NAS，例如已加入同一个 Tailscale 网络。</p>
 <p id="notice" role="status">正在检查连接链接……</p>
 <label for="agent">你要使用的 Agent</label>
@@ -43,24 +43,26 @@ PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <option value="opencode">OpenCode</option><option value="hermes">Hermes</option>
 <option value="generic">其他支持 HTTP MCP 的 Agent</option></select>
 <h2>方法一：交给 Agent 安装</h2>
-<p>先在 Agent 中打开要共享的项目，再把下面的话交给它安装。</p>
+<p>把下面的话交给你要连接的 Agent。如果要沿用已有项目，可以先在 Agent 中打开该目录。</p>
 <textarea id="prompt" rows="5" readonly></textarea>
 <button id="copy-prompt">复制安装话术</button>
 <h2>方法二：运行一条命令</h2>
 <label for="platform">运行命令的位置</label>
 <select id="platform"><option value="unix">Mac / Linux 终端</option>
 <option value="windows">Windows PowerShell</option></select>
-<p>请在要共享的项目目录运行。安装器会保留其他配置，准备 MCP、Skill 及受支持的项目自动化。
-缺少所需运行环境时会校验后安装。</p>
+<p>复制后在终端运行。安装器会保留其他配置，并准备 MCP、Skill 和当前设备支持的功能。
+Linux 和 Windows 可使用 MCP；项目钩子的自动安装目前适用于 Apple Silicon Mac。</p>
 <textarea id="command" rows="5" readonly></textarea>
 <button id="copy-command">复制命令</button>
-<p>按提示让 Agent 重新加载连接。Codex 需要首次审查并信任项目钩子。</p>
+<p>安装结果显示共享目录时，请在 Agent 中打开它。安装器会写好钩子配置。
+Codex 首次使用需要按提示审查并信任项目钩子一次。</p>
 <h2>开始接续</h2><p>自动化配置后，正常对话即可。另一端连接同一项目时先读摘要，需要细节再读原文。</p>
 <details><summary>Agent 安装说明与高级入口</summary>
 <p>只使用当前 Hub 提供的同源安装脚本。
 Mac/Linux 调用 /hub/install.sh，Windows 调用 /hub/install.ps1。
 脚本接受 --link 与 --agent（PowerShell 为 -Link 与 -Agent）。
-项目自动化需绑定 --workspace。不要输出长期设备凭证。
+在 Apple Silicon Mac 上使用 --managed-workspace 可为 Hub 项目准备专用目录。
+若要绑定已有项目，请改用 --workspace 并指定项目目录。不要输出长期设备凭证。
 有 Python 3.11 以上时，可下载同源 /hub/connect.py，以隔离模式 python -I 执行同样参数。
 保留其他 MCP 连接；安装失败时重试原链接以恢复进度。没有合适适配器时选择 generic 生成私有配置。</p>
 <p>项目自动化只采集绑定目录中接入后的用户消息和最终可见回答，断网时由本机队列补传。
@@ -245,11 +247,18 @@ byId('notice').textContent = valid
 if (navigator.userAgent.includes('Windows')) byId('platform').value = 'windows';
 function render() {
   const agent = byId('agent').value;
+  const windows = byId('platform').value === 'windows';
+  const projectAutomation = agent === 'claude' || agent === 'codex';
   const unixProgram = 'umask 077; cmh_file=$(mktemp) || exit 1; '
     + 'trap \'rm -f -- "$cmh_file"\' EXIT; '
     + __CMH_HUB_SHELL_FETCH__
-    + 'cmh_fetch_hub "$1/hub/install.sh" "$cmh_file" '
-    + '&& sh "$cmh_file" --link "$2" --agent "$3" --workspace "$PWD"';
+    + 'cmh_fetch_hub "$1/hub/install.sh" "$cmh_file" || exit $?; '
+    + 'set -- --link "$2" --agent "$3"; '
+    + (projectAutomation
+      ? 'if [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ]; '
+        + 'then set -- "$@" --managed-workspace; fi; '
+      : '')
+    + 'sh "$cmh_file" "$@"';
   const windowsProgram = "& { $ErrorActionPreference = 'Stop'; "
     + __CMH_HUB_POWERSHELL_FETCH__
     + '$cmhFile = [IO.Path]::GetTempFileName(); try { Get-CmhHubFile -Uri '
@@ -257,15 +266,20 @@ function render() {
     + ' -OutFile $cmhFile; & ([scriptblock]::Create([IO.File]::ReadAllText($cmhFile))) -Link '
     + psQuote(link) + ' -Agent ' + agent
     + ' } finally { Remove-Item -LiteralPath $cmhFile -Force } }';
-  const command = byId('platform').value === 'windows'
+  const command = windows
     ? windowsProgram
     : 'sh -c ' + shellQuote(unixProgram) + ' cmh-connect ' + shellQuote(origin)
       + ' ' + shellQuote(link) + ' ' + agent;
   byId('command').value = valid ? command : '';
   byId('prompt').value = valid ? '请按此 Cloud Memory Hub 连接页的说明，使用官方连接器为 '
     + byId('agent').selectedOptions[0].text
-    + ' 在我打开的项目目录安装 MCP、Skill 和受支持的自动接续：' + link
-    + '。只绑定当前项目目录；不能确认目录时仅配置 MCP，别采集其他项目。'
+    + ' 安装 MCP 和 Skill 并验证连接。请打开下面的连接页。\n' + link + '\n'
+    + (projectAutomation && !windows
+      ? '在 Apple Silicon Mac 上，如果我已明确打开要共享的本地项目目录，'
+        + '请用 --workspace 指定该目录。'
+        + '其他情况下请用 --managed-workspace 为这个 Hub 项目准备专用目录。'
+        + '完成后告诉我在 Agent 中打开哪个目录。Codex 首次由我按界面提示审查并信任钩子。'
+      : '')
     + '保留其他配置，不要输出长期凭证。网络或代理问题请按 '
     + 'https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md '
     + '排查，按诊断选择此 Hub 直连或代理，不改其他服务设置。' : '';

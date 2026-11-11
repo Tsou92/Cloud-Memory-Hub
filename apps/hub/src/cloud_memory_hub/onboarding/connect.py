@@ -1067,6 +1067,14 @@ def automation_workspace(value, home):
     return project
 
 
+def managed_automation_workspace(home, bundle):
+    # A new source cannot silently replace hooks installed for an older connection.
+    identity = "\n".join(bundle[key] for key in ("instance_id", "scope_id", "source_id"))
+    root = ensure_dir(home / "Cloud Memory Hub Projects", private=True)
+    project = ensure_dir(root / ("project-" + digest(identity.encode())[:24]), private=True)
+    return automation_workspace(project, home)
+
+
 def automation_release_version():
     if (
         sys.platform != "darwin"
@@ -1311,24 +1319,36 @@ def prepare_automation_setup(home, env, *, release_assets=None):
 
 
 def configure_automation(
-    agent, home, env, bundle, token, workspace, network_status, *, release_assets=None
+    agent,
+    home,
+    env,
+    bundle,
+    token,
+    workspace,
+    network_status,
+    *,
+    managed_workspace=False,
+    release_assets=None,
 ):
     if agent not in {"claude", "codex"}:
         return {"status": "unsupported_agent"}
-    if workspace is None:
+    if workspace is None and not managed_workspace:
         return {"status": "automation_workspace_required"}
     environment = env.copy()
     for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"):
         environment.pop(name, None)
     environment["PYTHONNOUSERSITE"] = "1"
     try:
-        project = automation_workspace(workspace, home)
+        if not managed_workspace:
+            project = automation_workspace(workspace, home)
         install_options = {"release_assets": release_assets} if release_assets is not None else {}
         command = installed_automation_setup(home) or prepare_automation_setup(
             home, environment, **install_options
         )
         if command is None:
             return {"status": "automation_runtime_unavailable"}
+        if managed_workspace:
+            project = managed_automation_workspace(home, bundle)
         probe = subprocess.run(
             [str(command), "automation", "--help"],
             env=environment,
@@ -1387,9 +1407,12 @@ def connect(
     remote_factory=None,
     network="auto",
     workspace=None,
+    managed_workspace=False,
     expected_scope_id=None,
     release_assets=None,
 ):
+    if managed_workspace and workspace is not None:
+        fail("automation_workspace_conflict")
     origin, pairing_id, invitation = parse_link(link)
     explicit_home = home is not None
     home = checked_path(Path(home).expanduser() if explicit_home else Path.home())
@@ -1465,7 +1488,15 @@ def connect(
         name = configure(installation, agent, home, env, bundle, token)
         install_options = {"release_assets": release_assets} if release_assets is not None else {}
         automation = configure_automation(
-            agent, home, env, bundle, token, workspace, network_status, **install_options
+            agent,
+            home,
+            env,
+            bundle,
+            token,
+            workspace,
+            network_status,
+            managed_workspace=managed_workspace,
+            **install_options,
         )
         return {
             "status": "configured",
@@ -1642,6 +1673,8 @@ def write_connection_status(agent, result=None, *, error=None):
                     "automation_release_checksum_mismatch",
                     "automation_release_installation_failed",
                     "automation_setup_failed",
+                    "private_permissions_required",
+                    "unsafe_path",
                 }
                 reason = automation.get("status")
                 status["error"] = reason if reason in reasons else "automation_setup_failed"
@@ -1664,7 +1697,11 @@ def main(argv=None):
         "--agent", choices=("claude", "codex", "opencode", "hermes", "generic"), required=True
     )
     parser.add_argument("--home", type=Path, help="隔离安装根目录（测试或显式独立配置用）")
-    parser.add_argument("--workspace", type=Path, help="自动采集绑定的项目目录，默认为当前目录")
+    workspace = parser.add_mutually_exclusive_group()
+    workspace.add_argument("--workspace", type=Path, help="把自动采集绑定到指定的已有项目目录")
+    workspace.add_argument(
+        "--managed-workspace", action="store_true", help="为本次连接自动准备专用项目目录"
+    )
     parser.add_argument(
         "--network",
         choices=("auto", "environment", "direct"),
@@ -1678,7 +1715,12 @@ def main(argv=None):
         if args.link_stdin:
             args.link = read_link_stdin()
         result = connect(
-            args.link, args.agent, home=args.home, network=args.network, workspace=args.workspace
+            args.link,
+            args.agent,
+            home=args.home,
+            network=args.network,
+            workspace=args.workspace,
+            managed_workspace=args.managed_workspace,
         )
     except ConnectError as error:
         if args.json_status:
@@ -1706,9 +1748,17 @@ def main(argv=None):
             file=sys.stderr,
         )
         return 1
+    automation = result.get("automation", {})
+    automation_incomplete = (
+        args.managed_workspace
+        and args.agent in {"claude", "codex"}
+        and automation.get("status") != "configured"
+    )
     if args.json_status:
         write_connection_status(args.agent, result)
-        return 2 if result.get("status") == "network_action_required" else 0
+        if result.get("status") == "network_action_required":
+            return 2
+        return 3 if automation_incomplete else 0
     if result.get("status") == "network_action_required":
         origin, _, _ = parse_link(args.link)
         print(network_guidance(origin, args.agent), file=sys.stderr)
@@ -1717,9 +1767,9 @@ def main(argv=None):
         print("远程 MCP 及身份验证通过，已生成通用配置；仍需将它添加到对应 Agent。")
     else:
         print(f"远程 MCP 及身份验证通过，已配置 {result['agent']} 的连接 {result['server']}。")
-    automation = result.get("automation", {})
     if automation.get("status") == "configured":
         print("已配置自动采集与接续。共享目录：" + repr(automation["workspace"]))
+        print("请在 Agent 中打开这个目录，随后在该项目里开始聊天。")
         if automation["host_review_required"]:
             print("请在 Codex 首次审查并信任当前项目的 Cloud Memory Hub 钩子。")
         if automation["background_delivery"] == "unavailable":
@@ -1730,6 +1780,8 @@ def main(argv=None):
             "automation_runtime_unavailable": "当前没有可用的配套自动采集客户端。",
             "automation_release_checksum_mismatch": "发行客户端校验失败，请重新执行同一链接。",
             "automation_release_installation_failed": "安装失败，请检查网络和磁盘空间后重试。",
+            "private_permissions_required": "专用目录须为当前用户私有，请检查权限后重试。",
+            "unsafe_path": "专用目录路径不能包含符号链接，请检查后重试。",
         }
         print(
             "自动采集尚未配置。"
@@ -1738,7 +1790,7 @@ def main(argv=None):
     print("请重新连接 MCP 或重启该 Agent，让当前会话加载新连接与 Skill。尚未验证宿主实际调用。")
     if args.agent == "generic":
         print("通用 MCP 配置保存在私有目录：" + result["private_state"])
-    return 0
+    return 3 if automation_incomplete else 0
 
 
 if __name__ == "__main__":

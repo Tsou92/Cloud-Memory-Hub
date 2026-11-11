@@ -31,15 +31,15 @@
 
 1. 安装器校验正式发行包、启动 NAS、创建项目并配对电脑。
 2. 在安装器打开的受保护初始化页输入 `admin`，设置新密码后进入后台。
-3. 在目标项目打开 Codex，按 **Review hooks** 提示信任一次，随后正常聊天。其他电脑从后台的「连接 Agent」加入同一个项目。
+3. 在 Codex 打开安装结果显示的共享目录，按 **Review hooks** 提示信任一次，随后正常聊天。其他电脑从后台的「连接 Agent」加入同一个项目。
 
 Tailscale 在 NAS 的 Docker 容器中时，加 `--tailscale-container tailscale`。已有 HTTPS 反代用 `--origin https://hub.example.com`。Claude Code CLI 用 `--agent claude`。[首装参数、其他 Agent 和手动部署](docs/nas-installation.md) · [已有实例升级](docs/development-runtime.md#已有实例升级保持配置和身份)
 
 ## 🔌 三步使用
 
 1. **生成连接。** 在 Hub 的「连接 Agent」中选择项目、填写设备名称并选择 Agent。每台电脑分别生成链接，共享同一个项目。
-2. **安装连接。** 在目标电脑运行页面生成的一条命令，或把安装话术交给 Agent。按提示重新加载 MCP，并确认实际连接成功；详细步骤见[一次性链接接入](docs/client-installation.md#默认一次性链接接入)。
-3. **开始共享。** 支持自动接续的版本在项目接入后，正常对话即可共享进展。另一端先收到会话摘要，需要细节时再读 Markdown 原文。具体版本和宿主见[接入指南](docs/client-installation.md)。
+2. **安装连接。** 在目标电脑运行页面生成的一条命令，或把安装话术交给 Agent。Apple Silicon Mac 上的 Claude Code CLI 和 Codex 默认准备专用共享目录。要沿用已有项目，可以先在 Agent 中打开项目，再把话术发给它。
+3. **开始共享。** 在 Agent 中打开安装结果显示的目录。Codex 首次按界面提示信任已安装的钩子一次，然后正常对话即可。另一端先收到会话摘要，需要细节时再读 Markdown 原文。其他宿主可通过 MCP 接入。详见[接入指南](docs/client-installation.md)。
 
 会话接续传递任务上下文。通用 MCP 也提供显式读取和交接工具；本机旧历史与其他宿主的采集范围见[接入指南](docs/client-installation.md)。
 
