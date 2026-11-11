@@ -37,6 +37,10 @@ check-claude: prepare-upstream
 check-claude-recall: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_claude_recall.py
 
+.PHONY: probe-automatic-session-handoff
+probe-automatic-session-handoff: prepare-upstream
+	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_automatic_session_handoff.py
+
 probe-sdk-governance: prepare-upstream
 	uv tool run --from uv==0.12.5 uv run --locked --directory apps/hub python ../../scripts/probe_sdk_governance.py
 

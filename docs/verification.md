@@ -1,5 +1,7 @@
 # 验证计划与需求追踪
 
+2026-11-11 自动会话接续（FR-01～05、FR-07、FR-08、FR-12）：用 `make probe-automatic-session-handoff` 验证普通对话自动采集、另一会话先读摘要后按需读 Markdown、已有会话下一轮更新。合成契约还覆盖同项目限定、原文修订、忘记／删除、长文续页和安装复用。实际宿主及发行边界见[自动接续验收](reviews/2026-11-11-automatic-session-handoff.md)。
+
 2026-11-11 用户后台样式合并（FR-12、ENG-01）：按独立编辑副本基线核对并复用现有网页，补丁 0044 覆盖文档滚动、表单、按钮和设置菜单的样式兼容；桌面浏览器与 390px 窄屏检查范围见[合并验收记录](reviews/2026-11-11-user-console-style-merge.md)。
 
 2026-11-11 代理环境接入（FR-02、FR-03、FR-07、FR-12、ENG-01）：补充环境／直接线路、无凭证探测、代理必需、双路失败、HTTP 回环不外发、写请求不重放、安装脚本两层下载及精确规则恢复验证，见 [ADR-0068](adr/0068-proxy-aware-agent-onboarding.md) 和[修复记录](reviews/2026-11-11-proxy-aware-onboarding.md)。

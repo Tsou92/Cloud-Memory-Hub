@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import tarfile
 import tempfile
 import unittest
 import uuid
@@ -205,6 +206,198 @@ class ClientTests(unittest.TestCase):
                 self.connect()
         self.assertEqual(self.remote.calls, [])
         self.assertFalse(self.claude_path().exists())
+
+    def test_automation_reuses_pairing_and_selected_network_without_token_in_arguments(self):
+        project = self.home / "project with spaces"
+        project.mkdir()
+        executable = self.home / "stable runtime/cloud-memory-setup"
+        self.remote.network_status = {"selected": "environment", "action_required": False}
+        handed_off = []
+
+        def run(command, **options):
+            if command[-1] == "--help":
+                self.assertNotIn("input", options)
+                return client.subprocess.CompletedProcess(command, 0, stdout=b"")
+            self.assertEqual(
+                command,
+                [str(executable), "automation", "--agent", "codex", "--workspace", str(project)],
+            )
+            self.assertEqual(options["cwd"], project)
+            pairing = json.loads(options["input"])
+            self.assertEqual({key: pairing[key] for key in BUNDLE}, BUNDLE)
+            self.assertEqual(pairing["network_mode"], "environment")
+            self.assertNotIn(pairing["credential"], " ".join(command))
+            handed_off.append(pairing)
+            return client.subprocess.CompletedProcess(
+                command, 0, stdout=b'{"status":"configured","background_delivery":"running"}'
+            )
+
+        with (
+            patch.object(client, "installed_automation_setup", return_value=executable),
+            patch.object(client.subprocess, "run", side_effect=run),
+        ):
+            for _ in range(2):
+                result = client.connect(
+                    LINK, "codex", home=self.home, remote_factory=self.remote, workspace=project
+                )
+                self.assertEqual(
+                    result["automation"],
+                    {
+                        "status": "configured",
+                        "background_delivery": "running",
+                        "host_review_required": True,
+                        "host_verified": False,
+                        "workspace": str(project),
+                    },
+                )
+        self.assertEqual(len(self.remote.claim_secrets), 1)
+        self.assertEqual(handed_off, [handed_off[0]] * 2)
+
+    def test_legacy_connection_without_explicit_workspace_never_installs_capture(self):
+        with patch.object(client, "installed_automation_setup") as runtime:
+            result = client.connect(LINK, "claude", home=self.home, remote_factory=self.remote)
+        runtime.assert_not_called()
+        self.assertEqual(result["automation"]["status"], "automation_workspace_required")
+
+    def test_home_cannot_become_an_automation_workspace(self):
+        with patch.object(client, "installed_automation_setup") as runtime:
+            result = client.connect(
+                LINK, "claude", home=self.home, remote_factory=self.remote, workspace=self.home
+            )
+        runtime.assert_not_called()
+        self.assertEqual(result["automation"], {"status": "automation_workspace_required"})
+
+    @unittest.skipIf(os.name == "nt", "Mac release discovery uses POSIX ownership")
+    def test_automation_prepares_only_the_verified_matching_release(self):
+        tag, version = "v1.2.3", "1.2.3"
+        prefix = f"cloud-memory-hub-client-{tag}-macos-arm64"
+        filename = prefix + ".tar.gz"
+        local_archive = self.home / filename
+        installer = b"raise SystemExit(0)\n"
+        manifest = {
+            "kind": "cloud-memory-hub-mac-client",
+            "release": version,
+            "architecture": "arm64",
+            "files": {"install.py": client.digest(installer)},
+        }
+        with tarfile.open(local_archive, "w:gz") as archive:
+            for name, content in (
+                ("manifest.json", client.json_bytes(manifest)),
+                ("install.py", installer),
+            ):
+                info = tarfile.TarInfo(f"{prefix}/{name}")
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+        data = local_archive.read_bytes()
+        checksum = client.digest(data)
+        target = self.home / client.CLIENT_RELEASE_ROOT / f"{version}-arm64"
+        command = target / "venv/bin/cloud-memory-setup"
+        fetched = []
+
+        def download(_opener, url, destination, _limit):
+            fetched.append(url)
+            base = f"{client.CLIENT_RELEASE_ORIGIN}/{tag}/"
+            if url == base + "SHA256SUMS":
+                destination.write_text(f"{expected}  {filename}\n")
+            else:
+                self.assertEqual(url, base + filename)
+                destination.write_bytes(data)
+            return checksum
+
+        python = self.home / "stable python/python3.12"
+
+        def run(args, **options):
+            self.assertEqual(args[:2], [str(python), "-I"])
+            self.assertEqual(args[3:], ["--target", str(target)])
+            self.assertEqual(Path(args[2]).read_bytes(), installer)
+            self.assertEqual(options["cwd"].name, prefix)
+            self.assertEqual(options["stdin"], client.subprocess.DEVNULL)
+            command.parent.mkdir(parents=True, mode=0o700)
+            command.write_text("#!/bin/sh\nexit 0\n")
+            command.chmod(0o700)
+            marker = target / "installation.json"
+            marker.write_bytes(
+                client.json_bytes(
+                    {
+                        "schema_version": 1,
+                        "release": version,
+                        "architecture": "arm64",
+                        "distribution_sha256": client.digest(client.json_bytes(manifest)),
+                    }
+                )
+            )
+            marker.chmod(0o600)
+            return client.subprocess.CompletedProcess(args, 0)
+
+        with (
+            patch.object(client, "CLIENT_RELEASE_TAG", tag),
+            patch.object(client.sys, "platform", "darwin"),
+            patch.object(client.platform, "machine", return_value="arm64"),
+            patch.object(client, "stable_automation_python", return_value=python),
+            patch.object(client, "download_client_asset", side_effect=download),
+            patch.object(client.subprocess, "run", side_effect=run) as install,
+        ):
+            expected = "0" * 64
+            with self.assertRaisesRegex(
+                client.ConnectError, "automation_release_checksum_mismatch"
+            ):
+                client.prepare_automation_setup(self.home, {})
+            install.assert_not_called()
+            self.assertFalse(target.exists())
+            expected = checksum
+            self.assertEqual(client.prepare_automation_setup(self.home, {}), command)
+            self.assertEqual(client.installed_automation_setup(self.home), command)
+            self.assertEqual(len(fetched), 4)
+            install.assert_called_once()
+
+    def test_automation_archive_rejects_paths_and_links(self):
+        prefix = "synthetic-client"
+        for name, kind in (
+            (f"{prefix}/../outside", tarfile.REGTYPE),
+            (f"{prefix}/link", tarfile.SYMTYPE),
+        ):
+            with self.subTest(name=name):
+                archive_path = self.home / "client.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as archive:
+                    info = tarfile.TarInfo(name)
+                    info.type = kind
+                    info.linkname = "../outside"
+                    archive.addfile(info)
+                with self.assertRaisesRegex(
+                    client.ConnectError, "automation_release_archive_unsafe"
+                ):
+                    client.unpack_client_release(archive_path, self.home, prefix)
+                self.assertFalse((self.home / "outside").exists())
+
+    def test_automation_archive_bounds_decompression_before_extraction(self):
+        archive_path = self.home / "client.tar.gz"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            content = b"x" * 1024
+            info = tarfile.TarInfo("synthetic-client/file")
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+        with (
+            patch.object(client, "CLIENT_EXPANDED_LIMIT", 32),
+            self.assertRaisesRegex(client.ConnectError, "automation_release_archive_limit"),
+        ):
+            client.unpack_client_release(archive_path, self.home, "synthetic-client")
+        self.assertFalse((self.home / "synthetic-client").exists())
+
+    def test_automation_release_redirects_remain_on_github_https(self):
+        client.require_client_asset_url(
+            "https://release-assets.githubusercontent.com/asset?sig=synthetic"
+        )
+        for url in (
+            "http://github.com/file",
+            "https://github.com.example.invalid/file",
+            "https://github.com@untrusted.example.invalid/file",
+            "https://github.com:444/file",
+        ):
+            with (
+                self.subTest(url=url),
+                self.assertRaisesRegex(client.ConnectError, "automation_release_redirect_rejected"),
+            ):
+                client.require_client_asset_url(url)
 
     def test_lost_claim_response_retries_same_secret(self):
         self.remote.lose_claim = True

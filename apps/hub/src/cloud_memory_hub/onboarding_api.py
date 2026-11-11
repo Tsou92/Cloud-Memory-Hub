@@ -4,7 +4,9 @@ import base64
 import hashlib
 import html
 import json
+import re
 import shlex
+from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
 
 from starlette.responses import HTMLResponse, Response
@@ -19,11 +21,21 @@ PUBLIC_CONNECT_PATHS = frozenset(
     }
 )
 
+
+def _client_release_tag():
+    try:
+        release = version("cloud-memory-hub")
+    except PackageNotFoundError:
+        return None
+    return f"v{release}" if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release) else None
+
+
 PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>连接 Agent · Cloud Memory Hub</title><style>__STYLE__</style>
 <main><h1>把你的 Agent 连接到 Cloud Memory Hub</h1>
-<p>记忆保存在 NAS。这里只配置当前设备的 MCP 连接和使用说明，无须安装独立 App。</p>
+<p>记忆保存在 NAS。请在要共享的项目目录接入。
+受支持的 Claude Code 与 Codex 会自动共享该目录中的可见对话并接续，无须安装独立 App。</p>
 <p>请确保这台设备能访问你的 NAS，例如已加入同一个 Tailscale 网络。</p>
 <p id="notice" role="status">正在检查连接链接……</p>
 <label for="agent">你要使用的 Agent</label>
@@ -31,27 +43,28 @@ PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <option value="opencode">OpenCode</option><option value="hermes">Hermes</option>
 <option value="generic">其他支持 HTTP MCP 的 Agent</option></select>
 <h2>方法一：交给 Agent 安装</h2>
-<p>把下面这句话复制到选定的 Agent。它会运行同一个连接器，不需要你编辑配置。</p>
+<p>先在 Agent 中打开要共享的项目，再把下面的话交给它安装。</p>
 <textarea id="prompt" rows="5" readonly></textarea>
 <button id="copy-prompt">复制安装话术</button>
 <h2>方法二：运行一条命令</h2>
 <label for="platform">运行命令的位置</label>
 <select id="platform"><option value="unix">Mac / Linux 终端</option>
 <option value="windows">Windows PowerShell</option></select>
-<p>脚本会先检查连接、备份相关配置，再添加 MCP 和 Skill。缺少 Python 时会临时下载运行环境。</p>
+<p>请在要共享的项目目录运行。安装器会保留其他配置，准备 MCP、Skill 及受支持的项目自动化。
+缺少所需运行环境时会校验后安装。</p>
 <textarea id="command" rows="5" readonly></textarea>
 <button id="copy-command">复制命令</button>
-<p>配置完成后，按提示让 Agent 重新加载 MCP；当前已打开的会话可能需要重新连接。</p>
-<h2>确认可以使用</h2><ol><li>让 Agent 保存一条测试记忆。</li>
-<li>在另一设备连接同一项目，再让它读取这条记忆。</li></ol>
-<p>仅完成配对或显示 MCP 已连接，还不能代替这两步读写检查。</p>
+<p>按提示让 Agent 重新加载连接。Codex 需要首次审查并信任项目钩子。</p>
+<h2>开始接续</h2><p>自动化配置后，正常对话即可。另一端连接同一项目时先读摘要，需要细节再读原文。</p>
 <details><summary>Agent 安装说明与高级入口</summary>
 <p>只使用当前 Hub 提供的同源安装脚本。
 Mac/Linux 调用 /hub/install.sh，Windows 调用 /hub/install.ps1。
-脚本接受 --link 与 --agent（PowerShell 为 -Link 与 -Agent）。不要手工拼接或输出长期设备凭证。
+脚本接受 --link 与 --agent（PowerShell 为 -Link 与 -Agent）。
+项目自动化需绑定 --workspace。不要输出长期设备凭证。
 有 Python 3.11 以上时，可下载同源 /hub/connect.py，以隔离模式 python -I 执行同样参数。
 保留其他 MCP 连接；安装失败时重试原链接以恢复进度。没有合适适配器时选择 generic 生成私有配置。</p>
-<p>远程 MCP 提供共享记忆和交接工具；本地历史采集及离线补传使用高级连接器，需单独启用。</p>
+<p>项目自动化只采集绑定目录中接入后的用户消息和最终可见回答，断网时由本机队列补传。
+没有绑定目录或宿主不支持时，仅配置远程 MCP。</p>
 </details><p><a href="/">返回 NAS 管理页面</a></p></main>
 <script>__SCRIPT__</script></html>"""
 
@@ -236,7 +249,7 @@ function render() {
     + 'trap \'rm -f -- "$cmh_file"\' EXIT; '
     + __CMH_HUB_SHELL_FETCH__
     + 'cmh_fetch_hub "$1/hub/install.sh" "$cmh_file" '
-    + '&& sh "$cmh_file" --link "$2" --agent "$3"';
+    + '&& sh "$cmh_file" --link "$2" --agent "$3" --workspace "$PWD"';
   const windowsProgram = "& { $ErrorActionPreference = 'Stop'; "
     + __CMH_HUB_POWERSHELL_FETCH__
     + '$cmhFile = [IO.Path]::GetTempFileName(); try { Get-CmhHubFile -Uri '
@@ -250,8 +263,10 @@ function render() {
       + ' ' + shellQuote(link) + ' ' + agent;
   byId('command').value = valid ? command : '';
   byId('prompt').value = valid ? '请按此 Cloud Memory Hub 连接页的说明，使用官方连接器为 '
-    + byId('agent').selectedOptions[0].text + ' 安装 MCP 和 Skill，并验证连接：' + link
-    + '。保留其他配置，不要输出长期凭证；需要重新加载时告诉我。网络或代理问题请按 '
+    + byId('agent').selectedOptions[0].text
+    + ' 在我打开的项目目录安装 MCP、Skill 和受支持的自动接续：' + link
+    + '。只绑定当前项目目录；不能确认目录时仅配置 MCP，别采集其他项目。'
+    + '保留其他配置，不要输出长期凭证。网络或代理问题请按 '
     + 'https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md '
     + '排查，按诊断选择此 Hub 直连或代理，不改其他服务设置。' : '';
   byId('copy-prompt').disabled = !valid;
@@ -305,12 +320,20 @@ def public_connection_response(path: str, method: str, origin: str) -> Response:
     resource = files("cloud_memory_hub.onboarding")
     try:
         connector = resource.joinpath("connect.py").read_bytes()
+        release_tag = _client_release_tag()
+        connector = connector.replace(
+            b"CLIENT_RELEASE_TAG = None  # CMH_RELEASE_TAG_PLACEHOLDER",
+            f"CLIENT_RELEASE_TAG = {release_tag!r}".encode("ascii"),
+        )
         if path == "/hub/connect.py":
             return Response(connector, media_type="text/plain", headers=headers)
         if path not in {"/hub/install.sh", "/hub/install.ps1"}:
             return Response(status_code=404, headers=headers)
         content = resource.joinpath(path.rsplit("/", 1)[1]).read_text(encoding="utf-8")
         content = content.replace("__CMH_CONNECT_SHA256__", hashlib.sha256(connector).hexdigest())
+        content = content.replace(
+            "__CMH_CLIENT_RELEASE_TAG_SHELL__", shlex.quote(release_tag or "")
+        )
         content = content.replace("__CMH_HUB_SHELL_FETCH__", HUB_SHELL_FETCH)
         content = content.replace("__CMH_HUB_POWERSHELL_FETCH__", HUB_POWERSHELL_FETCH)
         content = content.replace("__CMH_ORIGIN_SHELL__", shlex.quote(origin))
