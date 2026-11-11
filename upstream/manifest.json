@@ -219,6 +219,11 @@
       "path": "patches/0043-hub-admin-credential-settings.patch",
       "scope": "administrator_credential_change_settings_with_reauthentication_saved_copy_guidance_and_unknown_result_recovery",
       "digest": "sha256:fd49cf130e28287c82452447454c27c1c25b489e0a5a42b2203c5372fd0640e4"
+    },
+    {
+      "path": "patches/0044-hub-console-usability-polish.patch",
+      "scope": "user_reviewed_hub_console_scroll_form_and_dark_control_polish_with_scoped_readable_provider_menus",
+      "digest": "sha256:03eccfb20ef37d712b8e67c2ad2daf9fa2c141af6417a91d5ca25018eb13b34a"
     }
   ]
 }

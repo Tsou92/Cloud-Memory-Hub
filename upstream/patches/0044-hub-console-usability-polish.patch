@@ -1,0 +1,262 @@
+diff --git a/memhub/apps/web/src/hub-console.css b/memhub/apps/web/src/hub-console.css
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -46,6 +46,15 @@
+   font-size: 14px;
+   color-scheme: dark;
+ }
++/* core-visual.css locks html/body/#root for the native shell; the Hub pages scroll the document. */
++:is(html, body, #root):has(.hub-console, .hub-start) {
++  height: auto;
++  min-height: 100%;
++  overflow: visible;
++}
++html:has(.hub-console, .hub-start) {
++  background: #0c1020;
++}
+ .hub-console {
+   min-height: 100vh;
+   background:
+@@ -66,8 +75,11 @@
+   cursor: pointer;
+ }
+ .hub-console button:disabled {
++  cursor: not-allowed;
++  opacity: 0.55;
++}
++.hub-console button[aria-busy="true"] {
+   cursor: wait;
+-  opacity: 0.55;
+ }
+ .hub-console a {
+   color: #c0afff;
+@@ -99,6 +111,8 @@
+   z-index: 30;
+   display: flex;
+   flex-direction: column;
++  overflow-y: auto;
++  overscroll-behavior: contain;
+   background: linear-gradient(180deg, #101426, #0d1121 70%);
+   border-right: 1px solid rgba(135, 143, 192, 0.14);
+ }
+@@ -985,16 +999,62 @@
+   color: #edf0fa;
+   background: #141a2d;
+ }
+-.hub-content form:not(.model-form),
+-.hub-pairing label {
++/* Field label sits above its control; the submit button lines up with the control, not the label. */
++.hub-content form:not(.model-form) {
+   display: flex;
+   flex-wrap: wrap;
++  align-items: flex-end;
++  gap: 10px 12px;
++  margin: 16px 0;
++}
++.hub-content form:not(.model-form) > label:not(:has(> input[type="checkbox"])),
++.hub-pairing label:not(:has(> input[type="checkbox"])) {
++  display: flex;
++  flex-direction: column;
++  align-items: stretch;
++  gap: 8px;
++  min-width: 0;
++  margin: 16px 0;
++}
++.hub-content form:not(.model-form) > label:not(:has(> input[type="checkbox"])) {
++  flex: 0 1 320px;
++  margin: 0;
++}
++.hub-content form:not(.model-form) > label:has(textarea) {
++  flex-basis: 100%;
++}
++.hub-content form:not(.model-form) > label > :is(input:not([type="checkbox"]), select),
++.hub-pairing label > select {
++  width: 100%;
++  height: 44px;
++  min-width: 0;
++}
++.hub-content form:not(.model-form) textarea {
++  margin: 0;
++}
++.hub-pairing label:has(> input[type="checkbox"]) {
++  display: flex;
+   align-items: center;
+   gap: 10px;
+   margin: 16px 0;
+ }
+-.hub-content > .hub-card + .hub-card {
++.hub-pairing > label > select {
++  max-width: 480px;
++}
++.hub-pairing > .r6-button,
++.hub-pairing details > .r6-button {
++  margin: 0 10px 10px 0;
++}
++.hub-content > .hub-card + .hub-card,
++.hub-content > .hub-card + div > .hub-card:first-child,
++.hub-content > div > .hub-card + details,
++.hub-content > div > details > .hub-card,
++.hub-content > div > details > .hub-card + .hub-card {
+   margin-top: 20px;
++}
++.hub-content > div > details > summary {
++  padding: 4px 0;
++  color: var(--hub-muted);
+ }
+ .hub-answer,
+ .hub-content aside p,
+@@ -1083,8 +1143,42 @@
+   border-color: #454b68;
+   color: #b7bed5;
+ }
+-.hub-console .r6-button:hover {
++.hub-console .r6-button {
++  border-radius: 8px;
++}
++.hub-console button.r6-button:not([data-variant="primary"]):hover:not(:disabled) {
+   background: #49415f;
++  border-color: #8a7fb0;
++  color: #f1ecff;
++}
++.hub-console button.r6-button[data-variant="primary"] {
++  border-color: #b9a2ff;
++  color: #17132b;
++}
++.hub-console button.r6-button[data-variant="primary"]:hover:not(:disabled) {
++  background: #c2adff;
++}
++/* r6-controls paints disabled/quiet-hover states for the light desktop theme. */
++.hub-console button.r6-button:disabled,
++.hub-content button:not([class]):disabled {
++  background: #232840;
++  border-color: #373d58;
++  color: #7d84a3;
++  box-shadow: none;
++  opacity: 1;
++}
++.hub-console button.r6-button[data-variant="quiet"]:disabled {
++  background: transparent;
++  border-color: transparent;
++}
++.hub-console button.r6-button[data-variant="quiet"]:hover:not(:disabled) {
++  background: #2c3250;
++  border-color: #5a6188;
++  border-radius: 8px;
++  color: #eef0fa;
++}
++.hub-content button:not([class]) {
++  border-radius: 8px;
+ }
+ .hub-console .r6-settings,
+ .hub-console .r6-settings__section,
+@@ -1345,6 +1439,30 @@
+ }
+ .hub-console .r6-settings .r6-settings-layout > nav {
+   min-height: 440px;
++  margin: 0;
++}
++.hub-console .r6-settings .r6-settings-content {
++  min-height: 440px;
++}
++.hub-console .r6-settings .r6-model-actions > .r6-button:has(> .r6-button-label > svg:only-child) {
++  width: 44px;
++  height: 44px;
++  padding: 0;
++}
++/* Backup schedule form stacks its rows instead of joining the generic inline form. */
++.hub-content .r6-settings form:has(> .r6-setting-row) {
++  display: block;
++}
++.hub-content .r6-settings form:has(> .r6-setting-row) > .r6-model-actions {
++  margin-top: 0;
++}
++.hub-content .r6-settings form:has(> .r6-setting-row) > .r6-model-actions > .r6-field {
++  flex: 0 1 220px;
++}
++.hub-content .r6-settings form:has(> .r6-setting-row) > .r6-setting-row {
++  border-bottom: 0;
++  min-height: 0;
++  padding-bottom: 16px;
+ }
+ .hub-console .r6-settings .r6-settings-layout > nav > button {
+   color: #bfc5dd;
+@@ -1368,10 +1486,78 @@
+   border-color: #373d58;
+ }
+ .hub-console .r6-settings .model-form input:not([type="checkbox"]),
+-.hub-console .r6-settings .model-form select {
++.hub-console .r6-settings .model-form select,
++.hub-console .r6-settings .model-form button.om-option-menu-button,
++.hub-console .r6-settings .model-form button.om-option-menu-button:hover:not(:disabled) {
+   background: #12192d;
+   color: #eef0fa;
+   border-color: #454b68;
++}
++/* Paired columns: labels may wrap differently, so fix control height and align rows to the top. */
++.hub-console .r6-settings .model-form {
++  align-items: start;
++}
++.hub-console .r6-settings .model-form > label,
++.hub-console .r6-settings .model-form > .model-form-field {
++  grid-template-rows: auto 54px;
++  align-content: start;
++}
++.hub-console .r6-settings .model-form input:not([type="checkbox"]),
++.hub-console .r6-settings .model-form select,
++.hub-console .r6-settings .model-form .om-option-menu-button,
++.hub-console .r6-settings .model-form .model-form-field > button {
++  height: 54px;
++  font-weight: 400;
++}
++.hub-console .om-option-menu-button::after {
++  border-color: #b4b8d0;
++}
++.hub-console .om-option-menu-panel {
++  background: #1a2035;
++  border-color: #454b68;
++  color: #eef0fa;
++}
++.hub-console .model-form .om-option-menu-panel [role="option"] {
++  background: transparent;
++  color: #eef0fa;
++}
++.hub-console .model-form .om-option-menu-panel [role="option"]:hover:not(:disabled),
++.hub-console .model-form .om-option-menu-panel [role="option"][aria-selected="true"] {
++  background: #35324d;
++  color: #ece5ff;
++}
++.hub-console .model-form input[type="checkbox"] {
++  accent-color: #a18be6;
++}
++/* Bare buttons inside the model form still carry the light desktop palette. */
++.hub-console .model-form button:not([class]):not([role="option"]),
++.hub-console .r6-settings .model-form .form-submit > button {
++  background: #a78bfa;
++  border-color: #b9a2ff;
++  color: #17132b;
++}
++.hub-console .model-form button:not([class]):not([role="option"]):hover:not(:disabled),
++.hub-console .r6-settings .model-form .form-submit > button:hover:not(:disabled) {
++  background: #c2adff;
++}
++.hub-console .model-form button.quiet {
++  background: #302c46;
++  border: 1px solid #686080;
++  color: #e4dbff;
++}
++.hub-console .model-form button.quiet:hover:not(:disabled) {
++  background: #49415f;
++}
++.hub-console .model-form .model-advanced > button.quiet {
++  background: transparent;
++  border-color: transparent;
++  color: #b7bed5;
++}
++.hub-console .r6-settings .model-form button:disabled {
++  background: #232840;
++  border-color: #373d58;
++  color: #7d84a3;
++  opacity: 1;
+ }
+ .hub-console .r6-settings .r6-setting-row p,
+ .hub-console .r6-settings .r6-setting-row > span,
