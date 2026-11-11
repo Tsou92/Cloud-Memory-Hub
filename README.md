@@ -4,7 +4,7 @@
 
 服务通过 **Docker 部署在自己的 NAS**，电脑无需安装独立 App。
 
-在电脑运行一条命令，即可部署 NAS 服务。然后在后台创建共享项目并配对设备。
+在电脑运行一条命令，即可部署到 NAS 或本机 Docker。然后在后台创建共享项目并配对设备。
 
 [![最新发行版](https://img.shields.io/github/v/release/Tsou92/Cloud-Memory-Hub?style=flat-square&color=8b5cf6&logo=github)](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-64748b?style=flat-square)](LICENSE)
@@ -42,6 +42,25 @@
 3. 在后台创建项目，进入「连接 Agent」，用页面生成的命令或话术配对。
 
 安装器会识别 NAS 上的原生 Tailscale 或单个官方 Tailscale 容器。[首装参数与手动部署](docs/nas-installation.md) · [已有实例升级](docs/development-runtime.md#已有实例升级保持配置和身份)
+
+<details>
+<summary>没有 NAS？部署到本机 Docker</summary>
+
+启动 Docker Engine 或 Docker Desktop，并使用 Linux 容器。管理页默认是 `http://127.0.0.1:8800/hub`，仅本机可访问。
+
+**Mac / Linux 终端**
+
+```sh
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --local)
+```
+
+**Windows PowerShell**
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.ps1').Content)) -Local
+```
+
+</details>
 
 ## 🔌 三步使用
 

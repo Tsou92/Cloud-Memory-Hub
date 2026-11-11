@@ -1,5 +1,7 @@
 param(
     [string]$Nas,
+    [switch]$Local,
+    [ValidateRange(1024,65535)][int]$Port,
     [ValidateRange(1,65535)][int]$SshPort,
     [string]$Origin,
     [string]$TailscaleContainer,
@@ -23,10 +25,11 @@ if (-not $cmhCurl) {
     throw '需要 Windows 自带的 curl.exe。请更新系统或安装 curl 后重新运行。'
 }
 if (-not $VerifyOnly) {
-    if ([string]::IsNullOrWhiteSpace($Nas) -or $Nas -ceq 'USER@NAS') {
+    if ($Local -and $Nas) { throw '请选择 -Local 或 -Nas，分别部署到本机或 NAS。' }
+    if (-not $Local -and ([string]::IsNullOrWhiteSpace($Nas) -or $Nas -ceq 'USER@NAS')) {
         throw '请把 USER@NAS 换成 NAS 的 SSH 用户名和地址，或填写已有的 SSH 别名。'
     }
-    if (-not (Get-Command ssh.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+    if (-not $Local -and -not (Get-Command ssh.exe -CommandType Application -ErrorAction SilentlyContinue)) {
         throw '请在 Windows「设置 → 可选功能」安装 OpenSSH 客户端，然后重新运行同一条命令。'
     }
 }
@@ -68,6 +71,18 @@ function Get-CmhReleaseFile {
     throw ("下载 " + [IO.Path]::GetFileName($File) + " 失败（curl " + $status + "）。请检查 GitHub 网络后重试。")
 }
 
+function Get-CmhSha256 {
+    param([string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Get-CmhPython {
     foreach ($candidate in @('python3.12', 'python3', 'python', 'py')) {
         $command = Get-Command $candidate -CommandType Application -ErrorAction SilentlyContinue |
@@ -107,17 +122,20 @@ try {
     if (-not $shaMatch.Success) { throw '官方校验清单中的源码包校验值无效。' }
     $expectedSha = $shaMatch.Groups[1].Value
     Get-CmhReleaseFile "$cmhRelease/$cmhArchiveName" $archive 134217728 180
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash -ine $expectedSha) {
+    if ((Get-CmhSha256 $archive) -cne $expectedSha) {
         throw '源码包校验失败，安装已停止。'
     }
     Write-Host '发行源码包校验通过。'
 
-    $installerArgs = @('--nas', $Nas, '--tag', $cmhTag)
     if ($VerifyOnly) {
         $installerArgs = @('--help')
     } else {
+        $installerArgs = @('--tag', $cmhTag)
+        if ($Local) { $installerArgs += '--local' }
+        else { $installerArgs += @('--nas', $Nas) }
         if ($OpenAdmin) { $installerArgs += '--open-admin' }
-        else { $installerArgs += '--nas-only' }
+        elseif (-not $Local) { $installerArgs += '--nas-only' }
+        if ($PSBoundParameters.ContainsKey('Port')) { $installerArgs += @('--port', "$Port") }
         if ($PSBoundParameters.ContainsKey('SshPort')) { $installerArgs += @('--ssh-port', "$SshPort") }
         if ($Origin) { $installerArgs += @('--origin', $Origin) }
         if ($TailscaleContainer) { $installerArgs += @('--tailscale-container', $TailscaleContainer) }
@@ -135,6 +153,7 @@ root = Path(archive).parent / "source"
 root.mkdir()
 files = (
     "scripts/install_hub.py",
+    "scripts/install_local_docker.py",
     "scripts/install_nas.sh",
     "scripts/install_release_fetch.py",
     "scripts/install_first_device.py",
@@ -180,7 +199,7 @@ raise SystemExit(
         Write-Host '正在准备安装运行环境，无需管理员权限。'
         $uvArchive = Join-Path $cmhTemp 'uv.zip'
         Get-CmhReleaseFile "https://github.com/astral-sh/uv/releases/download/0.12.5/uv-$uvTarget.zip" $uvArchive 134217728 180
-        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $uvArchive).Hash -ine $uvSha) {
+        if ((Get-CmhSha256 $uvArchive) -cne $uvSha) {
             throw '运行环境校验失败，安装已停止。'
         }
         Add-Type -AssemblyName System.IO.Compression.FileSystem

@@ -7,7 +7,7 @@ cmh_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 cmh_python_check='import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'
 for cmh_arg in "$@"; do
     case "$cmh_arg" in
-        --nas-only|--open-admin)
+        --local|--nas-only|--open-admin)
             # These operations run only the dependency-free SSH installer.
             cmh_python_check='import sys; raise SystemExit(sys.version_info < (3, 11))'
             break

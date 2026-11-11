@@ -25,6 +25,17 @@ SSH_TARGET = re.compile(
 )
 SAFE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 READY_PREFIX = "CMH_NAS_READY\t"
+LOCAL_INSTALL_HELP = {
+    "local_docker_unavailable": "请安装并启动 Docker Desktop 或 Docker Engine。",
+    "local_docker_compose_unavailable": "请启用 Docker Compose v2 后重试。",
+    "local_docker_needs_linux": "请将 Docker 切换为 Linux 容器。",
+    "local_docker_context_remote": "请将 Docker 切换到本机上下文，再运行同一命令。",
+    "local_docker_project_conflict": "本机已有同名 Docker 项目，请打开已有后台或另选项目名。",
+    "local_port_busy": "本机端口已被占用，请加 --port 8890 后重试。PowerShell 使用 -Port 8890。",
+    "local_install_intent_conflict": "参数与已有部署不一致。请用原命令重试，或按升级指南操作。",
+    "local_release_unavailable": "无法取得或校验官方发行附件，请检查 GitHub 网络后重试。",
+    "local_docker_health_timeout": "容器启动后未通过健康检查，请查看 Docker 中的 Hub 状态。",
+}
 
 
 class InstallError(Exception):
@@ -49,16 +60,21 @@ def checked_name(value):
 
 
 def check_arguments(args, connector):
-    if args.nas == "USER@NAS":
-        raise InstallError("ssh_target_placeholder")
-    if not SSH_TARGET.fullmatch(args.nas):
-        raise InstallError("ssh_target_invalid")
+    if not args.local:
+        if args.nas == "USER@NAS":
+            raise InstallError("ssh_target_placeholder")
+        if not SSH_TARGET.fullmatch(args.nas):
+            raise InstallError("ssh_target_invalid")
     if not STABLE_TAG.fullmatch(args.tag) or not SAFE_NAME.fullmatch(args.compose_project):
         raise InstallError("release_or_compose_name_invalid")
     if not 1024 <= args.port <= 65535 or not (
         args.serve_port == 443 or 1024 <= args.serve_port <= 65535
     ):
         raise InstallError("port_invalid")
+    if args.local:
+        if args.agent or args.ssh_port or args.origin != "AUTO" or args.tailscale_container:
+            raise InstallError("local_mode_conflicts_with_nas_options")
+        return
     if args.ssh_port is not None and not 1 <= args.ssh_port <= 65535:
         raise InstallError("ssh_port_invalid")
     if args.origin != "AUTO" and not connector.valid_origin(args.origin).startswith("https://"):
@@ -83,7 +99,7 @@ def ssh_command(args, remote_command):
     return [*command, args.nas, remote_command]
 
 
-def read_admin_entry(args, connector, *, expected_origin=None, setup_only=False):
+def remote_admin_entry(args, setup_only):
     # Select a single running Hub owned by this Compose project, on the same
     # local daemon as the installer. The container reads its own private file.
     remote = "\n".join(
@@ -101,13 +117,33 @@ def read_admin_entry(args, connector, *, expected_origin=None, setup_only=False)
             + (" --setup-only" if setup_only else ""),
         ]
     )
+    return remote_script(args, remote, "admin_entry.py", private=True)
+
+
+def read_admin_entry(args, connector, *, expected_origin=None, setup_only=False):
     try:
-        result = remote_script(args, remote, "admin_entry.py", private=True)
+        if args.local:
+            installer = load_local_installer()
+            home = (args.home or Path.home()).resolve(strict=True)
+            expected_origin = f"http://127.0.0.1:{args.port}"
+            try:
+                result = installer.local_admin_entry(
+                    args,
+                    home=home,
+                    script=(ROOT / "scripts/admin_entry.py").read_bytes(),
+                    setup_only=setup_only,
+                )
+            except installer.LocalInstallError as error:
+                raise InstallError(str(error)) from None
+        else:
+            result = remote_admin_entry(args, setup_only)
         if len(result) > 1024:
             raise ValueError
         entry = connector.parse_json(result)
         origin = connector.valid_origin(entry["origin"])
-        if not origin.startswith("https://") or (expected_origin and origin != expected_origin):
+        if (expected_origin and origin != expected_origin) or (
+            not args.local and not origin.startswith("https://")
+        ):
             raise ValueError
         if setup_only and set(entry) == {"origin"}:
             return origin, "ready", ""
@@ -228,6 +264,15 @@ def install_nas(args, connector, staging=""):
 def load_release_fetcher():
     spec = importlib.util.spec_from_file_location(
         "cmh_install_release_fetch", ROOT / "scripts/install_release_fetch.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_local_installer():
+    spec = importlib.util.spec_from_file_location(
+        "cmh_install_local", ROOT / "scripts/install_local_docker.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -428,8 +473,10 @@ def show_client_result(result, agent):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="首次安装 NAS Hub 并接入电脑当前项目。")
-    parser.add_argument("--nas", required=True, help="已有 SSH 别名，或 用户名@NAS地址")
+    parser = argparse.ArgumentParser(description="在本机 Docker 或 NAS 部署 Cloud Memory Hub。")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--nas", help="已有 SSH 别名，或 用户名@NAS地址")
+    target.add_argument("--local", action="store_true", help="直接部署到本机 Docker")
     parser.add_argument("--ssh-port", type=int, help="SSH 端口，默认沿用本机 SSH 配置")
     installation = parser.add_mutually_exclusive_group()
     installation.add_argument(
@@ -444,7 +491,7 @@ def main(argv=None):
     parser.add_argument("--assets-dir", type=Path, help="使用已下载的官方发行附件目录")
     parser.add_argument("--install-dir", default="cloud-memory-hub-install", help="NAS 新安装目录")
     parser.add_argument("--compose-project", default="cloud-memory-hub", help="NAS Compose 项目名")
-    parser.add_argument("--port", type=int, default=8800, help="NAS 回环端口")
+    parser.add_argument("--port", type=int, default=8800, help="回环端口")
     parser.add_argument("--origin", default="AUTO", help="已有 HTTPS 入口，默认用 Tailscale Serve")
     parser.add_argument("--serve-port", type=int, default=8443, help="Tailscale 私网 HTTPS 端口")
     parser.add_argument(
@@ -461,6 +508,17 @@ def main(argv=None):
         check_arguments(args, connector)
         if args.open_admin:
             open_admin_entry(args, connector)
+            return 0
+        if args.local:
+            installer = load_local_installer()
+            home = (args.home or Path.home()).resolve(strict=True)
+            try:
+                origin = installer.deploy_local(args, home=home, fetcher=load_release_fetcher())
+            except installer.LocalInstallError as error:
+                raise InstallError(str(error)) from None
+            print("本机 Docker 已就绪。管理页面：" + origin + "/hub", flush=True)
+            if args.home is None:
+                offer_admin_setup(args, connector, origin)
             return 0
         if args.nas_only:
             print("正在通过 SSH 安装 NAS 服务…", flush=True)
@@ -499,7 +557,11 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 1
-        print(f"安装尚未完成（{error}）。处理提示后可重跑同一命令。", file=sys.stderr)
+        if str(error) == "local_mode_conflicts_with_nas_options":
+            print("本机 Docker 模式只需 --local；请从后台连接 Agent。", file=sys.stderr)
+            return 1
+        guidance = LOCAL_INSTALL_HELP.get(str(error), "处理提示后可重跑同一命令。")
+        print(f"安装尚未完成（{error}）。{guidance}", file=sys.stderr)
         return 1
     except (OSError, UnicodeError, subprocess.SubprocessError):
         print("安装尚未完成。请检查 SSH、网络和运行环境后重试。", file=sys.stderr)

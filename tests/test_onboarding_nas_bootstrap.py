@@ -19,6 +19,7 @@ PREFIX = f"cloud-memory-hub-{TAG}"
 ARCHIVE = f"{PREFIX}-source.tar.gz"
 FILES = (
     "scripts/install_hub.py",
+    "scripts/install_local_docker.py",
     "scripts/install_nas.sh",
     "scripts/install_release_fetch.py",
     "scripts/install_first_device.py",
@@ -77,7 +78,9 @@ function Get-Command {
     Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
 }
 $script = [scriptblock]::Create([IO.File]::ReadAllText($env:CMH_FIXTURE_BOOTSTRAP))
-if ($env:CMH_FIXTURE_DEPLOY -eq '1') {
+if ($env:CMH_FIXTURE_DEPLOY -eq 'local') {
+    & $script -Local -Port 8890
+} elseif ($env:CMH_FIXTURE_DEPLOY -eq '1') {
     & $script -Nas 'nas-fixture' -SshPort 2222 `
         -Origin 'https://hub.example.invalid' -TailscaleContainer 'edge'
 } else {
@@ -117,7 +120,7 @@ class PowerShellNASBootstrapTests(unittest.TestCase):
         digest = "0" * 64 if bad_checksum else hashlib.sha256(archive.read_bytes()).hexdigest()
         (self.root / "SHA256SUMS").write_text(f"{digest}  {ARCHIVE}\n", encoding="ascii")
 
-    def run_entrypoint(self, *, retry=False, deploy=False, executable=POWERSHELL):
+    def run_entrypoint(self, *, retry=False, deploy="0", executable=POWERSHELL):
         return subprocess.run(
             [
                 executable,
@@ -137,7 +140,7 @@ class PowerShellNASBootstrapTests(unittest.TestCase):
                 "CMH_FIXTURE_MARKER": str(self.marker),
                 "CMH_FIXTURE_TRACE": str(self.trace),
                 "CMH_FIXTURE_RETRY": "1" if retry else "0",
-                "CMH_FIXTURE_DEPLOY": "1" if deploy else "0",
+                "CMH_FIXTURE_DEPLOY": deploy,
             },
             text=True,
             encoding="utf-8",
@@ -169,16 +172,16 @@ class PowerShellNASBootstrapTests(unittest.TestCase):
 
     def assert_nas_only_options_are_forwarded(self, executable):
         self.release()
-        result = self.run_entrypoint(deploy=True, executable=executable)
+        result = self.run_entrypoint(deploy="1", executable=executable)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(self.marker.read_text(encoding="utf-8"))
         self.assertEqual(
             report["args"],
             [
-                "--nas",
-                "nas-fixture",
                 "--tag",
                 TAG,
+                "--nas",
+                "nas-fixture",
                 "--nas-only",
                 "--ssh-port",
                 "2222",
@@ -192,6 +195,14 @@ class PowerShellNASBootstrapTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows-only deployment branch")
     def test_nas_only_options_are_forwarded_on_windows(self):
         self.assert_nas_only_options_are_forwarded(POWERSHELL)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-only deployment branch")
+    def test_local_deployment_never_probes_ssh(self):
+        self.release()
+        result = self.run_entrypoint(deploy="local")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(self.marker.read_text(encoding="utf-8"))
+        self.assertEqual(report["args"], ["--tag", TAG, "--local", "--port", "8890"])
 
     @unittest.skipUnless(WINDOWS_POWERSHELL, "Windows PowerShell 5.1 is required")
     def test_windows_powershell_51_forwards_nas_only_options(self):

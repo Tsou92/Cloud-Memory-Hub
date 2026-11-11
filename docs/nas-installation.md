@@ -36,6 +36,24 @@ NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Ta
 
 首装完成后，安装器会打开初始化页。输入 `admin`，再设定自己的新密码。支持短密码、中文和空格。需要重新打开管理员入口时，Mac/Linux 把 `--nas-only` 换成 `--open-admin`，Windows 在命令末尾加 `-OpenAdmin`。
 
+## 部署到本机 Docker
+
+启动 Docker Engine 或 Docker Desktop，使用 Linux 容器。发行镜像是 Linux amd64。Apple 芯片等 ARM 主机需要 Docker 支持运行 amd64 容器。在任意目录执行对应命令，也可把命令交给 Agent 原样执行一次。
+
+**Mac / Linux 终端**
+
+```sh
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --local)
+```
+
+**Windows PowerShell**
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.6/scripts/bootstrap-install.ps1').Content)) -Local
+```
+
+默认管理地址是 `http://127.0.0.1:8800/hub`。服务和端口仅供本机访问，不需要 SSH 或 Tailscale。端口已被占用时，Mac/Linux 在右括号前加 `--port 8890`，Windows 在末尾加 `-Port 8890`。重新打开管理员入口，在同一目标命令加 `--open-admin` 或 `-OpenAdmin`。
+
 ## 把其他设备接入已部署的 Hub
 
 在后台选择要共享的项目，进入「连接 Agent」，为目标设备生成一次性链接。把页面上的一句话发给 Agent，或在目标设备运行页面生成的命令。

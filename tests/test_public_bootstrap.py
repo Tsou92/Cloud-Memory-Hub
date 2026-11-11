@@ -15,6 +15,7 @@ SOURCE = f"{PREFIX}-source.tar.gz"
 FILES = (
     "scripts/install-hub",
     "scripts/install_hub.py",
+    "scripts/install_local_docker.py",
     "scripts/install_nas.sh",
     "scripts/install_release_fetch.py",
     "scripts/install_first_device.py",

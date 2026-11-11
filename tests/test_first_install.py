@@ -24,6 +24,7 @@ class FirstInstallTests(unittest.TestCase):
     def setUp(self):
         self.connector = install.load_connector()
         self.args = SimpleNamespace(
+            local=False,
             nas="nas-alias",
             ssh_port=None,
             tag="v0.1.4",
@@ -219,6 +220,37 @@ class FirstInstallTests(unittest.TestCase):
             )
         browser.assert_called_once_with(ORIGIN + "/hub/setup#proof=" + proof)
         self.assertNotIn(proof, output.getvalue())
+
+    def test_local_install_bypasses_ssh_and_client_pairing(self):
+        origin = "http://127.0.0.1:8890"
+        with (
+            patch.object(install, "load_local_installer") as installer,
+            patch.object(install, "deploy") as nas,
+            patch.object(install, "install_client") as client,
+            patch.object(install.os, "umask"),
+            patch.object(install, "offer_admin_setup") as setup,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            installer.return_value.deploy_local.return_value = origin
+            self.assertEqual(install.main(["--local", "--port", "8890"]), 0)
+        self.assertIn(origin + "/hub", output.getvalue())
+        nas.assert_not_called()
+        client.assert_not_called()
+        self.assertEqual(setup.call_args.args[-1], origin)
+
+    def test_local_admin_entry_requires_exact_loopback_origin(self):
+        self.args.local = True
+        with patch.object(install, "load_local_installer") as installer:
+            entry = installer.return_value.local_admin_entry
+            entry.return_value = json.dumps({"origin": ORIGIN, "proof": "a" * 64}).encode()
+            with self.assertRaisesRegex(install.InstallError, "admin_entry_unavailable"):
+                install.read_admin_entry(self.args, self.connector, setup_only=True)
+            entry.return_value = b'{"origin":"http://127.0.0.1:8800"}'
+            self.assertEqual(
+                install.read_admin_entry(self.args, self.connector, setup_only=True),
+                ("http://127.0.0.1:8800", "ready", ""),
+            )
+            self.assertTrue(entry.call_args.kwargs["setup_only"])
 
     @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "requires Bash")
     def test_nas_discovers_one_official_tailscale_container_and_rejects_ambiguity(self):
