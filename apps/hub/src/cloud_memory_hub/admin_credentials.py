@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import re
@@ -16,6 +17,9 @@ from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
 ADMIN_SETUP_PREFIX = "cmh_admin_setup_v1_"
 _SETUP_TOKEN = re.compile(ADMIN_SETUP_PREFIX + r"[A-Za-z0-9_-]{64}")
 _SETUP_PROOF_DOMAIN = b"cloud-memory-hub/administrator/setup/v1"
+_PASSWORD_RECORD_PREFIX = "cmh_admin_password_v1_"  # pragma: allowlist secret -- format prefix
+_PASSWORD_RECORD = re.compile(_PASSWORD_RECORD_PREFIX + r"([0-9a-f]{32})_([0-9a-f]{64})")
+_PASSWORD_ROUNDS = 600_000
 
 
 def new_initial_admin_token() -> str:
@@ -39,13 +43,26 @@ class AdminCredentialError(Exception):
         super().__init__(code)
 
 
-def valid_new_credential(value: object) -> bool:
+def _legacy_bearer_format(value: str) -> bool:
     return (
-        isinstance(value, str)
-        and 32 <= len(value) <= 256
+        32 <= len(value) <= 256
         and not value.startswith(ADMIN_SETUP_PREFIX)
+        and not value.startswith(_PASSWORD_RECORD_PREFIX)
         and all(33 <= ord(character) <= 126 for character in value)
     )
+
+
+def _password_digest(value: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac(
+        "sha256", value.encode("utf-8", "surrogatepass"), salt, _PASSWORD_ROUNDS
+    )
+
+
+def _credential_record(password: str) -> str:
+    if _legacy_bearer_format(password):
+        return password
+    salt = secrets.token_bytes(16)
+    return f"{_PASSWORD_RECORD_PREFIX}{salt.hex()}_{_password_digest(password, salt).hex()}"
 
 
 class AdminCredentials:
@@ -82,6 +99,20 @@ class AdminCredentials:
                 and hmac.compare_digest(value, self._token)
             )
 
+    def valid_password(self, value: object) -> bool:
+        with self._lock:
+            if self.valid(value):
+                return True
+            if not self._available or not isinstance(value, str) or not value:
+                return False
+            record = _PASSWORD_RECORD.fullmatch(self._token)
+            if record is None:
+                return False
+            salt, expected = record.groups()
+            return hmac.compare_digest(
+                _password_digest(value, bytes.fromhex(salt)), bytes.fromhex(expected)
+            )
+
     def known_credentials(self) -> tuple[str, ...]:
         with self._lock:
             if not self._available:
@@ -105,6 +136,8 @@ class AdminCredentials:
             )
             if not password_matches or not proof_matches:
                 raise AdminCredentialError("invalid_initial_credential", 401)
+            if replacement == password:
+                raise AdminCredentialError("invalid_new_credential", 422)
             # The nested lock keeps verification and the durable replacement in one operation.
             self.change(self._token, replacement)
 
@@ -116,12 +149,11 @@ class AdminCredentials:
         with self._lock:
             if not self._available:
                 raise AdminCredentialError("admin_credential_unavailable", 503)
-            if not self.valid(current):
+            if not self.valid_password(current):
                 raise AdminCredentialError("current_credential_incorrect", 403)
-            if not valid_new_credential(replacement) or hmac.compare_digest(
-                replacement, self._token
-            ):
+            if not isinstance(replacement, str) or not replacement or replacement == current:
                 raise AdminCredentialError("invalid_new_credential", 422)
+            replacement = _credential_record(replacement)
             known = tuple(dict.fromkeys((*self._known, replacement)))
             try:
                 # Console reads add one opaque browser session to this set.

@@ -57,7 +57,7 @@ def test_setup_validates_both_inputs_before_durable_rotation(fresh_configuration
     for password, supplied in (("admin", "0" * 64), ("incorrect", proof), ("admin", "非ASCII")):
         with pytest.raises(AdminCredentialError, match="invalid_initial_credential"):
             store.complete_initial_setup(password, supplied, NEW)
-    for rejected in ("admin", new_initial_admin_token()):
+    for rejected in ("", "admin", original.admin_token):
         with pytest.raises(AdminCredentialError, match="invalid_new_credential"):
             store.complete_initial_setup("admin", proof, rejected)
     assert fresh_configuration().admin_token == original.admin_token
@@ -75,8 +75,6 @@ def test_setup_validates_both_inputs_before_durable_rotation(fresh_configuration
     with pytest.raises(AdminCredentialError, match="initial_setup_not_pending"):
         reopened.complete_initial_setup("admin", proof, OTHER)
     assert reopened.valid(NEW)
-    with pytest.raises(AdminCredentialError, match="invalid_new_credential"):
-        reopened.change(NEW, new_initial_admin_token())
 
 
 def test_concurrent_initial_setup_consumes_proof_once(fresh_configuration):

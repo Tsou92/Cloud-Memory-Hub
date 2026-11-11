@@ -25,6 +25,7 @@ from cloud_memory_hub.onboarding_api import PUBLIC_CONNECT_PATHS, public_connect
 STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg"})
 ADMIN_CREDENTIAL_PATH = "/hub/v1/admin/credential"
 ADMIN_SETUP_PATH = "/hub/setup"
+AUTH_BODY_LIMIT = 4096
 
 AUTH_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -66,7 +67,7 @@ LOGIN_PAGE = _auth_page(
 {{error}}
 <form method="post" action="/hub/login"><label for="credential">管理员凭证</label>
 <input id="credential" name="credential" type="password" autocomplete="current-password"
-required maxlength="256"><button>登录</button></form>""",
+required><button>登录</button></form>""",
 )
 SETUP_PAGE = _auth_page("设置管理员密码", SETUP_FORM, f"<script>{SETUP_SCRIPT}</script>")
 SETUP_REQUIRED_PAGE = _auth_page(
@@ -79,10 +80,10 @@ SETUP_FINISHED_PAGE = _auth_page(
 )
 
 
-async def _read_auth_body(request: Request) -> bytearray | None:
+async def _read_auth_body(request: Request, limit: int = AUTH_BODY_LIMIT) -> bytearray | None:
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > 4096:
+        if len(body) + len(chunk) > limit:
             return None
         body.extend(chunk)
     return body
@@ -285,6 +286,8 @@ class CloudBoundary:
         body = await _read_auth_body(request)
         if body is None:
             return JSONResponse({"detail": "request_too_large"}, status_code=413)
+        if self._login_limited():
+            return JSONResponse({"detail": "login_rate_limited"}, status_code=429)
         try:
             value = json.loads(body)
         except (ValueError, UnicodeError):
@@ -323,17 +326,26 @@ class CloudBoundary:
             return self._login_error(request, "initial_setup_required", 409)
         if self._login_limited():
             return self._login_error(request, "login_rate_limited", 429)
-        body = await _read_auth_body(request)
+        content_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+        # Native form submission can percent-encode each byte into three bytes.
+        limit = (
+            AUTH_BODY_LIMIT * 3
+            if content_type == "application/x-www-form-urlencoded"
+            else AUTH_BODY_LIMIT
+        )
+        body = await _read_auth_body(request, limit)
         if body is None:
             return self._login_error(request, "request_too_large", 413)
+        if self._login_limited():
+            return self._login_error(request, "login_rate_limited", 429)
         try:
-            if request.headers.get("content-type", "").startswith("application/json"):
+            if content_type == "application/json":
                 value = json.loads(body).get("credential", "")
             else:
                 value = parse_qs(body.decode(), max_num_fields=4).get("credential", [""])[0]
         except (ValueError, UnicodeError, AttributeError):
             value = ""
-        if not isinstance(value, str) or not self._valid_token(value):
+        if not self.admin_credentials.valid_password(value):
             self.failed_logins.append(time.monotonic())
             return self._login_error(request, "invalid_credential", 401)
         return self._new_session(RedirectResponse("/", status_code=303))
@@ -359,6 +371,8 @@ class CloudBoundary:
         body = await _read_auth_body(request)
         if body is None:
             return JSONResponse({"detail": "request_too_large"}, status_code=413)
+        if self._login_limited():
+            return JSONResponse({"detail": "login_rate_limited"}, status_code=429)
         try:
             value = json.loads(body)
         except (ValueError, UnicodeError):
