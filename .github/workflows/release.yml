@@ -83,7 +83,7 @@ jobs:
           docker image inspect "$CMH_IMAGE" > "$RUNNER_TEMP/image-inspect.json"
           docker image save "$CMH_IMAGE" | gzip -n > "$RUNNER_TEMP/linux-artifact/cloud-memory-hub-$RELEASE_TAG-linux-amd64.tar.gz"
           python -m scripts.release_artifacts image --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --directory "$RUNNER_TEMP/linux-artifact" --inspect "$RUNNER_TEMP/image-inspect.json"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-linux
           path: ${{ runner.temp }}/linux-artifact/
@@ -122,7 +122,7 @@ jobs:
           python -m scripts.release_artifacts client --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --directory "$RUNNER_TEMP/mac-artifact" --unpack-to "$RUNNER_TEMP/client-final"
           python -I "$RUNNER_TEMP/client-final/cloud-memory-hub-client-$RELEASE_TAG-macos-arm64/install.py" --verify-only
           python -I "$RUNNER_TEMP/client-final/cloud-memory-hub-client-$RELEASE_TAG-macos-arm64/install.py" --target "$RUNNER_TEMP/client-installed"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-mac
           path: ${{ runner.temp }}/mac-artifact/
@@ -155,7 +155,7 @@ jobs:
           python -m scripts.release_artifacts assemble
           --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT"
           --directory "$RUNNER_TEMP/inputs" --output "$RUNNER_TEMP/release"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: verified-release
           path: ${{ runner.temp }}/release/
