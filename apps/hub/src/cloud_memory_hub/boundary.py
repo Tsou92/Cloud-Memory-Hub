@@ -428,7 +428,10 @@ class CloudBoundary:
     @staticmethod
     async def _respond(response, scope, receive, send, *, script_hash=None) -> None:
         response.headers["Cache-Control"] = "no-store"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        # same-origin, not no-referrer: Chrome sends `Origin: null` for form posts from a
+        # no-referrer page, which the exact Origin check rejects. Same-origin still sends
+        # nothing to other sites.
+        response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; style-src 'unsafe-inline'; "
