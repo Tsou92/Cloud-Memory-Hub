@@ -204,6 +204,9 @@ async def import_bundle(bundle, *, client_root=None, transport=None):
 
 
 _HOOK_TARGETS = {"claude": ".claude/settings.local.json", "codex": ".codex/hooks.json"}
+# DeepSeek Harness has no shell hooks. packages/dsh-plugin reads this home-relative
+# binding list and forwards its turn events to the same `dsh-hook` command.
+DSH_BINDINGS = ".cloud-memory-hub/dsh-capture.json"
 
 
 def _managed_hook_command(value):
@@ -249,6 +252,23 @@ def _merge_automation_hooks(raw, command):
     return json_bytes(document) if changed else raw
 
 
+def _merge_dsh_binding(raw, workspace, command):
+    document = json_config(raw) or {"schema_version": 1, "bindings": []}
+    bindings = document.get("bindings")
+    if document.get("schema_version") != 1 or type(bindings) is not list:
+        raise ClientSetupError("automation_configuration_conflict")
+    entry = {"workspace": str(workspace), "command": command}
+    for item in bindings:
+        if type(item) is not dict:
+            raise ClientSetupError("automation_configuration_conflict")
+        if item.get("workspace") == entry["workspace"]:
+            if item == entry:
+                return raw
+            raise ClientSetupError("automation_configuration_conflict")
+    bindings.append(entry)
+    return json_bytes(document)
+
+
 def _automation_agent_executable():
     command = Path(sys.executable).absolute().with_name("cloud-memory-agent")
     release = command.parent.parent.parent
@@ -265,7 +285,7 @@ def _automation_agent_executable():
 
 def install_automation(config_file, *, agent, workspace, home=None, executable=None):
     """Install the selected project's native hooks using its existing local queue."""
-    if agent not in _HOOK_TARGETS:
+    if agent not in _HOOK_TARGETS and agent != "dsh":
         raise ClientSetupError("automation_agent_unsupported")
     home = Path(home or Path.home()).absolute()
     try:
@@ -283,17 +303,16 @@ def install_automation(config_file, *, agent, workspace, home=None, executable=N
             or any(ord(char) < 32 or ord(char) == 127 for char in str(command) + str(config_file))
         ):
             raise ClientSetupError("automation_runtime_unavailable")
-        invocation = shlex.join(
-            [
-                str(command),
-                "--config-file",
-                str(config_file),
-                f"{agent}-hook",
-                "--workspace",
-                str(project),
-            ]
-        )
-        target = project / _HOOK_TARGETS[agent]
+        argv = [
+            str(command),
+            "--config-file",
+            str(config_file),
+            f"{agent}-hook",
+            "--workspace",
+            str(project),
+        ]
+        invocation = shlex.join(argv)
+        target = home / DSH_BINDINGS if agent == "dsh" else project / _HOOK_TARGETS[agent]
         directory = ensure_dir(config_file.parent / "automation", private=True)
         binding = {
             "schema_version": 1,
@@ -313,7 +332,11 @@ def install_automation(config_file, *, agent, workspace, home=None, executable=N
             installation = Installation(directory, state)
             if agent not in state["plans"]:
                 original = read_file(target)
-                proposed = _merge_automation_hooks(original, invocation)
+                proposed = (
+                    _merge_dsh_binding(original, project, argv)
+                    if agent == "dsh"
+                    else _merge_automation_hooks(original, invocation)
+                )
                 installation.plan(agent, [(target, proposed, original)])
             installation.apply(agent, {target})
     except ConnectError as error:

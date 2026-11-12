@@ -1,0 +1,22 @@
+{
+  "name": "@cloud-memory-hub/dsh-capture",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Automatic Cloud Memory Hub capture and recall for DeepSeek Harness sessions",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "cordis.patch.yml"],
+  "scripts": {
+    "test": "node --test test/plugin.test.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

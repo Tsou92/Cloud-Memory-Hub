@@ -193,6 +193,42 @@ def test_automation_merges_only_the_bound_project_and_keeps_the_queue(
     assert target.read_text() == concurrent
 
 
+def test_dsh_automation_records_an_exact_workspace_binding(tmp_path, monkeypatch):
+    import cloud_memory_hub.client_setup as setup
+
+    _, raw, config = install(tmp_path)
+    workspace = tmp_path / "dsh project"
+    workspace.mkdir()
+    executable = tmp_path / "cloud-memory-agent"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    monkeypatch.setattr(setup.sys, "platform", "linux")
+    kwargs = {"agent": "dsh", "workspace": workspace, "home": tmp_path, "executable": executable}
+    assert install_automation(config, **kwargs)["status"] == "configured"
+    target = tmp_path / setup.DSH_BINDINGS
+    first = target.read_text()
+    assert raw["credential"] not in first
+    assert json.loads(first) == {
+        "schema_version": 1,
+        "bindings": [
+            {
+                "workspace": str(workspace),
+                "command": [
+                    str(executable),
+                    "--config-file",
+                    str(config),
+                    "dsh-hook",
+                    "--workspace",
+                    str(workspace),
+                ],
+            }
+        ],
+    }
+    assert install_automation(config, **kwargs)["status"] == "configured"
+    assert target.read_text() == first
+    assert not (workspace / ".claude").exists() and not (workspace / ".codex").exists()
+
+
 @pytest.mark.parametrize(
     "status,code,retryable",
     [

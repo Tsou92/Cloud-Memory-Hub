@@ -60,7 +60,7 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(prog="cloud-memory-agent")
     parser.add_argument("--config-file", type=Path, required=True)
-    hooks = {"claude-hook": "claude-code", "codex-hook": "codex"}
+    hooks = {"claude-hook": "claude-code", "codex-hook": "codex", "dsh-hook": "deepseek-harness"}
     parser.add_argument("command", choices=["init", "upgrade-outbox", *hooks, *COMMANDS])
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--backup-file", type=Path)

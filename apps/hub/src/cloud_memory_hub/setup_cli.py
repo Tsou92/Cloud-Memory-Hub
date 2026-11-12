@@ -39,7 +39,7 @@ def main():
     pairing.add_argument("--pairing-file", type=Path, required=True)
     pairing.add_argument("--client-root", type=Path)
     automation = commands.add_parser("automation", help="为当前项目安装自动采集与召回")
-    automation.add_argument("--agent", choices=["claude", "codex"], required=True)
+    automation.add_argument("--agent", choices=["claude", "codex", "dsh"], required=True)
     automation.add_argument("--workspace", type=Path, required=True)
     automation.add_argument(
         "--config-file", type=Path, help="复用已有配对，省略时从标准输入接收配对"
