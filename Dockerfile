@@ -30,7 +30,8 @@ RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
     src/HubConnections.test.tsx src/HubBackups.test.tsx src/hub-backups.test.ts \
     src/HubAdminCredential.test.tsx src/hub-admin-credential.test.ts \
     src/HubAgentConnect.test.tsx src/hub-invitation.test.ts \
-    src/HubDashboard.test.tsx src/HubNetwork.test.tsx src/hub-dashboard.test.ts
+    src/HubDashboard.test.tsx src/HubNetwork.test.tsx src/hub-dashboard.test.ts \
+    src/HubContext.preview.test.tsx
 
 FROM source AS python-build
 RUN python -m pip install --no-cache-dir uv==0.12.5

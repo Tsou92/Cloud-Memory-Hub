@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TAG = "v0.1.6"
+TAG = "v0.1.7"
 PREFIX = f"cloud-memory-hub-{TAG}"
 SOURCE = f"{PREFIX}-source.tar.gz"
 FILES = (
@@ -33,7 +33,7 @@ while [ "$#" -gt 0 ]; do
         --proto-redir) [ "$2" = '=https' ]; proto_redir=yes; shift ;;
         --max-time) maximum_time=$2; shift ;;
         -o) destination=$2; shift ;;
-        https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/v0.1.6/*) member=${1##*/} ;;
+        https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/v0.1.7/*) member=${1##*/} ;;
     esac
     shift
 done

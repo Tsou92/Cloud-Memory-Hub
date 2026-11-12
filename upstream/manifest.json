@@ -234,6 +234,11 @@
       "path": "patches/0046-hub-admin-password-input.patch",
       "scope": "allow_nonempty_verbatim_admin_password_inputs_in_settings_and_remove_password_format_policy",
       "digest": "sha256:97a8945a3218c6d07e3267a607e31691382cc527e1a370e11afed95a9eba2415"
+    },
+    {
+      "path": "patches/0047-hub-admin-ui-refresh.patch",
+      "scope": "hub_admin_console_layout_interaction_and_model_setup_feedback_from_user_ui_copy",
+      "digest": "sha256:6e9caf1bd4f4bcf017dd412a58be347b12da54e70368b3df34888cd207eb691b"
     }
   ]
 }
