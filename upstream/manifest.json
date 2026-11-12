@@ -239,6 +239,11 @@
       "path": "patches/0047-hub-admin-ui-refresh.patch",
       "scope": "hub_admin_console_layout_interaction_and_model_setup_feedback_from_user_ui_copy",
       "digest": "sha256:6e9caf1bd4f4bcf017dd412a58be347b12da54e70368b3df34888cd207eb691b"
+    },
+    {
+      "path": "patches/0048-hub-console-state-clarity.patch",
+      "scope": "remember_selected_project_tie_service_status_to_real_state_explain_empty_memory_library_and_offer_relogin",
+      "digest": "sha256:342aa2a5d48fc3b0e9d8a178a7c8284728b9913194d8d8e82c43a3cfcd8980d2"
     }
   ]
 }

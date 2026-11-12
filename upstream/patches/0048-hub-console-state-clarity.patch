@@ -1,0 +1,355 @@
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -136,6 +136,8 @@
+   fetcher = vi.fn(handler);
+   vi.stubGlobal("fetch", fetcher);
+   local.mockClear();
++  // Each test starts with no remembered project.
++  localStorage.clear();
+ });
+ afterEach(() => {
+   cleanup();
+--- a/memhub/apps/web/src/SdkMemoryLibrary.tsx
++++ b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+@@ -54,6 +54,7 @@
+   detailOnly = false,
+   renderActions,
+   onOpenSource,
++  renderEmpty,
+ }: {
+   active: boolean;
+   onChanged?(): void;
+@@ -63,6 +64,8 @@
+   detailOnly?: boolean;
+   renderActions?(memory: LibraryMemory): ReactNode;
+   onOpenSource?(sourceId: string): void;
++  /** Explains an empty first page instead of leaving a bare "本页 0 条". */
++  renderEmpty?(): ReactNode;
+ }) {
+   const [status, setStatus] = useState<SdkMemoryStatus>("active");
+   const [offset, setOffset] = useState(0);
+@@ -269,6 +272,9 @@
+           {detailOnly ? "正在读取引用详情…" : "正在读取记忆库…"}
+         </p>
+       ) : null}
++      {!detailOnly && !busy && !error && !rows.length && renderEmpty
++        ? renderEmpty()
++        : null}
+       {!detailOnly && (
+         <>
+           <ul>
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -218,6 +218,14 @@
+   border-radius: 50%;
+   background: #69e4a3;
+   box-shadow: 0 0 7px #69e4a32b;
++}
++.hub-status-dot.is-offline {
++  background: #f0a8a0;
++  box-shadow: 0 0 7px #f0a8a030;
++}
++.hub-status-pill.is-offline {
++  color: #f0a8a0;
++  border-color: #f0a8a033;
+ }
+ .hub-nas-card dl {
+   margin: 14px 0 0;
+@@ -384,7 +392,16 @@
+   border-radius: 7px;
+   background: #7a5a281c;
+   line-height: 1.6;
++}
++.hub-inline-login {
++  margin-left: 10px;
++  color: #c5b1ff;
++  text-decoration: underline;
++  text-underline-offset: 2px;
+ }
++.hub-inline-login:hover {
++  color: #ded3ff;
++}
+ .hub-dashboard-heading {
+   display: flex;
+   align-items: center;
+@@ -2775,4 +2792,27 @@
+ }
+ .hub-network-card .hub-network__empty {
+   margin: auto;
++}
++.hub-library-empty {
++  padding: 16px 18px;
++  border: 1px solid #afb1d01f;
++  border-radius: 12px;
++  background: #ffffff05;
++  line-height: 1.7;
++  color: #b9c0d0;
++  font-size: 13px;
+ }
++.hub-library-empty strong {
++  color: #eef0fa;
++  font-size: 14px;
++}
++.hub-library-empty p {
++  margin: 6px 0 8px;
++}
++.hub-library-empty ul {
++  margin: 0 0 12px;
++  padding-left: 18px;
++}
++.hub-library-empty li + li {
++  margin-top: 4px;
++}
+--- a/memhub/apps/web/src/HubContext.preview.test.tsx
++++ b/memhub/apps/web/src/HubContext.preview.test.tsx
+@@ -37,6 +37,7 @@
+ afterEach(() => {
+   cleanup();
+   vi.unstubAllGlobals();
++  localStorage.clear();
+ });
+ 
+ describe("HubProvider preview auto-selection", () => {
+@@ -50,8 +51,11 @@
+     expect(await screen.findByText("当前:合成项目")).toBeTruthy();
+   });
+ 
+-  it("keeps manual selection for a real Hub without the preview marker", async () => {
+-    stubBootstrap(bootstrap());
++  it("does not auto-select between several real projects", async () => {
++    // Choice is real information: pick for the user only when there is nothing to choose.
++    stubBootstrap(
++      bootstrap({ projects: [project, { scope_id: "scope-2", display_name: "另一项目" }] }),
++    );
+     render(
+       <HubProvider>
+         <Probe />
+@@ -76,3 +80,57 @@
+     await waitFor(() => expect(screen.getByText("未选择")).toBeTruthy());
+   });
+ });
++
++describe("HubProvider project persistence", () => {
++  const second = { scope_id: "scope-2", display_name: "另一项目" };
++
++  it("auto-selects the only project on a real Hub", async () => {
++    stubBootstrap(bootstrap());
++    render(
++      <HubProvider>
++        <Probe />
++      </HubProvider>,
++    );
++    expect(await screen.findByText("当前:合成项目")).toBeTruthy();
++  });
++
++  it("restores the last project after a reload", async () => {
++    localStorage.setItem("cmh_hub_scope:instance-1", "scope-2");
++    stubBootstrap(bootstrap({ projects: [project, second] }));
++    render(
++      <HubProvider>
++        <Probe />
++      </HubProvider>,
++    );
++    expect(await screen.findByText("当前:另一项目")).toBeTruthy();
++  });
++
++  it("ignores a stored project that no longer exists", async () => {
++    localStorage.setItem("cmh_hub_scope:instance-1", "scope-gone");
++    stubBootstrap(bootstrap({ projects: [project, second] }));
++    render(
++      <HubProvider>
++        <Probe />
++      </HubProvider>,
++    );
++    await waitFor(() => expect(screen.getByText("未选择")).toBeTruthy());
++  });
++
++  it("persists a selection made in this page", async () => {
++    stubBootstrap(bootstrap({ projects: [project, second] }));
++    function Chooser() {
++      const { select } = useHub();
++      return <button type="button" onClick={() => select("scope-2")}>选第二个</button>;
++    }
++    render(
++      <HubProvider>
++        <Chooser />
++        <Probe />
++      </HubProvider>,
++    );
++    await waitFor(() => expect(screen.getByText("未选择")).toBeTruthy());
++    screen.getByText("选第二个").click();
++    expect(await screen.findByText("当前:另一项目")).toBeTruthy();
++    expect(localStorage.getItem("cmh_hub_scope:instance-1")).toBe("scope-2");
++  });
++});
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -90,6 +90,15 @@
+     error,
+   } = useHub();
+   const [view, setView] = useState<View>("home");
++  // Never claim a live connection we have not just observed: a stale green dot
++  // is how users end up blaming "one broken record" instead of the network.
++  const connectionLabel = error
++    ? "无法连接 NAS"
++    : loading
++      ? "正在连接…"
++      : "服务已连接";
++  const needsLogin = error === "登录已失效，请重新登录管理网页。" ||
++    error === "当前请求未获授权，请重新登录后重试。";
+   const [menuOpen, setMenuOpen] = useState(false);
+   const [compact, setCompact] = useState(
+     () => window.matchMedia?.("(max-width: 760px)").matches ?? false,
+@@ -192,7 +201,8 @@
+               <div>
+                 <strong>NAS 记忆中枢</strong>
+                 <span>
+-                  <i className="hub-status-dot" /> 管理服务已连接
++                  <i className={`hub-status-dot${error ? " is-offline" : ""}`} />{" "}
++                  {error ? "管理服务不可达" : "管理服务已连接"}
+                 </span>
+               </div>
+             </div>
+@@ -231,8 +241,11 @@
+             {menuOpen ? <X size={22} /> : <Menu size={22} />}
+           </button>
+           <div className="hub-topbar-status">
+-            <span className="hub-status-pill">
+-              <i className="hub-status-dot" /> 服务已连接
++            <span
++              className={`hub-status-pill${error ? " is-offline" : ""}`}
++              title={error || undefined}
++            >
++              <i className="hub-status-dot" /> {connectionLabel}
+             </span>
+             <span className="hub-version-pill">
+               NAS · {bootstrap.version ?? "Cloud Memory Hub"}
+@@ -295,6 +308,13 @@
+           {error ? (
+             <p role="alert" className="hub-shell-error">
+               {error}
++              {/* Retrying a dead session can only fail again, so offer the action
++                  that actually ends the loop instead of a retry button. */}
++              {needsLogin ? (
++                <a className="hub-inline-login" href="/hub/login">
++                  重新登录
++                </a>
++              ) : null}
+             </p>
+           ) : null}
+           {bootstrap.next_offset !== null ? (
+@@ -505,6 +525,27 @@
+             reader={readers.memory}
+             renderActions={actions}
+             onOpenSource={setSourceId}
++            renderEmpty={() => (
++              <div className="hub-library-empty" role="note">
++                <strong>记忆库还是空的。</strong>
++                <p>
++                  这并不等于连接失败。这里显示的是已由模型整理进长期记忆的条目；刚保存的原文会先出现在「历史原文」。
++                </p>
++                <ul>
++                  <li>还没有配置模型：原文会保留，但不会自动整理成长期记忆。</li>
++                  <li>刚发送的内容：整理需要一点时间，稍后刷新再看看。</li>
++                  <li>想先确认 NAS 已收到：打开「历史原文」核对。</li>
++                </ul>
++                <div className="hub-help-actions">
++                  <R6Button variant="quiet" onClick={() => onNavigate("history")}>
++                    查看历史原文
++                  </R6Button>
++                  <R6Button variant="quiet" onClick={() => onNavigate("settings")}>
++                    配置记忆整理模型
++                  </R6Button>
++                </div>
++              </div>
++            )}
+           />
+           <FirstSharedMemory onNavigate={onNavigate} />
+         </>
+--- a/memhub/apps/web/src/HubContext.tsx
++++ b/memhub/apps/web/src/HubContext.tsx
+@@ -29,24 +29,56 @@
+   if (!value) throw new Error("hub_context_required");
+   return value;
+ }
++
++/** Remember the chosen project across reloads, scoped to one Hub instance.
++ *  Losing it is a daily annoyance (every refresh drops back to "请选择一个项目")
++ *  but never a correctness issue: a stale id simply resolves to no project. */
++const scopeKey = (instanceId: string) => `cmh_hub_scope:${instanceId}`;
++function readStoredScope(instanceId: string): string {
++  try {
++    return localStorage.getItem(scopeKey(instanceId)) ?? "";
++  } catch {
++    return "";
++  }
++}
++function writeStoredScope(instanceId: string, scope: string) {
++  try {
++    if (scope) localStorage.setItem(scopeKey(instanceId), scope);
++    else localStorage.removeItem(scopeKey(instanceId));
++  } catch {
++    // Private windows and blocked storage: selection is simply per-page.
++  }
++}
++
+ export function HubProvider({ children }: { children: ReactNode }) {
+   const [bootstrap, setBootstrap] = useState<HubBootstrap | null>(null);
+-  const [scope, setScope] = useState("");
++  const [scope, setScopeState] = useState("");
+   const [offset, setOffset] = useState(0);
+-  // Auto-select only the single synthetic project in the local copy-only preview.
++  const instance = useRef<string | null>(null);
++  const select = (next: string) => {
++    setScopeState(next);
++    if (instance.current) writeStoredScope(instance.current, next);
++  };
++  const setScope = select;
++  // Restore the last project, or pick the only one when there is no choice to make.
+   useEffect(() => {
+-    if (
+-      bootstrap?.preview === "ui-copy-synthetic" &&
+-      bootstrap.projects.length === 1 &&
+-      !scope
+-    ) {
+-      setScope(bootstrap.projects[0].scope_id);
++    if (!bootstrap || scope) return;
++    const stored = readStoredScope(bootstrap.instance_id);
++    const known = [
++      ...bootstrap.projects.map((row) => row.scope_id),
++      bootstrap.global_scope.scope_id,
++    ];
++    if (stored && known.includes(stored)) {
++      setScopeState(stored);
++      return;
+     }
++    if (bootstrap.projects.length === 1) {
++      select(bootstrap.projects[0].scope_id);
++    }
+   }, [bootstrap, scope]);
+   const [revision, setRevision] = useState(0);
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState("");
+-  const instance = useRef<string | null>(null);
+   useEffect(() => {
+     void revision; // Explicit refresh retries an unchanged endpoint.
+     const controller = new AbortController();
+@@ -57,7 +89,8 @@
+         (next) => {
+           if (controller.signal.aborted) return;
+           if (offset > 0 && instance.current !== next.instance_id) {
+-            setScope("");
++            // A different Hub instance: the stored project belongs to the old one.
++            setScopeState("");
+             setBootstrap(null);
+             setError("服务实例已改变，请刷新项目列表后重新选择。");
+             return;
+@@ -82,7 +115,7 @@
+     return () => controller.abort();
+   }, [offset, revision]);
+   const refresh = () => {
+-    setScope("");
++    // Keep the stored project: a refresh is "reconnect", not "forget where I was".
+     setBootstrap(null);
+     setOffset(0);
+     setRevision((v) => v + 1);
