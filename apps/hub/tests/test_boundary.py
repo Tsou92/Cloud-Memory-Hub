@@ -91,6 +91,8 @@ def test_login_session_csrf_and_logout(tmp_path):
         ) as client:
             page = await client.get("/hub/login")
             assert "Cloud Memory Hub" in page.text
+            # A no-referrer page makes Chrome post the login form with `Origin: null`.
+            assert page.headers["referrer-policy"] == "same-origin"
             assert config.admin_token not in page.text
             assert (
                 await client.post("/hub/login", json={"credential": config.admin_token})

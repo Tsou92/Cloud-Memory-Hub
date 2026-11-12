@@ -85,7 +85,7 @@ def test_setup_uses_scoped_proof_and_rotates_before_issuing_session(tmp_path):
             page = await web.get(ADMIN_SETUP_PATH)
             assert page.status_code == 200
             assert page.headers["cache-control"] == "no-store"
-            assert page.headers["referrer-policy"] == "no-referrer"
+            assert page.headers["referrer-policy"] == "same-origin"
             csp = page.headers["content-security-policy"]
             script = re.search(r"<script>(.*?)</script>", page.text, re.DOTALL).group(1)
             script_digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
