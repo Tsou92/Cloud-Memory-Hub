@@ -1,0 +1,3710 @@
+diff --git a/memhub/apps/web/src/HubAgentConnect.test.tsx b/memhub/apps/web/src/HubAgentConnect.test.tsx
+index 2d52def..868cfa6 100644
+--- a/memhub/apps/web/src/HubAgentConnect.test.tsx
++++ b/memhub/apps/web/src/HubAgentConnect.test.tsx
+@@ -114,10 +114,10 @@ it("defaults to link onboarding while keeping JSON and authorization in a closed
+ it("copies Agent instructions without storing invitation secrets or issuing a local credential", async () => {
+   view();
+   await create();
+-  await userEvent.selectOptions(
++  await userEvent.click(
+     screen.getByRole("combobox", { name: "要连接的 Agent" }),
+-    "hermes",
+   );
++  await userEvent.click(screen.getByRole("option", { name: "Hermes" }));
+   await userEvent.click(
+     await screen.findByRole("button", { name: "复制给 Agent 的一句话" }),
+   );
+diff --git a/memhub/apps/web/src/HubAgentConnect.tsx b/memhub/apps/web/src/HubAgentConnect.tsx
+index a3e1eb9..6c6d0c6 100644
+--- a/memhub/apps/web/src/HubAgentConnect.tsx
++++ b/memhub/apps/web/src/HubAgentConnect.tsx
+@@ -1,4 +1,5 @@
+ import { useEffect, useRef, useState } from "react";
++import { HubSelect } from "./HubSelect";
+ import type { HubProject } from "./hub-api";
+ import {
+   type Agent,
+@@ -222,27 +223,22 @@ export function HubAgentConnect({
+         无需独立 App。把一句话交给 Agent，或在目标设备运行一条命令，安装 MCP 和
+         Skill。新设备仅获得当前项目的上传、记忆读取和历史读取权限。
+       </p>
+-      <p>
+-        Apple Silicon Mac 上的 Claude Code CLI 和 Codex 可为当前 Hub 项目准备专用目录。
+-        安装后，在 Agent 中打开结果显示的目录。Codex 首次按界面提示审查并信任项目钩子。
+-      </p>
+       {project.scope_id === "global" ? (
+         <p>请先选择或创建一个项目；全局偏好不能用于设备配对。</p>
+       ) : (
+         <>
+-          <label>
+-            要连接的 Agent{" "}
+-            <select
++          <div className="hub-field">
++            <span className="hub-field__label">要连接的 Agent</span>
++            <HubSelect
++              label="要连接的 Agent"
+               value={agent}
+-              onChange={(event) => setAgent(event.target.value as Agent)}
+-            >
+-              {Object.entries(agents).map(([id, label]) => (
+-                <option value={id} key={id}>
+-                  {label}
+-                </option>
+-              ))}
+-            </select>
+-          </label>
++              options={Object.entries(agents).map(([id, text]) => ({
++                value: id,
++                label: text,
++              }))}
++              onChange={(next) => setAgent(next as Agent)}
++            />
++          </div>
+           {!progress ? (
+             <form
+               onSubmit={(event) => {
+@@ -325,8 +321,7 @@ export function HubAgentConnect({
+                       复制 PowerShell 命令
+                     </R6Button>
+                     <p>
+-                      Linux、Windows 和其他 Agent 可使用 MCP。要在支持自动化的 Mac 上沿用已有项目，
+-                      可以先在 Agent 中打开项目目录，再交给它安装。
++                      宿主和系统的支持情况以实际安装检查为准；脚本存在不代表该宿主已通过验收。
+                     </p>
+                   </details>
+                   <R6Button
+diff --git a/memhub/apps/web/src/HubCardOverlay.tsx b/memhub/apps/web/src/HubCardOverlay.tsx
+new file mode 100644
+index 0000000..d959839
+--- /dev/null
++++ b/memhub/apps/web/src/HubCardOverlay.tsx
+@@ -0,0 +1,68 @@
++import { X } from "lucide-react";
++import { type ReactNode, useEffect, useRef } from "react";
++
++export function HubCardOverlay({
++  title,
++  subtitle,
++  onClose,
++  children,
++  footer,
++}: {
++  title: string;
++  subtitle?: ReactNode;
++  onClose(): void;
++  children: ReactNode;
++  footer?: ReactNode;
++}) {
++  const closeRef = useRef<HTMLButtonElement>(null);
++  useEffect(() => {
++    const onKey = (event: KeyboardEvent) => {
++      if (event.key === "Escape") onClose();
++    };
++    document.addEventListener("keydown", onKey);
++    const previousOverflow = document.body.style.overflow;
++    document.body.style.overflow = "hidden";
++    closeRef.current?.focus();
++    return () => {
++      document.removeEventListener("keydown", onKey);
++      document.body.style.overflow = previousOverflow;
++    };
++  }, [onClose]);
++  return (
++    <div className="hub-overlay">
++      <button
++        type="button"
++        className="hub-overlay__backdrop"
++        aria-label="关闭详情"
++        tabIndex={-1}
++        onClick={onClose}
++      />
++      <div
++        className="hub-overlay__panel"
++        role="dialog"
++        aria-modal="true"
++        aria-label={title}
++      >
++        <header className="hub-overlay__head">
++          <div className="hub-overlay__titles">
++            <h2>{title}</h2>
++            {subtitle ? <p>{subtitle}</p> : null}
++          </div>
++          <button
++            ref={closeRef}
++            type="button"
++            className="hub-overlay__close"
++            aria-label="关闭"
++            onClick={onClose}
++          >
++            <X size={18} />
++          </button>
++        </header>
++        <div className="hub-overlay__body">{children}</div>
++        {footer ? (
++          <footer className="hub-overlay__foot">{footer}</footer>
++        ) : null}
++      </div>
++    </div>
++  );
++}
+diff --git a/memhub/apps/web/src/HubConnections.test.tsx b/memhub/apps/web/src/HubConnections.test.tsx
+index fda9a65..967e440 100644
+--- a/memhub/apps/web/src/HubConnections.test.tsx
++++ b/memhub/apps/web/src/HubConnections.test.tsx
+@@ -58,6 +58,10 @@ let fetcher: ReturnType<typeof vi.fn>;
+ let downloaded: Blob | null;
+ let click: ReturnType<typeof vi.spyOn>;
+ let dropDevice: boolean;
++async function choose(name: string, option: RegExp) {
++  await userEvent.click(screen.getByRole("combobox", { name }));
++  await userEvent.click(await screen.findByRole("option", { name: option }));
++}
+ let dropSource: boolean;
+ let conflictGrant: boolean;
+ let wrongInstance: boolean;
+@@ -295,12 +299,9 @@ it("does not repeat unknown device creation and requires an explicit existing de
+   await userEvent.click(
+     screen.getByRole("button", { name: "刷新设备与来源并核对" }),
+   );
+-  await waitFor(() =>
+-    expect(screen.getByRole("option", { name: /合成 Mac/ })).toBeTruthy(),
+-  );
+-  await userEvent.selectOptions(
+-    screen.getByRole("combobox", { name: "已有设备" }),
+-    deviceId,
++  await userEvent.click(screen.getByRole("combobox", { name: "已有设备" }));
++  await userEvent.click(
++    await screen.findByRole("option", { name: /合成 Mac/ }),
+   );
+   await userEvent.click(
+     screen.getByRole("button", { name: "使用所选设备继续配对" }),
+@@ -352,12 +353,9 @@ it("retains source-write uncertainty across reload and rotation until a source i
+   await userEvent.click(
+     screen.getByRole("button", { name: "刷新设备与来源并核对" }),
+   );
+-  await waitFor(() =>
+-    expect(screen.getByRole("option", { name: /合成 Agent/ })).toBeTruthy(),
+-  );
+-  await userEvent.selectOptions(
+-    screen.getByRole("combobox", { name: "已登记来源" }),
+-    sourceId,
++  await userEvent.click(screen.getByRole("combobox", { name: "已登记来源" }));
++  await userEvent.click(
++    await screen.findByRole("option", { name: /合成 Agent/ }),
+   );
+   await userEvent.click(screen.getByRole("button", { name: "核对后继续配对" }));
+   await screen.findByRole("button", { name: "下载配对文件" });
+@@ -696,19 +694,15 @@ it("does not overwrite an unfinished known device with another and preserves its
+     }),
+   );
+   renderAdvanced(<HubConnections {...props} />);
+-  await screen.findByRole("option", { name: /另一设备/ });
+-  await userEvent.selectOptions(
+-    screen.getByRole("combobox", { name: "已有设备" }),
+-    other,
++  await userEvent.click(screen.getByRole("combobox", { name: "已有设备" }));
++  await userEvent.click(
++    await screen.findByRole("option", { name: /另一设备/ }),
+   );
+   await userEvent.click(
+     screen.getByRole("button", { name: "使用所选设备继续配对" }),
+   );
+   await screen.findByText(/不能用其他设备覆盖未完成的操作/);
+-  await userEvent.selectOptions(
+-    screen.getByRole("combobox", { name: "已有设备" }),
+-    deviceId,
+-  );
++  await choose("已有设备", /合成 Mac/);
+   await userEvent.click(
+     screen.getByRole("button", { name: "使用所选设备继续配对" }),
+   );
+diff --git a/memhub/apps/web/src/HubConnections.tsx b/memhub/apps/web/src/HubConnections.tsx
+index f004287..36b584d 100644
+--- a/memhub/apps/web/src/HubConnections.tsx
++++ b/memhub/apps/web/src/HubConnections.tsx
+@@ -1,5 +1,6 @@
+ import { useCallback, useEffect, useRef, useState } from "react";
+ import { HubAgentConnect } from "./HubAgentConnect";
++import { HubSelect } from "./HubSelect";
+ import type { HubProject } from "./hub-api";
+ import {
+   agentAdapter,
+@@ -779,21 +780,22 @@ function HubDevicePairing({
+                 <p>
+                   请核对本设备在当前项目已登记的来源。没有找到时稍后刷新，不自动再次登记。
+                 </p>
+-                <label>
+-                  已登记来源{" "}
+-                  <select
++                <div className="hub-field">
++                  <span className="hub-field__label">已登记来源</span>
++                  <HubSelect
++                    label="已登记来源"
+                     value={chosenSource}
+                     disabled={busy}
+-                    onChange={(event) => setChosenSource(event.target.value)}
+-                  >
+-                    <option value="">请选择</option>
+-                    {candidates.map((row) => (
+-                      <option key={row.source_id} value={row.source_id}>
+-                        {row.display_name} · {row.source_id.slice(-8)}
+-                      </option>
+-                    ))}
+-                  </select>
+-                </label>
++                    onChange={setChosenSource}
++                    options={[
++                      { value: "", label: "请选择" },
++                      ...candidates.map((row) => ({
++                        value: row.source_id,
++                        label: `${row.display_name} · ${row.source_id.slice(-8)}`,
++                      })),
++                    ]}
++                  />
++                </div>
+               </>
+             )}
+             {(progress.phase === "create_unknown" ||
+@@ -885,23 +887,24 @@ function HubDevicePairing({
+           <p>
+             按设备名称与编号核对，不会自动采用同名设备。选择后须明确重新签发凭据。
+           </p>
+-          <label>
+-            已有设备{" "}
+-            <select
++          <div className="hub-field">
++            <span className="hub-field__label">已有设备</span>
++            <HubSelect
++              label="已有设备"
+               value={chosenDevice}
+               disabled={busy || loading}
+-              onChange={(event) => setChosenDevice(event.target.value)}
+-            >
+-              <option value="">请选择活动设备</option>
+-              {devices
+-                .filter((row) => row.status === "active")
+-                .map((row) => (
+-                  <option key={row.device_id} value={row.device_id}>
+-                    {row.display_name} · {row.device_id.slice(-8)}
+-                  </option>
+-                ))}
+-            </select>
+-          </label>
++              onChange={setChosenDevice}
++              options={[
++                { value: "", label: "请选择活动设备" },
++                ...devices
++                  .filter((row) => row.status === "active")
++                  .map((row) => ({
++                    value: row.device_id,
++                    label: `${row.display_name} · ${row.device_id.slice(-8)}`,
++                  })),
++              ]}
++            />
++          </div>
+           <R6Button
+             disabled={!chosenDevice || busy || storageError}
+             onClick={chooseExisting}
+diff --git a/memhub/apps/web/src/HubConsole.test.tsx b/memhub/apps/web/src/HubConsole.test.tsx
+index 6e0bf21..8f29404 100644
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -142,10 +142,13 @@ afterEach(() => {
+   vi.unstubAllGlobals();
+ });
+ async function select(scope = "project-a") {
+-  await userEvent.selectOptions(
++  const label =
++    bootstrap.projects.find((row) => row.scope_id === scope)?.display_name ??
++    "项目 A";
++  await userEvent.click(
+     await screen.findByRole("combobox", { name: "当前项目" }),
+-    scope,
+   );
++  await userEvent.click(await screen.findByRole("option", { name: label }));
+ }
+ async function askAndOpen(scope = "project-a") {
+   await userEvent.click(screen.getByRole("button", { name: "问记忆" }));
+@@ -350,8 +353,9 @@ it("explains an empty project inventory without selecting global automatically",
+   render(<HubConsole />);
+   await screen.findByText("还没有项目");
+   expect(
+-    (screen.getByRole("combobox", { name: "当前项目" }) as HTMLSelectElement)
+-      .value,
++    screen
++      .getByRole("combobox", { name: "当前项目" })
++      .getAttribute("data-value"),
+   ).toBe("");
+   expect(fetcher).toHaveBeenCalledTimes(1);
+ });
+@@ -576,9 +580,11 @@ it("lets a fresh empty installation create and select its first project from the
+   await userEvent.click(screen.getByRole("button", { name: "创建项目" }));
+   await screen.findByRole("heading", { name: "连接 Agent" });
+   expect(
+-    (screen.getByRole("combobox", { name: "当前项目" }) as HTMLSelectElement)
+-      .value,
++    screen
++      .getByRole("combobox", { name: "当前项目" })
++      .getAttribute("data-value"),
+   ).toBe(projectId);
++  await userEvent.click(screen.getByRole("combobox", { name: "当前项目" }));
+   expect(screen.getByRole("option", { name: "首个合成项目" })).toBeTruthy();
+   expect(local).not.toHaveBeenCalled();
+ });
+@@ -599,8 +605,9 @@ it("offers an ordered first-use guide and model navigation without creating anot
+   expect(await screen.findByText("模型设置")).toBeTruthy();
+   expect(fetcher).toHaveBeenCalledTimes(1);
+   expect(
+-    (screen.getByRole("combobox", { name: "当前项目" }) as HTMLSelectElement)
+-      .value,
++    screen
++      .getByRole("combobox", { name: "当前项目" })
++      .getAttribute("data-value"),
+   ).toBe("");
+ });
+ 
+diff --git a/memhub/apps/web/src/HubConsole.tsx b/memhub/apps/web/src/HubConsole.tsx
+index 9eaba9d..bd0ef66 100644
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -1,7 +1,6 @@
+ import {
+   ArrowUpRight,
+   Bot,
+-  ChevronDown,
+   Database,
+   Infinity as InfinityIcon,
+   LayoutDashboard,
+@@ -21,6 +20,7 @@ import { HubProvider, useHub } from "./HubContext";
+ import { HubDashboard } from "./HubDashboard";
+ import { HubGovernance } from "./HubGovernance";
+ import { HubQuestion } from "./HubQuestion";
++import { HubSelect } from "./HubSelect";
+ import {
+   type HubItem,
+   type HubProject,
+@@ -46,6 +46,13 @@ const views: [View, string][] = [
+   ["connections", "项目与设备接入"],
+   ["settings", "系统设置"],
+ ];
++const VIEW_SUBTITLE: Record<Exclude<View, "home">, string> = {
++  library: "浏览和管理已共享的记忆",
++  history: "查看按时间排列的原始共享记录",
++  ask: "向共享记忆提问，并查看引用来源",
++  connections: "管理项目与设备的连接授权",
++  settings: "调整账户、安全与运行设置",
++};
+ const memory = (item: HubItem) => ({
+   memory_id: item.record_id,
+   content: item.content,
+@@ -191,17 +198,13 @@ function Console() {
+             </div>
+             <dl>
+               <div>
+-                <dt>当前范围</dt>
++                <dt>当前项目</dt>
+                 <dd>{project?.display_name ?? "尚未选择项目"}</dd>
+               </div>
+               <div>
+-                <dt>服务版本</dt>
++                <dt>部署版本</dt>
+                 <dd>{bootstrap.version ?? "尚未提供"}</dd>
+               </div>
+-              <div>
+-                <dt>存储方式</dt>
+-                <dd>你的私有 NAS</dd>
+-              </div>
+             </dl>
+           </section>
+           <a
+@@ -236,23 +239,22 @@ function Console() {
+             </span>
+           </div>
+           <div className="hub-topbar-actions">
+-            <label className="hub-project-select">
+-              <span className="hub-sr-only">当前项目</span>
+-              <select
+-                aria-label="当前项目"
+-                value={project?.scope_id ?? ""}
+-                onChange={(event) => select(event.target.value)}
+-              >
+-                <option value="">请选择一个项目</option>
+-                {bootstrap.projects.map((row) => (
+-                  <option key={row.scope_id} value={row.scope_id}>
+-                    {row.display_name}
+-                  </option>
+-                ))}
+-                <option value="global">全局偏好（独立范围）</option>
+-              </select>
+-              <ChevronDown size={14} aria-hidden="true" />
+-            </label>
++            <HubSelect
++              className="hub-project-select"
++              variant="bare"
++              align="end"
++              label="当前项目"
++              value={project?.scope_id ?? ""}
++              onChange={select}
++              options={[
++                { value: "", label: "请选择一个项目" },
++                ...bootstrap.projects.map((row) => ({
++                  value: row.scope_id,
++                  label: row.display_name,
++                })),
++                { value: "global", label: "全局偏好（独立范围）" },
++              ]}
++            />
+             <button
+               className="hub-icon-button"
+               type="button"
+@@ -459,7 +461,14 @@ function ProjectContent({
+   );
+   return (
+     <>
+-      {view !== "home" ? <h1>{project.display_name}</h1> : null}
++      {view !== "home" ? (
++        <div className="hub-page-heading">
++          <div>
++            <h1>{project.display_name}</h1>
++            <p>{VIEW_SUBTITLE[view]}</p>
++          </div>
++        </div>
++      ) : null}
+       {notice && <p role="status">{notice}</p>}
+       {retainedSources.length > 0 && (
+         <aside aria-label="忘记后保留的来源" className="hub-first-memory">
+diff --git a/memhub/apps/web/src/HubContext.preview.test.tsx b/memhub/apps/web/src/HubContext.preview.test.tsx
+new file mode 100644
+index 0000000..c34f6c4
+--- /dev/null
++++ b/memhub/apps/web/src/HubContext.preview.test.tsx
+@@ -0,0 +1,78 @@
++// @vitest-environment jsdom
++import { cleanup, render, screen, waitFor } from "@testing-library/react";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { HubProvider, useHub } from "./HubContext";
++
++const project = { scope_id: "scope-1", display_name: "合成项目" };
++const global = { scope_id: "global", display_name: "全局偏好" };
++
++function bootstrap(overrides: Record<string, unknown> = {}) {
++  return {
++    schema_version: 1,
++    mode: "hub",
++    product: "Cloud Memory Hub",
++    instance_id: "instance-1",
++    version: "test",
++    build_revision: null,
++    features: [],
++    projects: [project],
++    next_offset: null,
++    global_scope: global,
++    ...overrides,
++  };
++}
++
++function Probe() {
++  const { project } = useHub();
++  return <p>{project ? `当前:${project.display_name}` : "未选择"}</p>;
++}
++
++function stubBootstrap(body: unknown) {
++  vi.stubGlobal(
++    "fetch",
++    vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })),
++  );
++}
++
++afterEach(() => {
++  cleanup();
++  vi.unstubAllGlobals();
++});
++
++describe("HubProvider preview auto-selection", () => {
++  it("selects the only project in the local copy-only preview", async () => {
++    stubBootstrap(bootstrap({ preview: "ui-copy-synthetic" }));
++    render(
++      <HubProvider>
++        <Probe />
++      </HubProvider>,
++    );
++    expect(await screen.findByText("当前:合成项目")).toBeTruthy();
++  });
++
++  it("keeps manual selection for a real Hub without the preview marker", async () => {
++    stubBootstrap(bootstrap());
++    render(
++      <HubProvider>
++        <Probe />
++      </HubProvider>,
++    );
++    await waitFor(() => expect(screen.getByText("未选择")).toBeTruthy());
++    expect(screen.queryByText("当前:合成项目")).toBeNull();
++  });
++
++  it("does not auto-select when the preview has several projects", async () => {
++    stubBootstrap(
++      bootstrap({
++        preview: "ui-copy-synthetic",
++        projects: [project, { scope_id: "scope-2", display_name: "另一项目" }],
++      }),
++    );
++    render(
++      <HubProvider>
++        <Probe />
++      </HubProvider>,
++    );
++    await waitFor(() => expect(screen.getByText("未选择")).toBeTruthy());
++  });
++});
+diff --git a/memhub/apps/web/src/HubContext.tsx b/memhub/apps/web/src/HubContext.tsx
+index 793de8d..6df695f 100644
+--- a/memhub/apps/web/src/HubContext.tsx
++++ b/memhub/apps/web/src/HubContext.tsx
+@@ -33,6 +33,16 @@ export function HubProvider({ children }: { children: ReactNode }) {
+   const [bootstrap, setBootstrap] = useState<HubBootstrap | null>(null);
+   const [scope, setScope] = useState("");
+   const [offset, setOffset] = useState(0);
++  // Auto-select only the single synthetic project in the local copy-only preview.
++  useEffect(() => {
++    if (
++      bootstrap?.preview === "ui-copy-synthetic" &&
++      bootstrap.projects.length === 1 &&
++      !scope
++    ) {
++      setScope(bootstrap.projects[0].scope_id);
++    }
++  }, [bootstrap, scope]);
+   const [revision, setRevision] = useState(0);
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState("");
+diff --git a/memhub/apps/web/src/HubDashboard.test.tsx b/memhub/apps/web/src/HubDashboard.test.tsx
+index 732b50d..e21645b 100644
+--- a/memhub/apps/web/src/HubDashboard.test.tsx
++++ b/memhub/apps/web/src/HubDashboard.test.tsx
+@@ -6,7 +6,6 @@ import {
+   waitFor,
+   within,
+ } from "@testing-library/react";
+-import userEvent from "@testing-library/user-event";
+ import { afterEach, beforeEach, expect, it, vi } from "vitest";
+ import { HubDashboard } from "./HubDashboard";
+ import { getHubDashboard, HubError, readHub } from "./hub-api";
+@@ -14,10 +13,11 @@ import { BackupControlError, getBackupStatus } from "./hub-backups";
+ import { getAllHubSources } from "./hub-dashboard";
+ import { getDevices } from "./hub-pairing";
+ 
++const hubState = vi.hoisted(() => ({ instance: "instance" }));
+ vi.mock("./HubContext", () => ({
+   useHub: () => ({
+     bootstrap: {
+-      instance_id: "instance",
++      instance_id: hubState.instance,
+       version: "0.1.2",
+       features: ["scoped_console_reads"],
+     },
+@@ -63,6 +63,7 @@ const data = {
+   missing_timestamps: 0,
+ };
+ beforeEach(() => {
++  hubState.instance = "instance";
+   vi.mocked(getHubDashboard).mockResolvedValue(data);
+   vi.mocked(getAllHubSources).mockResolvedValue([]);
+   vi.mocked(getDevices).mockResolvedValue([]);
+@@ -77,21 +78,23 @@ afterEach(() => {
+   cleanup();
+   vi.resetAllMocks();
+ });
+-const show = () =>
+-  render(
+-    <HubDashboard
+-      project={{ scope_id: "scope", display_name: "合成项目" }}
+-      onNavigate={vi.fn()}
+-      firstMemoryGuide={<p>真实空项目引导</p>}
+-    />,
+-  );
++const dashboard = () => (
++  <HubDashboard
++    project={{ scope_id: "scope", display_name: "合成项目" }}
++    onNavigate={vi.fn()}
++    firstMemoryGuide={<p>真实空项目引导</p>}
++  />
++);
++const show = () => render(dashboard());
+ it("displays confirmed metrics and retains them with an explicit refresh failure", async () => {
+-  show();
+-  await within(screen.getByRole("region", { name: "共享记录" })).findByText(
+-    "120",
+-  );
++  const view = show();
++  await within(
++    screen.getByRole("button", { name: "共享记录：查看详情" }),
++  ).findByText("120");
+   expect(
+-    within(screen.getByRole("region", { name: "Agent 连接" })).getByText("3"),
++    within(
++      screen.getByRole("button", { name: "Agent 连接：查看详情" }),
++    ).getByText("3"),
+   ).toBeTruthy();
+   expect(
+     screen.getByRole("figure", { name: "Agent 协作网络：0 个有效连接" }),
+@@ -99,10 +102,13 @@ it("displays confirmed metrics and retains them with an explicit refresh failure
+   vi.mocked(getHubDashboard).mockRejectedValueOnce(
+     new HubError("统计服务暂时不可用"),
+   );
+-  await userEvent.click(screen.getByRole("button", { name: "刷新总览" }));
++  hubState.instance = "instance-refresh";
++  view.rerender(dashboard());
+   await screen.findByText(/正在显示上次确认的数据/);
+   expect(
+-    within(screen.getByRole("region", { name: "共享记录" })).getByText("120"),
++    within(
++      screen.getByRole("button", { name: "共享记录：查看详情" }),
++    ).getByText("120"),
+   ).toBeTruthy();
+ });
+ it("uses unavailable states rather than zero metrics on an initial failure", async () => {
+@@ -112,7 +118,9 @@ it("uses unavailable states rather than zero metrics on an initial failure", asy
+   show();
+   await screen.findByText(/统计暂时不可用/);
+   expect(
+-    within(screen.getByRole("region", { name: "共享记录" })).getByText("—"),
++    within(
++      screen.getByRole("button", { name: "共享记录：查看详情" }),
++    ).getByText("—"),
+   ).toBeTruthy();
+   expect(screen.queryByRole("img", { name: /最近七天共享记录/ })).toBeNull();
+ });
+@@ -149,13 +157,14 @@ it.each(["unavailable", "unauthorized"])(
+       pending_request: null,
+       supervisor_running: "not_checked",
+     });
+-    show();
++    const view = show();
+     const completed = await screen.findByText("已完成");
+     expect(completed.classList.contains("is-confirmed")).toBe(true);
+     vi.mocked(getBackupStatus).mockRejectedValueOnce(
+       new BackupControlError(code),
+     );
+-    await userEvent.click(screen.getByRole("button", { name: "刷新总览" }));
++    hubState.instance = `instance-${code}`;
++    view.rerender(dashboard());
+     const stale = await screen.findByText("上次确认：已完成");
+     expect(stale.classList.contains("is-confirmed")).toBe(false);
+     expect(screen.queryByText("已完成")).toBeNull();
+diff --git a/memhub/apps/web/src/HubDashboard.tsx b/memhub/apps/web/src/HubDashboard.tsx
+index e2205c9..3f1f0e6 100644
+--- a/memhub/apps/web/src/HubDashboard.tsx
++++ b/memhub/apps/web/src/HubDashboard.tsx
+@@ -9,16 +9,26 @@ import {
+   FileText,
+   HardDrive,
+   Infinity as InfinityIcon,
++  Laptop,
+   Layers3,
+   MessagesSquare,
+   Monitor,
++  PcCase,
+   Plus,
+-  RefreshCw,
+   Server,
+   ShieldCheck,
++  Smartphone,
+   Sparkles,
++  Tablet,
+ } from "lucide-react";
+-import { type ReactNode, useEffect, useId, useState } from "react";
++import {
++  type ReactNode,
++  type PointerEvent as ReactPointerEvent,
++  useEffect,
++  useId,
++  useState,
++} from "react";
++import { HubCardOverlay } from "./HubCardOverlay";
+ import { useHub } from "./HubContext";
+ import { HubNetwork } from "./HubNetwork";
+ import { historyDisplay } from "./history-display";
+@@ -48,6 +58,16 @@ type Navigate =
+   | "settings"
+   | "connections";
+ type Resource<T> = { data: T | null; error: string; loading: boolean };
++type OverlayState =
++  | { kind: "devices" }
++  | { kind: "device"; deviceId: string }
++  | { kind: "agents" }
++  | { kind: "agent"; sourceId: string }
++  | { kind: "records" }
++  | { kind: "handoffs" }
++  | { kind: "services" }
++  | { kind: "service"; index: number }
++  | { kind: "trend" };
+ const empty = <T,>(): Resource<T> => ({ data: null, error: "", loading: true });
+ const number = (value: number) => value.toLocaleString("zh-CN");
+ 
+@@ -61,7 +81,7 @@ export function HubDashboard({
+   firstMemoryGuide: ReactNode;
+ }) {
+   const { bootstrap } = useHub();
+-  const [revision, setRevision] = useState(0);
++  const [overlay, setOverlay] = useState<OverlayState | null>(null);
+   const [dashboard, setDashboard] = useState<Resource<HubDashboardData>>(empty);
+   const [sources, setSources] = useState<Resource<HubSource[]>>(empty);
+   const [activity, setActivity] = useState<Resource<HubPage>>(empty);
+@@ -70,7 +90,6 @@ export function HubDashboard({
+   const instance = bootstrap.instance_id;
+   const scope = project.scope_id;
+   useEffect(() => {
+-    void revision;
+     const controller = new AbortController();
+     const signal = controller.signal;
+     function load<T>(
+@@ -111,7 +130,7 @@ export function HubDashboard({
+     );
+     load(getBackupStatus(signal), setBackups, backupErrorMessage);
+     return () => controller.abort();
+-  }, [instance, scope, revision]);
++  }, [instance, scope]);
+   const stats = dashboard.data?.statistics;
+   const backupState = backups.data
+     ? {
+@@ -127,14 +146,23 @@ export function HubDashboard({
+     memories.data.next_offset === null &&
+     !memories.data.candidate_limit_reached &&
+     !memories.error;
+-  const devices = new Map<string, { name: string; count: number }>();
+-  for (const source of sources.data ?? []) {
++  const sourceList = sources.data ?? [];
++  const devices = new Map<
++    string,
++    { name: string; count: number; Icon: typeof Monitor }
++  >();
++  for (const source of sourceList) {
+     const previous = devices.get(source.device_id);
+     devices.set(source.device_id, {
+       name: source.device_display_name,
+       count: (previous?.count ?? 0) + 1,
++      Icon: deviceIconFor(source.device_display_name),
+     });
+   }
++  const deviceRows = [...devices.entries()].map(([id, info]) => ({
++    id,
++    ...info,
++  }));
+   const metrics = [
+     {
+       title: "设备连接",
+@@ -142,6 +170,7 @@ export function HubDashboard({
+       Icon: Monitor,
+       foot: "拥有当前范围有效来源的设备",
+       color: "violet",
++      open: { kind: "devices" } as OverlayState,
+     },
+     {
+       title: "Agent 连接",
+@@ -149,6 +178,7 @@ export function HubDashboard({
+       Icon: Bot,
+       foot: "当前项目有效授权的来源",
+       color: "blue",
++      open: { kind: "agents" } as OverlayState,
+     },
+     {
+       title: "共享记录",
+@@ -156,6 +186,7 @@ export function HubDashboard({
+       Icon: Database,
+       foot: "当前范围可见的接纳记录",
+       color: "lilac",
++      open: { kind: "records" } as OverlayState,
+     },
+     {
+       title: "任务交接",
+@@ -163,26 +194,495 @@ export function HubDashboard({
+       Icon: MessagesSquare,
+       foot: "跨设备接续的交接记录",
+       color: "pink",
++      open: { kind: "handoffs" } as OverlayState,
++    },
++  ];
++  const serviceRows = [
++    {
++      Icon: Server,
++      title: "Hub 管理服务",
++      value: `已连接 · ${bootstrap.version ?? "版本未提供"}`,
++      ready: true,
++      detail: "当前后台已通过安全边界连接到 Cloud Memory Hub 管理服务。",
++    },
++    {
++      Icon: ShieldCheck,
++      title: "项目范围读取",
++      value: bootstrap.features.includes("scoped_console_reads")
++        ? "已启用"
++        : "尚未提供",
++      ready: bootstrap.features.includes("scoped_console_reads"),
++      detail: "控制台只在当前项目的授权范围内读取记忆与历史，不会跨项目访问。",
++    },
++    {
++      Icon: Database,
++      title: "记录统计",
++      value: dashboard.loading
++        ? "读取中"
++        : dashboard.error
++          ? "暂时不可用"
++          : "已确认",
++      ready: !!dashboard.data && !dashboard.loading && !dashboard.error,
++      detail: "共享记录数量来自 Hub 的统计接口，按当前范围实际接纳的记录计算。",
++    },
++    {
++      Icon: HardDrive,
++      title: "最近备份",
++      value: backups.loading
++        ? "读取中"
++        : backups.error
++          ? backupState
++            ? `上次确认：${backupState}`
++            : "暂时无法确认"
++          : (backupState ?? "暂时无法确认"),
++      ready:
++        !backups.loading &&
++        !backups.error &&
++        backups.data?.execution.state === "completed",
++      detail: "备份在 NAS 上执行，最近一次状态来自 Hub 的备份接口。",
+     },
+   ];
++  function openNav(view: Navigate) {
++    setOverlay(null);
++    onNavigate(view);
++  }
++  function renderOverlay() {
++    if (!overlay) return null;
++    if (overlay.kind === "devices") {
++      return (
++        <HubCardOverlay
++          title="设备连接"
++          subtitle={`${deviceRows.length} 台设备 · ${sourceList.length} 个 Agent 来源`}
++          onClose={() => setOverlay(null)}
++          footer={
++            <button
++              className="hub-overlay__action"
++              type="button"
++              onClick={() => openNav("connections")}
++            >
++              前往设备接入
++            </button>
++          }
++        >
++          {deviceRows.length ? (
++            <ul className="hub-overlay__list">
++              {deviceRows.map((device) => {
++                const Icon = device.Icon;
++                return (
++                  <li key={device.id}>
++                    <button
++                      type="button"
++                      className="hub-overlay__row"
++                      onClick={() =>
++                        setOverlay({ kind: "device", deviceId: device.id })
++                      }
++                    >
++                      <span className="hub-overlay__row-icon">
++                        <Icon size={20} />
++                      </span>
++                      <span className="hub-overlay__row-main">
++                        <strong>{device.name}</strong>
++                        <span>{device.count} 个有效 Agent 来源</span>
++                      </span>
++                      <span className="hub-status-chip">
++                        <i className="hub-status-dot" /> 已授权
++                      </span>
++                      <ChevronRight size={16} />
++                    </button>
++                  </li>
++                );
++              })}
++            </ul>
++          ) : (
++            <OverlayEmpty
++              text={
++                sources.loading
++                  ? "正在核对该项目的设备授权…"
++                  : "当前项目还没有已授权的设备。"
++              }
++              action={{
++                label: "去接入第一台设备",
++                onClick: () => openNav("connections"),
++              }}
++            />
++          )}
++        </HubCardOverlay>
++      );
++    }
++    if (overlay.kind === "device") {
++      const device = devices.get(overlay.deviceId);
++      const agents = sourceList.filter(
++        (source) => source.device_id === overlay.deviceId,
++      );
++      return (
++        <HubCardOverlay
++          title={device?.name ?? "设备详情"}
++          subtitle={`${agents.length} 个 Agent 来源`}
++          onClose={() => setOverlay(null)}
++          footer={
++            <button
++              className="hub-overlay__ghost"
++              type="button"
++              onClick={() => setOverlay({ kind: "devices" })}
++            >
++              返回设备列表
++            </button>
++          }
++        >
++          {agents.length ? (
++            <ul className="hub-overlay__list">
++              {agents.map((source) => (
++                <li key={source.source_id}>
++                  <button
++                    type="button"
++                    className="hub-overlay__row"
++                    onClick={() =>
++                      setOverlay({ kind: "agent", sourceId: source.source_id })
++                    }
++                  >
++                    <span className="hub-overlay__row-icon">
++                      <Bot size={20} />
++                    </span>
++                    <span className="hub-overlay__row-main">
++                      <strong>{source.display_name}</strong>
++                      <span>{source.adapter_id || "Agent 来源"}</span>
++                    </span>
++                    <ChevronRight size={16} />
++                  </button>
++                </li>
++              ))}
++            </ul>
++          ) : (
++            <OverlayEmpty text="这台设备当前没有有效来源。" />
++          )}
++        </HubCardOverlay>
++      );
++    }
++    if (overlay.kind === "agents") {
++      return (
++        <HubCardOverlay
++          title="Agent 连接"
++          subtitle={`${sourceList.length} 个有效来源`}
++          onClose={() => setOverlay(null)}
++          footer={
++            <button
++              className="hub-overlay__action"
++              type="button"
++              onClick={() => openNav("connections")}
++            >
++              查看授权管理
++            </button>
++          }
++        >
++          {sourceList.length ? (
++            <ul className="hub-overlay__list">
++              {sourceList.map((source) => (
++                <li key={source.source_id}>
++                  <button
++                    type="button"
++                    className="hub-overlay__row"
++                    onClick={() =>
++                      setOverlay({ kind: "agent", sourceId: source.source_id })
++                    }
++                  >
++                    <span className="hub-overlay__row-icon">
++                      <Bot size={20} />
++                    </span>
++                    <span className="hub-overlay__row-main">
++                      <strong>{source.display_name}</strong>
++                      <span>{source.device_display_name}</span>
++                    </span>
++                    <ChevronRight size={16} />
++                  </button>
++                </li>
++              ))}
++            </ul>
++          ) : (
++            <OverlayEmpty
++              text={
++                sources.loading
++                  ? "正在读取 Agent 连接…"
++                  : "当前项目还没有已连接的 Agent。"
++              }
++              action={{
++                label: "去连接 Agent",
++                onClick: () => openNav("connections"),
++              }}
++            />
++          )}
++        </HubCardOverlay>
++      );
++    }
++    if (overlay.kind === "agent") {
++      const source = sourceList.find(
++        (row) => row.source_id === overlay.sourceId,
++      );
++      return (
++        <HubCardOverlay
++          title={source?.display_name ?? "Agent 详情"}
++          subtitle={source?.device_display_name}
++          onClose={() => setOverlay(null)}
++          footer={
++            <button
++              className="hub-overlay__action"
++              type="button"
++              onClick={() => openNav("connections")}
++            >
++              查看授权管理
++            </button>
++          }
++        >
++          {source ? (
++            <dl className="hub-overlay__facts">
++              <div>
++                <dt>Agent</dt>
++                <dd>{source.display_name}</dd>
++              </div>
++              <div>
++                <dt>所属设备</dt>
++                <dd>{source.device_display_name}</dd>
++              </div>
++              <div>
++                <dt>适配器</dt>
++                <dd>{source.adapter_id || "未提供"}</dd>
++              </div>
++              <div>
++                <dt>连接状态</dt>
++                <dd>{source.status === "active" ? "已授权" : source.status}</dd>
++              </div>
++              <div>
++                <dt>来源标识</dt>
++                <dd>{source.source_id}</dd>
++              </div>
++            </dl>
++          ) : (
++            <OverlayEmpty text="这条 Agent 连接已不在当前列表中。" />
++          )}
++        </HubCardOverlay>
++      );
++    }
++    if (overlay.kind === "records") {
++      const types = dashboard.data?.record_types ?? [];
++      return (
++        <HubCardOverlay
++          title="共享记录"
++          subtitle={`当前范围共 ${number(stats?.shared_records ?? 0)} 条`}
++          onClose={() => setOverlay(null)}
++          footer={
++            <button
++              className="hub-overlay__action"
++              type="button"
++              onClick={() => openNav("history")}
++            >
++              查看全部记录
++            </button>
++          }
++        >
++          {types.length ? (
++            <ul className="hub-overlay__list">
++              {types.map((row, index) => {
++                const Icon = row.kind === "handoff" ? MessagesSquare : FileText;
++                return (
++                  <li key={row.kind}>
++                    <button
++                      type="button"
++                      className="hub-overlay__row"
++                      onClick={() => openNav("history")}
++                    >
++                      <span className="hub-overlay__row-icon">
++                        <Icon size={20} />
++                      </span>
++                      <span className="hub-overlay__row-main">
++                        <span className="hub-overlay__row-label">
++                          <i
++                            className={`hub-type-dot hub-type-dot--${index}`}
++                          />
++                          {row.label}
++                        </span>
++                        <span>{row.count} 条</span>
++                      </span>
++                      <ChevronRight size={16} />
++                    </button>
++                  </li>
++                );
++              })}
++            </ul>
++          ) : (
++            <OverlayEmpty
++              text={
++                dashboard.loading ? "正在读取记录统计…" : "暂时没有记录统计。"
++              }
++            />
++          )}
++        </HubCardOverlay>
++      );
++    }
++    if (overlay.kind === "handoffs") {
++      const handoffs = (activity.data?.items ?? []).filter(
++        (item) =>
++          historyDisplay({
++            raw_id: item.record_id,
++            content: item.content,
++            truncated: item.next_content_offset !== null,
++          })?.kind === "handoff",
++      );
++      return (
++        <HubCardOverlay
++          title="任务交接"
++          subtitle={`当前范围共 ${number(stats?.handoffs ?? 0)} 条`}
++          onClose={() => setOverlay(null)}
++          footer={
++            <button
++              className="hub-overlay__action"
++              type="button"
++              onClick={() => openNav("history")}
++            >
++              查看全部记录
++            </button>
++          }
++        >
++          {handoffs.length ? (
++            <ul className="hub-overlay__list">
++              {handoffs.map((item) => (
++                <li key={item.record_id}>
++                  <button
++                    type="button"
++                    className="hub-overlay__row"
++                    onClick={() => openNav("history")}
++                  >
++                    <span className="hub-overlay__row-icon">
++                      <MessagesSquare size={20} />
++                    </span>
++                    <span className="hub-overlay__row-main">
++                      <strong>任务交接</strong>
++                      <span>{item.content.slice(0, 80)}</span>
++                    </span>
++                    <ChevronRight size={16} />
++                  </button>
++                </li>
++              ))}
++            </ul>
++          ) : (
++            <OverlayEmpty
++              text="最近的记录里没有交接；去历史原文翻看更早的记录。"
++              action={{
++                label: "查看历史原文",
++                onClick: () => openNav("history"),
++              }}
++            />
++          )}
++        </HubCardOverlay>
++      );
++    }
++    if (overlay.kind === "services") {
++      return (
++        <HubCardOverlay
++          title="服务状态"
++          subtitle="当前项目的运行与服务状态"
++          onClose={() => setOverlay(null)}
++          footer={
++            <button
++              className="hub-overlay__action"
++              type="button"
++              onClick={() => openNav("settings")}
++            >
++              管理模型与备份
++            </button>
++          }
++        >
++          <ul className="hub-overlay__list">
++            {serviceRows.map((row, index) => {
++              const Icon = row.Icon;
++              return (
++                <li key={row.title}>
++                  <button
++                    type="button"
++                    className="hub-overlay__row"
++                    onClick={() => setOverlay({ kind: "service", index })}
++                  >
++                    <span className="hub-overlay__row-icon">
++                      <Icon size={20} />
++                    </span>
++                    <span className="hub-overlay__row-main">
++                      <strong>{row.title}</strong>
++                      <span>{row.value}</span>
++                    </span>
++                    <span
++                      className={`hub-status-chip${row.ready ? " is-ready" : ""}`}
++                    >
++                      {row.ready ? "正常" : "待确认"}
++                    </span>
++                    <ChevronRight size={16} />
++                  </button>
++                </li>
++              );
++            })}
++          </ul>
++        </HubCardOverlay>
++      );
++    }
++    if (overlay.kind === "service") {
++      const row = serviceRows[overlay.index];
++      if (!row) return null;
++      return (
++        <HubCardOverlay
++          title={row.title}
++          subtitle={row.value}
++          onClose={() => setOverlay(null)}
++          footer={
++            <button
++              className="hub-overlay__action"
++              type="button"
++              onClick={() => openNav("settings")}
++            >
++              前往设置
++            </button>
++          }
++        >
++          <p className="hub-overlay__paragraph">{row.detail}</p>
++          <p className="hub-overlay__paragraph">
++            当前状态：{row.ready ? "正常" : "待确认"}。
++          </p>
++        </HubCardOverlay>
++      );
++    }
++    return (
++      <HubCardOverlay
++        title="共享记录趋势"
++        subtitle="最近 7 天 · UTC"
++        onClose={() => setOverlay(null)}
++        footer={
++          <button
++            className="hub-overlay__action"
++            type="button"
++            onClick={() => openNav("history")}
++          >
++            查看全部记录
++          </button>
++        }
++      >
++        {dashboard.data?.daily_activity.length ? (
++          <ul className="hub-overlay__list hub-overlay__list--plain">
++            {dashboard.data.daily_activity.map((day) => (
++              <li key={day.date} className="hub-overlay__day">
++                <span>{day.date}</span>
++                <strong>{number(day.count)} 条</strong>
++              </li>
++            ))}
++          </ul>
++        ) : (
++          <OverlayEmpty
++            text={
++              dashboard.loading ? "正在读取活动统计…" : "暂时没有可展示的趋势。"
++            }
++          />
++        )}
++      </HubCardOverlay>
++    );
++  }
+   return (
+     <div className="hub-dashboard">
+-      <div className="hub-dashboard-heading">
+-        <div>
+-          <h1>多设备 · 多 Agent · 共享记忆 · 接续会话</h1>
+-          <p>在 NAS 上构建你的个人 AI 记忆中枢</p>
+-        </div>
+-        <button
+-          type="button"
+-          className="hub-icon-button"
+-          title="刷新总览"
+-          aria-label="刷新总览"
+-          onClick={() => setRevision((value) => value + 1)}
+-          disabled={dashboard.loading}
+-        >
+-          <RefreshCw size={18} />
+-        </button>
+-      </div>
++      <h1 className="hub-sr-only">总览</h1>
+       {dashboard.error ? (
+         <p className="hub-data-notice" role="status">
+           {dashboard.error}
+@@ -190,11 +690,13 @@ export function HubDashboard({
+         </p>
+       ) : null}
+       <div className="hub-metrics">
+-        {metrics.map(({ title, value, Icon, foot, color }) => (
+-          <section
++        {metrics.map(({ title, value, Icon, foot, color, open }) => (
++          <button
+             className={`hub-metric hub-metric--${color}`}
+             key={title}
+-            aria-label={title}
++            type="button"
++            aria-label={`${title}：查看详情`}
++            onClick={() => setOverlay(open)}
+           >
+             <span className="hub-metric-icon">
+               <Icon size={32} strokeWidth={1.5} />
+@@ -204,32 +706,45 @@ export function HubDashboard({
+               <strong>{value === undefined ? "—" : number(value)}</strong>
+               <small>{foot}</small>
+             </div>
+-          </section>
++            <ChevronRight className="hub-metric-chevron" size={16} />
++          </button>
+         ))}
+       </div>
+       <div className="hub-dashboard-middle">
+         <section className="hub-card hub-device-card">
+           <CardHeading
+             title="设备概览"
+-            onClick={() => onNavigate("connections")}
++            action="查看全部"
++            onClick={() => setOverlay({ kind: "devices" })}
+           />
+           <div className="hub-device-list">
+             {sources.data ? (
+-              [...devices].map(([id, device]) => (
+-                <div className="hub-device" key={id}>
+-                  <span className="hub-device-icon">
+-                    <Monitor size={31} strokeWidth={1.4} />
+-                  </span>
+-                  <div className="hub-device-copy">
+-                    <strong>{device.name}</strong>
+-                    <span>{device.count} 个有效 Agent 来源</span>
+-                  </div>
+-                  <span className="hub-device-state">
+-                    <i className="hub-status-dot" />
+-                    已授权
+-                  </span>
+-                </div>
+-              ))
++              deviceRows.map((device) => {
++                const Icon = device.Icon;
++                return (
++                  <button
++                    className="hub-device"
++                    key={device.id}
++                    type="button"
++                    onClick={() =>
++                      setOverlay({ kind: "device", deviceId: device.id })
++                    }
++                  >
++                    <span className="hub-device-icon">
++                      <Icon size={31} strokeWidth={1.4} />
++                    </span>
++                    <span className="hub-device-copy">
++                      <strong>{device.name}</strong>
++                      <span>{device.count} 个有效 Agent 来源</span>
++                    </span>
++                    <span className="hub-device-state">
++                      <i className="hub-status-dot" />
++                      已授权
++                    </span>
++                    <ChevronRight size={16} className="hub-device-chevron" />
++                  </button>
++                );
++              })
+             ) : (
+               <p className="hub-empty-copy">
+                 {sources.loading ? "正在核对设备授权…" : "设备连接暂时无法确认"}
+@@ -256,7 +771,8 @@ export function HubDashboard({
+         <section className="hub-card hub-network-card">
+           <CardHeading
+             title="Agent 协作网络"
+-            badge={sources.data ? `${sources.data.length} 个连接` : undefined}
++            action={sources.data ? `${sources.data.length} 个连接` : "查看"}
++            onClick={() => setOverlay({ kind: "agents" })}
+           />
+           {sources.error ? (
+             <p className="hub-data-notice" role="status">
+@@ -265,7 +781,12 @@ export function HubDashboard({
+             </p>
+           ) : null}
+           {sources.data ? (
+-            <HubNetwork sources={sources.data} />
++            <HubNetwork
++              sources={sources.data}
++              onSelectSource={(source) =>
++                setOverlay({ kind: "agent", sourceId: source.source_id })
++              }
++            />
+           ) : (
+             <div className="hub-network-loading">
+               <InfinityIcon size={72} />
+@@ -334,13 +855,20 @@ export function HubDashboard({
+                 </p>
+               ) : null}
+               {dashboard.data?.record_types.map((row, index) => (
+-                <div className="hub-record-type" key={row.kind}>
++                <button
++                  className="hub-record-type"
++                  key={row.kind}
++                  type="button"
++                  onClick={() => setOverlay({ kind: "records" })}
++                  aria-label={`${row.label}：${row.count} 条，查看分布`}
++                >
+                   <span>
+                     <i className={`hub-type-dot hub-type-dot--${index}`} />
+                     {row.label}
+                   </span>
+                   <strong>{number(row.count)}</strong>
+-                </div>
++                  <ChevronRight size={14} />
++                </button>
+               )) ?? (
+                 <p className="hub-empty-copy">
+                   {dashboard.loading ? "正在读取…" : "记录组成暂时不可用"}
+@@ -366,7 +894,11 @@ export function HubDashboard({
+           </button>
+         </section>
+         <section className="hub-card hub-trend-card">
+-          <CardHeading title="共享记录趋势" badge="最近 7 天 · UTC" />
++          <CardHeading
++            title="共享记录趋势"
++            action="查看明细"
++            onClick={() => setOverlay({ kind: "trend" })}
++          />
+           {dashboard.data?.activity_state === "ready" ? (
+             <ActivityChart data={dashboard.data.daily_activity} />
+           ) : (
+@@ -389,54 +921,22 @@ export function HubDashboard({
+           </small>
+         </section>
+         <section className="hub-card hub-service-card">
+-          <CardHeading title="服务状态" />
++          <CardHeading
++            title="服务状态"
++            action="查看详情"
++            onClick={() => setOverlay({ kind: "services" })}
++          />
+           <div className="hub-service-list">
+-            <Service
+-              Icon={Server}
+-              title="Hub 管理服务"
+-              value={`已连接 · ${bootstrap.version ?? "版本未提供"}`}
+-              ready
+-            />
+-            <Service
+-              Icon={ShieldCheck}
+-              title="项目范围读取"
+-              value={
+-                bootstrap.features.includes("scoped_console_reads")
+-                  ? "已启用"
+-                  : "尚未提供"
+-              }
+-              ready={bootstrap.features.includes("scoped_console_reads")}
+-            />
+-            <Service
+-              Icon={Database}
+-              title="记录统计"
+-              value={
+-                dashboard.loading
+-                  ? "读取中"
+-                  : dashboard.error
+-                    ? "暂时不可用"
+-                    : "已确认"
+-              }
+-              ready={!!dashboard.data && !dashboard.loading && !dashboard.error}
+-            />
+-            <Service
+-              Icon={HardDrive}
+-              title="最近备份"
+-              value={
+-                backups.loading
+-                  ? "读取中"
+-                  : backups.error
+-                    ? backupState
+-                      ? `上次确认：${backupState}`
+-                      : "暂时无法确认"
+-                    : (backupState ?? "暂时无法确认")
+-              }
+-              ready={
+-                !backups.loading &&
+-                !backups.error &&
+-                backups.data?.execution.state === "completed"
+-              }
+-            />
++            {serviceRows.map((row, index) => (
++              <Service
++                key={row.title}
++                Icon={row.Icon}
++                title={row.title}
++                value={row.value}
++                ready={row.ready}
++                onClick={() => setOverlay({ kind: "service", index })}
++              />
++            ))}
+           </div>
+           {backups.error ? (
+             <p className="hub-card-footnote" role="status">
+@@ -466,7 +966,15 @@ export function HubDashboard({
+         </p>
+         {memories.error ? <p role="alert">{memories.error}</p> : null}
+         {memories.data?.items.map((item) => (
+-          <p key={item.record_id}>{item.content}</p>
++          <button
++            className="hub-memory-peek__item"
++            key={item.record_id}
++            type="button"
++            onClick={() => openNav("library")}
++          >
++            <span>{item.content}</span>
++            <ChevronRight size={15} />
++          </button>
+         ))}
+         {memories.data?.candidate_limit_reached ? (
+           <p>还有候选内容尚未检查，请到记忆库继续查看。</p>
+@@ -483,6 +991,7 @@ export function HubDashboard({
+         </button>
+         {emptyMemories ? firstMemoryGuide : null}
+       </details>
++      {renderOverlay()}
+     </div>
+   );
+ }
+@@ -577,25 +1086,69 @@ function Service({
+   title,
+   value,
+   ready,
++  onClick,
+ }: {
+   Icon: typeof Server;
+   title: string;
+   value: string;
+   ready: boolean;
++  onClick(): void;
+ }) {
+   return (
+-    <div className="hub-service">
++    <button
++      className="hub-service"
++      type="button"
++      onClick={onClick}
++      aria-label={`${title}：${value}，查看详情`}
++    >
+       <Icon size={19} strokeWidth={1.5} />
+       <span>{title}</span>
+       <strong className={ready ? "is-confirmed" : ""}>
+         {ready ? <Check size={13} /> : null}
+         {value}
+       </strong>
++      <ChevronRight className="hub-service-chevron" size={14} />
++    </button>
++  );
++}
++function OverlayEmpty({
++  text,
++  action,
++}: {
++  text: string;
++  action?: { label: string; onClick(): void };
++}) {
++  return (
++    <div className="hub-overlay__empty">
++      <p>{text}</p>
++      {action ? (
++        <button
++          className="hub-overlay__action"
++          type="button"
++          onClick={action.onClick}
++        >
++          {action.label}
++        </button>
++      ) : null}
+     </div>
+   );
+ }
++/* Device names are the only form-factor hint the Hub API exposes, so infer a
++   matching icon (laptop, small desktop, screen, phone, tablet, server). */
++function deviceIconFor(name: string) {
++  const value = name.toLowerCase();
++  if (/macbook|笔记本|laptop|notebook/.test(value)) return Laptop;
++  if (/mac ?mini|macmini|imac|台式|desktop/.test(value)) return PcCase;
++  if (/ipad|平板|tablet/.test(value)) return Tablet;
++  if (/iphone|手机|phone|android/.test(value)) return Smartphone;
++  if (/server|服务器|nas/.test(value)) return Server;
++  if (/\bpc\b|主机|workstation|tower/.test(value)) return Monitor;
++  return Monitor;
++}
++
+ function ActivityChart({ data }: { data: HubDashboardData["daily_activity"] }) {
+   const id = useId().replace(/:/g, "");
++  const [active, setActive] = useState<number | null>(null);
+   const max = Math.max(2, ...data.map((day) => day.count));
+   const points = data.map((day, index) => [
+     42 + index * 57,
+@@ -604,12 +1157,44 @@ function ActivityChart({ data }: { data: HubDashboardData["daily_activity"] }) {
+   const line = points
+     .map(([x, y], index) => `${index ? "L" : "M"} ${x} ${y}`)
+     .join(" ");
++  const point = active === null ? null : points[active];
++  const day = active === null ? null : data[active];
++  const tipWidth = 120;
++  const tipHeight = 30;
++  const tipX = point
++    ? Math.min(384 - tipWidth, Math.max(42, point[0] - tipWidth / 2))
++    : 0;
++  const tipY = point
++    ? point[1] - tipHeight - 12 >= 4
++      ? point[1] - tipHeight - 12
++      : point[1] + 12
++    : 0;
++
++  function handlePointerMove(event: ReactPointerEvent<SVGSVGElement>) {
++    const svg = event.currentTarget;
++    const matrix = svg.getScreenCTM();
++    if (!matrix) return;
++    const cursor = svg.createSVGPoint();
++    cursor.x = event.clientX;
++    cursor.y = event.clientY;
++    const local = cursor.matrixTransform(matrix.inverse());
++    const index = Math.round((local.x - 42) / 57);
++    setActive(Math.max(0, Math.min(data.length - 1, index)));
++  }
++
++  function clearActive() {
++    setActive(null);
++  }
++
+   return (
+     <div className="hub-activity-chart">
+       <svg
+         viewBox="0 0 420 178"
+         role="img"
+         aria-label={`最近七天共享记录：${data.map((day) => `${day.date} ${day.count} 条`).join("，")}`}
++        onPointerMove={handlePointerMove}
++        onPointerLeave={clearActive}
++        onPointerCancel={clearActive}
+       >
+         <defs>
+           <linearGradient id={`${id}-fill`} x1="0" y1="0" x2="0" y2="1">
+@@ -641,25 +1226,41 @@ function ActivityChart({ data }: { data: HubDashboardData["daily_activity"] }) {
+           strokeWidth="2.8"
+           strokeLinejoin="round"
+         />
++        {point ? (
++          <g className="hub-chart-crosshair">
++            <line x1={point[0]} y1="24" x2={point[0]} y2="150" />
++            <line x1="42" y1={point[1]} x2="390" y2={point[1]} />
++          </g>
++        ) : null}
+         {points.map(([x, y], index) => (
+           <g key={data[index].date}>
++            {active === index ? (
++              <circle cx={x} cy={y} r="10" fill="#a78bfa" fillOpacity=".16" />
++            ) : null}
+             <circle
+               cx={x}
+               cy={y}
+-              r="3.6"
+-              fill="#d0bbff"
+-              stroke="#8470c8"
++              r={active === index ? 5 : 3.6}
++              fill={active === index ? "#eadfff" : "#d0bbff"}
++              stroke={active === index ? "#c2adff" : "#8470c8"}
+               strokeWidth="2"
+-            >
+-              <title>
+-                {data[index].date}：{data[index].count} 条
+-              </title>
+-            </circle>
++            />
+             <text x={x} y="170" textAnchor="middle">
+               {data[index].date.slice(5).replace("-", "/")}
+             </text>
+           </g>
+         ))}
++        {point && day ? (
++          <g
++            className="hub-chart-tip"
++            transform={`translate(${tipX}, ${tipY})`}
++          >
++            <rect width={tipWidth} height={tipHeight} rx="8" />
++            <text x={tipWidth / 2} y="19" textAnchor="middle">
++              {day.date.slice(5).replace("-", "/")} · {day.count} 条
++            </text>
++          </g>
++        ) : null}
+       </svg>
+     </div>
+   );
+diff --git a/memhub/apps/web/src/HubNetwork.test.tsx b/memhub/apps/web/src/HubNetwork.test.tsx
+index 466a6a0..5e524f3 100644
+--- a/memhub/apps/web/src/HubNetwork.test.tsx
++++ b/memhub/apps/web/src/HubNetwork.test.tsx
+@@ -16,7 +16,7 @@ const source = (index: number): HubSource => ({
+ });
+ afterEach(cleanup);
+ it.each([0, 1, 4, 8, 30])(
+-  "renders exactly %i real source nodes with an accessible complete inventory",
++  "renders exactly %i real source nodes in the collaboration figure",
+   (count) => {
+     const sources = Array.from({ length: count }, (_, index) => source(index));
+     const { container } = render(<HubNetwork sources={sources} />);
+@@ -27,13 +27,7 @@ it.each([0, 1, 4, 8, 30])(
+         name: `Agent 协作网络：${count} 个有效连接`,
+       }),
+     ).toBeTruthy();
+-    for (const entry of sources)
+-      expect(
+-        screen.getByText(
+-          `${entry.device_display_name} · ${entry.display_name}`,
+-          { selector: "li" },
+-        ),
+-      ).toBeTruthy();
++    expect(screen.queryByText("查看全部连接名称")).toBeNull();
+     if (count === 0) expect(screen.getByText(/连接第一个 Agent/)).toBeTruthy();
+   },
+ );
+diff --git a/memhub/apps/web/src/HubNetwork.tsx b/memhub/apps/web/src/HubNetwork.tsx
+index 819b31f..0075166 100644
+--- a/memhub/apps/web/src/HubNetwork.tsx
++++ b/memhub/apps/web/src/HubNetwork.tsx
+@@ -1,8 +1,14 @@
+ import { Bot, Infinity as InfinityIcon, Network } from "lucide-react";
+-import { useId } from "react";
++import { type KeyboardEvent as ReactKeyboardEvent, useId } from "react";
+ import type { HubSource } from "./hub-api";
+ 
+-export function HubNetwork({ sources }: { sources: HubSource[] }) {
++export function HubNetwork({
++  sources,
++  onSelectSource,
++}: {
++  sources: HubSource[];
++  onSelectSource?: (source: HubSource) => void;
++}) {
+   const id = useId().replace(/:/g, "");
+   const nodes = [
+     ...new Map(sources.map((source) => [source.source_id, source])).values(),
+@@ -18,7 +24,6 @@ export function HubNetwork({ sources }: { sources: HubSource[] }) {
+       <div className="hub-network__canvas">
+         <svg
+           viewBox={`0 0 760 ${height}`}
+-          role="img"
+           aria-label="当前项目的真实 Agent 连接与共享中枢"
+         >
+           <defs>
+@@ -52,11 +57,27 @@ export function HubNetwork({ sources }: { sources: HubSource[] }) {
+                 ? center.y - 28
+                 : 58 + row * ((height - 158) / Math.max(1, rows - 1));
+             const path = `M ${x} ${y + 4} C ${center.x + side * 94} ${y - 12}, ${center.x + side * 115} ${center.y}, ${center.x + side * 64} ${center.y}`;
++            const interaction = onSelectSource
++              ? {
++                  role: "button" as const,
++                  tabIndex: 0,
++                  "aria-label": `${source.display_name}，${source.device_display_name}，查看详情`,
++                  style: { cursor: "pointer" as const },
++                  onClick: () => onSelectSource(source),
++                  onKeyDown: (event: ReactKeyboardEvent<SVGGElement>) => {
++                    if (event.key === "Enter" || event.key === " ") {
++                      event.preventDefault();
++                      onSelectSource(source);
++                    }
++                  },
++                }
++              : {};
+             return (
+               <g
+                 key={source.source_id}
+                 data-source-id={source.source_id}
+                 className="hub-network__node"
++                {...interaction}
+               >
+                 <title>{`${source.device_display_name} · ${source.display_name}`}</title>
+                 <path
+@@ -88,6 +109,7 @@ export function HubNetwork({ sources }: { sources: HubSource[] }) {
+                   filter={`url(#${id}-glow)`}
+                 />
+                 <circle
++                  className="hub-network__node-ring"
+                   cx={x}
+                   cy={y}
+                   r="29"
+@@ -198,18 +220,6 @@ export function HubNetwork({ sources }: { sources: HubSource[] }) {
+         </p>
+       ) : null}
+       <figcaption>共享链路示意 · {nodes.length} 个有效来源连接</figcaption>
+-      {nodes.length > 0 ? (
+-        <details className="hub-network__inventory">
+-          <summary>查看全部连接名称</summary>
+-          <ul>
+-            {nodes.map((source) => (
+-              <li key={source.source_id}>
+-                {source.device_display_name} · {source.display_name}
+-              </li>
+-            ))}
+-          </ul>
+-        </details>
+-      ) : null}
+     </figure>
+   );
+ }
+diff --git a/memhub/apps/web/src/HubQuestion.tsx b/memhub/apps/web/src/HubQuestion.tsx
+index 4b28569..487b342 100644
+--- a/memhub/apps/web/src/HubQuestion.tsx
++++ b/memhub/apps/web/src/HubQuestion.tsx
+@@ -152,6 +152,11 @@ export function HubQuestion({
+               提问
+             </R6Button>
+           </form>
++          {!answer && !busy && !error && (
++            <p className="hub-question-hint">
++              还没有提问。输入问题后，系统会在当前项目的记忆中查找答案，并列出引用来源。
++            </p>
++          )}
+           {busy && <p role="status">正在查找当前项目的记忆…</p>}
+           {error && <p role="alert">{error}</p>}
+           {answer && (
+diff --git a/memhub/apps/web/src/HubSelect.tsx b/memhub/apps/web/src/HubSelect.tsx
+new file mode 100644
+index 0000000..cfa3cbc
+--- /dev/null
++++ b/memhub/apps/web/src/HubSelect.tsx
+@@ -0,0 +1,262 @@
++// biome-ignore-all lint/a11y/noNoninteractiveElementToInteractiveRole: Custom combobox listbox renders ul/li with ARIA roles.
++// biome-ignore-all lint/a11y/useFocusableInteractive: Focus stays on the combobox trigger; aria-activedescendant tracks the option.
++// biome-ignore-all lint/a11y/useKeyWithClickEvents: Keyboard selection is handled by the combobox trigger.
++import { Check, ChevronDown } from "lucide-react";
++import {
++  type KeyboardEvent,
++  useEffect,
++  useId,
++  useLayoutEffect,
++  useRef,
++  useState,
++} from "react";
++import { createPortal } from "react-dom";
++
++export interface HubSelectOption {
++  value: string;
++  label: string;
++  disabled?: boolean;
++}
++
++interface Position {
++  left: number;
++  top: number;
++  width: number;
++  maxHeight: number;
++}
++
++export function HubSelect({
++  label,
++  value,
++  options,
++  onChange,
++  disabled = false,
++  className = "",
++  variant = "field",
++  align = "start",
++}: {
++  label: string;
++  value: string;
++  options: HubSelectOption[];
++  onChange: (value: string) => void;
++  disabled?: boolean;
++  className?: string;
++  variant?: "field" | "bare";
++  align?: "start" | "end";
++}) {
++  const id = useId();
++  const listId = `${id}-listbox`;
++  const [open, setOpen] = useState(false);
++  const [active, setActive] = useState(0);
++  const [position, setPosition] = useState<Position | null>(null);
++  const trigger = useRef<HTMLButtonElement>(null);
++  const menu = useRef<HTMLUListElement>(null);
++  const selected = options.find((option) => option.value === value);
++  const selectedIndex = options.findIndex((option) => option.value === value);
++
++  function openMenu(initial = selectedIndex) {
++    if (disabled) return;
++    const fallback = options.findIndex((option) => !option.disabled);
++    setActive(initial >= 0 ? initial : Math.max(0, fallback));
++    setOpen(true);
++  }
++  function close() {
++    setOpen(false);
++  }
++  function commit(option: HubSelectOption | undefined) {
++    if (!option || option.disabled) return;
++    onChange(option.value);
++    close();
++    trigger.current?.focus();
++  }
++  function move(step: number) {
++    if (!options.length) return;
++    let next = active;
++    for (let count = 0; count < options.length; count += 1) {
++      next = (next + step + options.length) % options.length;
++      if (!options[next]?.disabled) break;
++    }
++    setActive(next);
++  }
++
++  useEffect(() => {
++    if (!open) return;
++    function onPointerDown(event: PointerEvent) {
++      const target = event.target as Node;
++      if (trigger.current?.contains(target)) return;
++      if (menu.current?.contains(target)) return;
++      setOpen(false);
++    }
++    document.addEventListener("pointerdown", onPointerDown, true);
++    return () =>
++      document.removeEventListener("pointerdown", onPointerDown, true);
++  }, [open]);
++
++  useLayoutEffect(() => {
++    if (!open) {
++      setPosition(null);
++      return;
++    }
++    function place() {
++      const button = trigger.current;
++      if (!button) return;
++      const rect = button.getBoundingClientRect();
++      const menuHeight = menu.current?.offsetHeight ?? 0;
++      const spaceBelow = window.innerHeight - rect.bottom - 12;
++      const spaceAbove = rect.top - 12;
++      const placeAbove = menuHeight > spaceBelow && spaceAbove > spaceBelow;
++      const width = Math.max(rect.width, variant === "bare" ? 240 : 0);
++      let left = align === "end" ? rect.right - width : rect.left;
++      left = Math.min(
++        Math.max(8, left),
++        Math.max(8, window.innerWidth - width - 8),
++      );
++      setPosition({
++        left,
++        width,
++        maxHeight: Math.max(
++          160,
++          Math.min(320, placeAbove ? spaceAbove : spaceBelow),
++        ),
++        top: placeAbove
++          ? Math.max(8, rect.top - 6 - menuHeight)
++          : rect.bottom + 6,
++      });
++    }
++    place();
++    window.addEventListener("scroll", place, true);
++    window.addEventListener("resize", place);
++    return () => {
++      window.removeEventListener("scroll", place, true);
++      window.removeEventListener("resize", place);
++    };
++  }, [open, align, variant]);
++
++  useLayoutEffect(() => {
++    if (!open) return;
++    const option = menu.current?.querySelector<HTMLElement>(
++      `[data-index="${active}"]`,
++    );
++    option?.scrollIntoView?.({ block: "nearest" });
++  }, [open, active]);
++
++  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
++    if (disabled) return;
++    if (!open) {
++      if (
++        event.key === "ArrowDown" ||
++        event.key === "ArrowUp" ||
++        event.key === "Enter" ||
++        event.key === " "
++      ) {
++        event.preventDefault();
++        openMenu(
++          event.key === "ArrowUp" && selectedIndex < 0
++            ? options.length - 1
++            : selectedIndex,
++        );
++      }
++      return;
++    }
++    if (event.key === "ArrowDown") {
++      event.preventDefault();
++      move(1);
++    } else if (event.key === "ArrowUp") {
++      event.preventDefault();
++      move(-1);
++    } else if (event.key === "Home") {
++      event.preventDefault();
++      setActive(0);
++    } else if (event.key === "End") {
++      event.preventDefault();
++      setActive(options.length - 1);
++    } else if (event.key === "Enter" || event.key === " ") {
++      event.preventDefault();
++      commit(options[active]);
++    } else if (event.key === "Escape") {
++      event.preventDefault();
++      close();
++    } else if (event.key === "Tab") {
++      close();
++    }
++  }
++
++  return (
++    <div
++      className={`hub-select${variant === "bare" ? " is-bare" : ""}${className ? ` ${className}` : ""}`}
++    >
++      <button
++        ref={trigger}
++        type="button"
++        role="combobox"
++        aria-label={label}
++        aria-haspopup="listbox"
++        aria-expanded={open}
++        aria-controls={listId}
++        aria-activedescendant={open ? `${id}-option-${active}` : undefined}
++        className="hub-select__trigger"
++        data-value={value}
++        disabled={disabled}
++        onClick={() => (open ? close() : openMenu())}
++        onKeyDown={onKeyDown}
++      >
++        <span
++          className={`hub-select__value${selected ? "" : " is-placeholder"}`}
++        >
++          {selected?.label ?? "请选择"}
++        </span>
++        <ChevronDown
++          className="hub-select__chevron"
++          size={14}
++          aria-hidden="true"
++        />
++      </button>
++      {open
++        ? createPortal(
++            <ul
++              ref={menu}
++              id={listId}
++              role="listbox"
++              aria-label={label}
++              className="hub-select__menu"
++              style={{
++                left: position?.left ?? 0,
++                top: position?.top ?? 0,
++                width: position?.width,
++                maxHeight: position?.maxHeight,
++                visibility: position ? "visible" : "hidden",
++              }}
++            >
++              {options.map((option, index) => (
++                <li
++                  key={option.value}
++                  id={`${id}-option-${index}`}
++                  role="option"
++                  aria-selected={option.value === value}
++                  aria-disabled={option.disabled || undefined}
++                  data-index={index}
++                  className={`hub-select__option${index === active ? " is-active" : ""}`}
++                  onMouseEnter={() => setActive(index)}
++                  onMouseDown={(event) => event.preventDefault()}
++                  onClick={() => commit(option)}
++                >
++                  <span className="hub-select__option-label">
++                    {option.label}
++                  </span>
++                  <Check
++                    className="hub-select__check"
++                    size={14}
++                    aria-hidden="true"
++                    style={{
++                      visibility: option.value === value ? "visible" : "hidden",
++                    }}
++                  />
++                </li>
++              ))}
++            </ul>,
++            document.body,
++          )
++        : null}
++    </div>
++  );
++}
+diff --git a/memhub/apps/web/src/ModelCatalogPicker.tsx b/memhub/apps/web/src/ModelCatalogPicker.tsx
+index f3fbdd6..56a8b20 100644
+--- a/memhub/apps/web/src/ModelCatalogPicker.tsx
++++ b/memhub/apps/web/src/ModelCatalogPicker.tsx
+@@ -54,26 +54,22 @@ export function ModelCatalogPicker({
+   onSelect(model: string): void;
+   controlsRef?: Ref<ModelCatalogActions>;
+ }) {
++  const savedProfileId = savedProfile?.profile_id;
++  const savedProfileRevision = savedProfile?.revision;
+   const input = useMemo<ModelCatalogInput>(
+     () => ({
+       provider_kind: provider,
+       base_url: baseUrl.trim(),
+       ...(apiKey.trim()
+         ? { api_key: apiKey.trim() }
+-        : savedProfile
++        : savedProfileId
+           ? {
+-              profile_id: savedProfile.profile_id,
+-              expected_profile_revision: savedProfile.revision,
++              profile_id: savedProfileId,
++              expected_profile_revision: savedProfileRevision,
+             }
+           : {}),
+     }),
+-    [
+-      provider,
+-      baseUrl,
+-      apiKey,
+-      savedProfile?.profile_id,
+-      savedProfile?.revision,
+-    ],
++    [provider, baseUrl, apiKey, savedProfileId, savedProfileRevision],
+   );
+   const [state, setState] = useState<{
+     input: ModelCatalogInput;
+@@ -83,6 +79,7 @@ export function ModelCatalogPicker({
+   } | null>(null);
+   const request = useRef<AbortController | null>(null);
+   const lastAttempt = useRef<ModelCatalogInput | null>(null);
++  // biome-ignore lint/correctness/useExhaustiveDependencies: Abort the in-flight catalog request when the input changes.
+   useEffect(
+     () => () => {
+       request.current?.abort();
+@@ -124,6 +121,7 @@ export function ModelCatalogPicker({
+   const result = current?.result;
+   return (
+     <div className="model-form-field">
++      <span className="model-field-label">可用模型</span>
+       <button
+         type="button"
+         className="quiet"
+diff --git a/memhub/apps/web/src/ModelSettings.test.tsx b/memhub/apps/web/src/ModelSettings.test.tsx
+index e062aad..53e5cd4 100644
+--- a/memhub/apps/web/src/ModelSettings.test.tsx
++++ b/memhub/apps/web/src/ModelSettings.test.tsx
+@@ -1385,3 +1385,46 @@ it("keeps the form open and explains a 401 under the key input instead of collap
+   expect(screen.queryByText("已保存，连接通过")).toBeNull();
+   expect(screen.queryByText("已保存，测试未通过")).toBeNull();
+ });
++
++it("confirms a successful single-card setup with a check and only closes on acknowledgement", async () => {
++  cleanup();
++  const user = userEvent.setup();
++  const created = {
++    ...profile,
++    profile_id: "created",
++    revision: 1,
++    capabilities: {
++      endpoint_reachable: true,
++      model_available: true,
++      structured_output: false,
++      embedding_available: true,
++    },
++  };
++  const onSetupComplete = vi.fn();
++  profiles = [];
++  create.mockResolvedValue(created);
++  probeProfile.mockResolvedValue({
++    profile_id: "created",
++    profile_revision: 1,
++    stages: [{ stage: "model", ok: true, code: "ok", latency_ms: 4 }],
++    capabilities: created.capabilities,
++  });
++  activate.mockResolvedValue({ ...created, is_active: true });
++
++  render(<ModelSettings compactSingle onSetupComplete={onSetupComplete} />);
++  await user.type(screen.getByLabelText("生成模型名"), "synthetic-model");
++  await user.type(
++    screen.getByLabelText(/^服务商密钥（API Key）/),
++    "synthetic-key", // pragma: allowlist secret
++  );
++  await user.click(screen.getByRole("button", { name: "测试并完成配置" }));
++
++  const heading = await screen.findByText("连接通过，模型已启用");
++  expect(heading.closest(".model-setup-success")?.textContent).toContain(
++    "memory-model",
++  );
++  expect(onSetupComplete).not.toHaveBeenCalled();
++
++  await user.click(screen.getByRole("button", { name: "完成" }));
++  expect(onSetupComplete).toHaveBeenCalledTimes(1);
++});
+diff --git a/memhub/apps/web/src/ModelSettings.tsx b/memhub/apps/web/src/ModelSettings.tsx
+index ad9b26e..b0ef53d 100644
+--- a/memhub/apps/web/src/ModelSettings.tsx
++++ b/memhub/apps/web/src/ModelSettings.tsx
+@@ -6,7 +6,7 @@ import type {
+   ProbeCode,
+   ProviderKind,
+ } from "@one-memory/contracts";
+-import { Check, Pencil, Plus, RefreshCw } from "lucide-react";
++import { Check, CheckCircle2, Pencil, Plus, RefreshCw } from "lucide-react";
+ import {
+   type FormEvent,
+   type Ref,
+@@ -263,6 +263,7 @@ export function ModelSettings({
+     null,
+   );
+   const [setupError, setSetupError] = useState<string | null>(null);
++  const [setupSuccess, setSetupSuccess] = useState<ModelProfile | null>(null);
+   const flight = useRef(false);
+   const alive = useRef(true);
+   const queuedOpen = useRef<ModelOpenIntent | null>(null);
+@@ -377,6 +378,7 @@ export function ModelSettings({
+     setFields({});
+     setSaveError(null);
+     setSetupError(null);
++    setSetupSuccess(null);
+   }
+ 
+   function newProfile() {
+@@ -400,6 +402,7 @@ export function ModelSettings({
+     setFields({});
+     setSaveError(null);
+     setSetupError(null);
++    setSetupSuccess(null);
+   }
+ 
+   useImperativeHandle(controlsRef, () => ({
+@@ -516,7 +519,11 @@ export function ModelSettings({
+       return false;
+     }
+     if (profile.name !== PRESET_PROFILE_NAME) setSaved(active);
+-    onSetupComplete?.();
++    setSetupSuccess(active);
++    // The single-card flow stays on screen until the person acknowledges the
++    // confirmation; closing it the instant it passes leaves no evidence that
++    // the connection worked.
++    if (!compactSingle) onSetupComplete?.();
+     return true;
+   }
+ 
+@@ -525,6 +532,7 @@ export function ModelSettings({
+     flight.current = true;
+     setSaving(true);
+     setSetupError(null);
++    setSetupSuccess(null);
+     try {
+       const updated =
+         key === undefined
+@@ -602,6 +610,7 @@ export function ModelSettings({
+     setFields(errors);
+     setSaveError(null);
+     setSetupError(null);
++    setSetupSuccess(null);
+     const first = Object.keys(errors)[0];
+     if (first) {
+       if (first.startsWith("embedding-") && !advancedEmbedding) {
+@@ -801,6 +810,20 @@ export function ModelSettings({
+             : "连接通过，正在启用模型…"}
+         </p>
+       )}
++      {compactSingle && setupSuccess && !formOpen && (
++        <div className="model-setup-success" role="status">
++          <CheckCircle2 size={20} aria-hidden="true" />
++          <div>
++            <strong>连接通过，模型已启用</strong>
++            <p>
++              {setupSuccess.name} · {setupSuccess.model}
++            </p>
++          </div>
++          <button type="button" onClick={() => onSetupComplete?.()}>
++            完成
++          </button>
++        </div>
++      )}
+       {setupError && (
+         <p className="model-save-error" role="alert">
+           {setupError}
+diff --git a/memhub/apps/web/src/SdkRawHistory.tsx b/memhub/apps/web/src/SdkRawHistory.tsx
+index 7196a9e..be074be 100644
+--- a/memhub/apps/web/src/SdkRawHistory.tsx
++++ b/memhub/apps/web/src/SdkRawHistory.tsx
+@@ -99,7 +99,7 @@ export function SdkRawHistory({ reader }: { reader?: RawHistoryReader } = {}) {
+ 
+   const items = results ?? recent.map(asContextItem);
+   return (
+-    <section aria-label="SDK 原始对话">
++    <section aria-label="SDK 原始对话" className="sdk-raw-history">
+       {!reader && (
+         <form onSubmit={(event) => void submit(event)}>
+           <label>
+diff --git a/memhub/apps/web/src/hub-api.ts b/memhub/apps/web/src/hub-api.ts
+index eced177..d8a1564 100644
+--- a/memhub/apps/web/src/hub-api.ts
++++ b/memhub/apps/web/src/hub-api.ts
+@@ -14,6 +14,8 @@ export interface HubBootstrap {
+   projects: HubProject[];
+   next_offset: number | null;
+   global_scope: HubProject;
++  /** Only the local copy-only preview server sets this marker. */
++  preview?: "ui-copy-synthetic";
+ }
+ export interface HubSource {
+   source_id: string;
+diff --git a/memhub/apps/web/src/hub-console.css b/memhub/apps/web/src/hub-console.css
+index 0152a58..251e41f 100644
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -255,8 +255,16 @@ html:has(.hub-console, .hub-start) {
+ .hub-workspace {
+   margin-left: 268px;
+   min-width: 0;
++  height: 100vh;
++  /* biome-ignore lint/suspicious/noDuplicateProperties: 100dvh fallback for mobile browser chrome. */
++  height: 100dvh;
++  overflow-y: auto;
++  overscroll-behavior: contain;
+ }
+ .hub-topbar {
++  position: sticky;
++  top: 0;
++  z-index: 25;
+   display: flex;
+   height: 80px;
+   align-items: center;
+@@ -264,7 +272,7 @@ html:has(.hub-console, .hub-start) {
+   gap: 12px;
+   padding: 0 29px;
+   border-bottom: 1px solid #9da6db12;
+-  background: #0e1221a1;
++  background: #0e1221;
+ }
+ .hub-topbar-status,
+ .hub-topbar-actions {
+@@ -292,28 +300,13 @@ html:has(.hub-console, .hub-start) {
+   color: #d1c4f3;
+ }
+ .hub-project-select {
+-  position: relative;
+   min-width: 0;
+ }
+-.hub-project-select select {
+-  appearance: none;
+-  max-width: 200px;
+-  width: 180px;
+-  border: 0;
+-  background: transparent;
+-  color: #bec4db;
+-  padding: 10px 22px 10px 8px;
+-  font-size: 12px;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
++.hub-project-select .hub-select__value {
++  max-width: 180px;
+ }
+-.hub-project-select > svg {
+-  position: absolute;
+-  right: 5px;
+-  top: 50%;
+-  pointer-events: none;
+-  transform: translateY(-50%);
+-  color: #9ca3c0;
++.hub-project-select .hub-select__trigger {
++  gap: 6px;
+ }
+ .hub-console .hub-icon-button {
+   display: inline-flex;
+@@ -363,6 +356,7 @@ html:has(.hub-console, .hub-start) {
+   max-width: 1720px;
+   margin: 0 auto;
+   padding: 24px 24px 36px;
++  scroll-margin-top: 80px;
+ }
+ .hub-content h1 {
+   font-size: 25px;
+@@ -422,6 +416,33 @@ html:has(.hub-console, .hub-start) {
+   color: #9da6c2;
+   font-size: 13px;
+ }
++.hub-page-heading {
++  position: relative;
++  min-height: 62px;
++  margin: 1px 0 24px;
++  padding-left: 16px;
++}
++.hub-page-heading::before {
++  content: "";
++  position: absolute;
++  left: 0;
++  top: 4px;
++  bottom: 5px;
++  width: 4px;
++  border-radius: 4px;
++  background: linear-gradient(#b598ff, #9278df55);
++}
++.hub-page-heading h1 {
++  font-size: clamp(20px, 1.65vw, 27px);
++  font-weight: 600;
++  letter-spacing: 0.5px;
++  margin: 0 0 10px;
++}
++.hub-page-heading p {
++  margin: 0;
++  color: #9da6c2;
++  font-size: 13px;
++}
+ .hub-metrics {
+   display: grid;
+   grid-template-columns: repeat(4, minmax(0, 1fr));
+@@ -611,7 +632,9 @@ html:has(.hub-console, .hub-start) {
+   margin-top: 10px;
+ }
+ .hub-network-card {
+-  padding-bottom: 10px;
++  display: flex;
++  flex-direction: column;
++  padding-bottom: 20px;
+   overflow: hidden;
+ }
+ .hub-network-card .hub-card-heading {
+@@ -650,27 +673,6 @@ html:has(.hub-console, .hub-start) {
+   color: #afb2cc;
+   margin: 0;
+ }
+-.hub-network__inventory {
+-  font-size: 10px;
+-  color: #9b9fbd;
+-  text-align: center;
+-}
+-.hub-network__inventory summary {
+-  cursor: pointer;
+-  list-style: none;
+-  padding: 4px;
+-}
+-.hub-network__inventory ul {
+-  max-height: 130px;
+-  overflow: auto;
+-  list-style: none;
+-  padding: 0;
+-  margin: 7px 0;
+-}
+-.hub-network__inventory li {
+-  margin: 5px 0;
+-  overflow-wrap: anywhere;
+-}
+ .hub-network-loading {
+   display: grid;
+   justify-items: center;
+@@ -858,11 +860,33 @@ html:has(.hub-console, .hub-start) {
+   width: 100%;
+   display: block;
+   margin-top: 3px;
++  cursor: crosshair;
++  touch-action: pan-y;
+ }
+ .hub-activity-chart text {
+   fill: #9ba5c1;
+   font-size: 10px;
+ }
++.hub-chart-crosshair line {
++  stroke: #cbbdff;
++  stroke-opacity: 0.5;
++  stroke-width: 1;
++  stroke-dasharray: 3 3;
++  pointer-events: none;
++}
++.hub-chart-tip {
++  pointer-events: none;
++}
++.hub-chart-tip rect {
++  fill: #282243;
++  stroke: #766a9e;
++  stroke-opacity: 0.9;
++}
++.hub-chart-tip text {
++  fill: #f3eeff;
++  font-size: 11px;
++  font-weight: 500;
++}
+ .hub-trend-card .hub-card-footnote {
+   margin-top: 5px;
+ }
+@@ -1023,7 +1047,10 @@ html:has(.hub-console, .hub-start) {
+ .hub-content form:not(.model-form) > label:has(textarea) {
+   flex-basis: 100%;
+ }
+-.hub-content form:not(.model-form) > label > :is(input:not([type="checkbox"]), select),
++.hub-content
++  form:not(.model-form)
++  > label
++  > :is(input:not([type="checkbox"]), select),
+ .hub-pairing label > select {
+   width: 100%;
+   height: 44px;
+@@ -1041,6 +1068,23 @@ html:has(.hub-console, .hub-start) {
+ .hub-pairing > label > select {
+   max-width: 480px;
+ }
++/* Custom dropdowns reuse the field-label rhythm but cannot be wrapped in <label>. */
++.hub-content .hub-field,
++.hub-pairing .hub-field {
++  display: flex;
++  flex-direction: column;
++  align-items: stretch;
++  gap: 8px;
++  min-width: 0;
++  margin: 16px 0;
++}
++.hub-content form:not(.model-form) > .hub-field {
++  flex: 0 1 320px;
++  margin: 0;
++}
++.hub-pairing .hub-field {
++  max-width: 480px;
++}
+ .hub-pairing > .r6-button,
+ .hub-pairing details > .r6-button {
+   margin: 0 10px 10px 0;
+@@ -1146,7 +1190,8 @@ html:has(.hub-console, .hub-start) {
+ .hub-console .r6-button {
+   border-radius: 8px;
+ }
+-.hub-console button.r6-button:not([data-variant="primary"]):hover:not(:disabled) {
++.hub-console
++  button.r6-button:not([data-variant="primary"]):hover:not(:disabled) {
+   background: #49415f;
+   border-color: #8a7fb0;
+   color: #f1ecff;
+@@ -1170,6 +1215,10 @@ html:has(.hub-console, .hub-start) {
+ .hub-console button.r6-button[data-variant="quiet"]:disabled {
+   background: transparent;
+   border-color: transparent;
++  color: #4f5677;
++  cursor: not-allowed;
++  text-decoration: line-through;
++  text-decoration-color: #4f567766;
+ }
+ .hub-console button.r6-button[data-variant="quiet"]:hover:not(:disabled) {
+   background: #2c3250;
+@@ -1179,6 +1228,38 @@ html:has(.hub-console, .hub-start) {
+ }
+ .hub-content button:not([class]) {
+   border-radius: 8px;
++  background: #232a44;
++  border-color: #3d4566;
++  color: #e6e8f6;
++}
++/* The shared button:hover paints --ac-strong; inside the hub that is pale
++   lavender, so bare buttons need an explicit dark hover to stay readable. */
++.hub-content button:not([class]):hover:not(:disabled) {
++  background: #2c3350;
++  border-color: #5a6188;
++  color: #f4f5ff;
++}
++.hub-content button:not([class]):disabled {
++  background: #232840;
++  border-color: #373d58;
++  color: #7d84a3;
++}
++.hub-content .sdk-memory-library ul {
++  display: grid;
++  gap: 14px;
++  padding-left: 22px;
++}
++.hub-content .sdk-memory-library li {
++  margin: 0;
++}
++.hub-content .sdk-memory-library li > button:not([class]) {
++  display: block;
++  width: fit-content;
++  max-width: 100%;
++  margin: 0;
++  padding: 8px 14px;
++  line-height: 1.55;
++  text-align: left;
+ }
+ .hub-console .r6-settings,
+ .hub-console .r6-settings__section,
+@@ -1186,10 +1267,62 @@ html:has(.hub-console, .hub-start) {
+   color: #e5e8f5;
+   background: transparent;
+ }
++.hub-console .model-settings .model-setup-success {
++  border-color: #2f5c47;
++  background: #142318;
++  color: #a6d8bb;
++}
+ .hub-console .sdk-memory-library,
+ .hub-console .sdk-raw-history {
+   color: #e5e8f5;
+ }
++.hub-console .sdk-raw-history > ol {
++  display: grid;
++  gap: 12px;
++  margin: 16px 0 0;
++  padding: 0;
++  list-style: none;
++  counter-reset: raw-item;
++}
++.hub-console .sdk-raw-history > ol > li {
++  counter-increment: raw-item;
++  position: relative;
++  margin: 0;
++  padding: 14px 16px 14px 52px;
++  border: 1px solid #2f3652;
++  border-radius: 10px;
++  background: #1a2034;
++  overflow-wrap: anywhere;
++}
++.hub-console .sdk-raw-history > ol > li::before {
++  content: counter(raw-item);
++  position: absolute;
++  left: 16px;
++  top: 14px;
++  width: 24px;
++  height: 24px;
++  display: grid;
++  place-items: center;
++  border-radius: 50%;
++  background: #3a3163;
++  color: #d9ccff;
++  font-size: 12px;
++  font-weight: 600;
++}
++.hub-console .sdk-raw-history > ol > li > p,
++.hub-console .sdk-raw-history > ol > li .history-readable__text {
++  margin: 0;
++  line-height: 1.6;
++}
++.hub-console .sdk-raw-history > ol > li > small {
++  display: block;
++  margin-top: 8px;
++  color: #8e97b5;
++  font-size: 12px;
++}
++.hub-console .sdk-raw-history > ol > li > button:not([class]) {
++  margin-top: 10px;
++}
+ @media (min-width: 1700px) {
+   .hub-metric {
+     padding: 19px 27px;
+@@ -1331,8 +1464,10 @@ html:has(.hub-console, .hub-start) {
+   .hub-topbar-divider {
+     display: none;
+   }
+-  .hub-project-select select {
+-    width: 138px;
++  .hub-project-select .hub-select__value {
++    max-width: 138px;
++  }
++  .hub-project-select .hub-select__trigger {
+     font-size: 11px;
+   }
+   .hub-content {
+@@ -1444,7 +1579,10 @@ html:has(.hub-console, .hub-start) {
+ .hub-console .r6-settings .r6-settings-content {
+   min-height: 440px;
+ }
+-.hub-console .r6-settings .r6-model-actions > .r6-button:has(> .r6-button-label > svg:only-child) {
++.hub-console
++  .r6-settings
++  .r6-model-actions
++  > .r6-button:has(> .r6-button-label > svg:only-child) {
+   width: 44px;
+   height: 44px;
+   padding: 0;
+@@ -1456,7 +1594,11 @@ html:has(.hub-console, .hub-start) {
+ .hub-content .r6-settings form:has(> .r6-setting-row) > .r6-model-actions {
+   margin-top: 0;
+ }
+-.hub-content .r6-settings form:has(> .r6-setting-row) > .r6-model-actions > .r6-field {
++.hub-content
++  .r6-settings
++  form:has(> .r6-setting-row)
++  > .r6-model-actions
++  > .r6-field {
+   flex: 0 1 220px;
+ }
+ .hub-content .r6-settings form:has(> .r6-setting-row) > .r6-setting-row {
+@@ -1487,8 +1629,7 @@ html:has(.hub-console, .hub-start) {
+ }
+ .hub-console .r6-settings .model-form input:not([type="checkbox"]),
+ .hub-console .r6-settings .model-form select,
+-.hub-console .r6-settings .model-form button.om-option-menu-button,
+-.hub-console .r6-settings .model-form button.om-option-menu-button:hover:not(:disabled) {
++.hub-console .om-option-menu-button {
+   background: #12192d;
+   color: #eef0fa;
+   border-color: #454b68;
+@@ -1517,27 +1658,35 @@ html:has(.hub-console, .hub-start) {
+   border-color: #454b68;
+   color: #eef0fa;
+ }
+-.hub-console .model-form .om-option-menu-panel [role="option"] {
++.hub-console .om-option-menu-panel [role="option"] {
+   background: transparent;
+   color: #eef0fa;
+ }
+-.hub-console .model-form .om-option-menu-panel [role="option"]:hover:not(:disabled),
+-.hub-console .model-form .om-option-menu-panel [role="option"][aria-selected="true"] {
++.hub-console .om-option-menu-panel [role="option"]:hover:not(:disabled),
++.hub-console .om-option-menu-panel [role="option"][aria-selected="true"] {
+   background: #35324d;
+   color: #ece5ff;
+ }
+ .hub-console .model-form input[type="checkbox"] {
+   accent-color: #a18be6;
+ }
+-/* Bare buttons inside the model form still carry the light desktop palette. */
++/* Bare buttons inside the model form still carry the light desktop palette.
++ * Listbox options are also class-less buttons, so they are excluded here and
++ * styled by the option rules below. */
+ .hub-console .model-form button:not([class]):not([role="option"]),
+ .hub-console .r6-settings .model-form .form-submit > button {
+   background: #a78bfa;
+   border-color: #b9a2ff;
+   color: #17132b;
+ }
+-.hub-console .model-form button:not([class]):not([role="option"]):hover:not(:disabled),
+-.hub-console .r6-settings .model-form .form-submit > button:hover:not(:disabled) {
++.hub-console
++  .model-form
++  button:not([class]):not([role="option"]):hover:not(:disabled),
++.hub-console
++  .r6-settings
++  .model-form
++  .form-submit
++  > button:hover:not(:disabled) {
+   background: #c2adff;
+ }
+ .hub-console .model-form button.quiet {
+@@ -1688,9 +1837,6 @@ html:has(.hub-console, .hub-start) {
+   text-align: left;
+   margin: 0;
+ }
+-.hub-network__inventory[open] {
+-  grid-column: 1 / -1;
+-}
+ .hub-record-type {
+   margin: 7px 0;
+   line-height: 1.3;
+@@ -1757,6 +1903,16 @@ html:has(.hub-console, .hub-start) {
+   }
+ }
+ @media (max-width: 760px) {
++  .hub-page-heading {
++    padding-left: 12px;
++  }
++  .hub-page-heading::before {
++    left: 0;
++  }
++  .hub-page-heading h1 {
++    font-size: 19px;
++    line-height: 1.5;
++  }
+   .hub-dashboard-heading {
+     padding-left: 12px;
+   }
+@@ -1768,3 +1924,855 @@ html:has(.hub-console, .hub-start) {
+     line-height: 1.5;
+   }
+ }
++.hub-console .hub-question-hint {
++  margin: 12px 0 0;
++  color: #9da6c2;
++  font-size: 12px;
++  line-height: 1.6;
++}
++
++/* Motion.Lab-derived dashboard motion: entrance fade-up, card lift, press feedback.
++   Adapted from the motion-lab "fade-in-up", "hover-lift" and "button-press" cases as plain CSS. */
++@keyframes hub-dashboard-fade-up {
++  from {
++    opacity: 0;
++    transform: translateY(8px);
++  }
++  to {
++    opacity: 1;
++    transform: translateY(0);
++  }
++}
++.hub-console .hub-dashboard-heading,
++.hub-console .hub-metric,
++.hub-console .hub-card {
++  animation: hub-dashboard-fade-up 320ms ease-out both;
++}
++.hub-console .hub-metric:nth-child(2) {
++  animation-delay: 40ms;
++}
++.hub-console .hub-metric:nth-child(3) {
++  animation-delay: 80ms;
++}
++.hub-console .hub-metric:nth-child(4) {
++  animation-delay: 120ms;
++}
++.hub-console .hub-card {
++  transition:
++    transform 180ms ease-out,
++    box-shadow 180ms ease-out;
++}
++.hub-console .hub-card:hover {
++  transform: translateY(-2px);
++}
++.hub-console .hub-card-link:active,
++.hub-console .hub-card-action:active {
++  transform: scale(0.98);
++}
++@media (prefers-reduced-motion: reduce) {
++  .hub-console .hub-dashboard-heading,
++  .hub-console .hub-metric,
++  .hub-console .hub-card,
++  .hub-console .hub-card:hover,
++  .hub-console .hub-card-link:active,
++  .hub-console .hub-card-action:active {
++    animation: none;
++    transform: none;
++    transition: none;
++  }
++}
++
++/* === Interactive cards, rows and detail overlay === */
++.hub-console .hub-metric {
++  width: 100%;
++  text-align: left;
++  font: inherit;
++  color: inherit;
++  cursor: pointer;
++  appearance: none;
++}
++.hub-console .hub-metric:hover {
++  border-color: #6e6896;
++  background:
++    radial-gradient(ellipse at 20% 0, #776bb23a, transparent 78%),
++    linear-gradient(115deg, #242b43, #1c2237);
++  transform: translateY(-2px);
++  box-shadow:
++    0 12px 26px #0000002e,
++    inset 0 1px #ded9ff10;
++}
++.hub-console .hub-metric > div {
++  flex: 1;
++  min-width: 0;
++}
++.hub-console .hub-metric-chevron {
++  margin-left: auto;
++  color: #8f95b8;
++  flex-shrink: 0;
++  transition: color 150ms ease;
++}
++.hub-console .hub-metric:hover .hub-metric-chevron {
++  color: #d5c5ff;
++}
++
++.hub-console .hub-device {
++  width: 100%;
++  text-align: left;
++  font: inherit;
++  color: inherit;
++  background: transparent;
++  border: 0;
++  border-bottom: 1px solid #a8adcd0e;
++  border-radius: 8px;
++  cursor: pointer;
++  transition: background-color 150ms ease;
++}
++.hub-console .hub-device:hover {
++  background: #2a3150;
++}
++.hub-device-copy {
++  flex: 1;
++  min-width: 0;
++}
++.hub-device-copy > span {
++  display: block;
++  margin-top: 5px;
++  font-size: 10px;
++  color: #8e98b9;
++}
++.hub-device-chevron {
++  color: #6f779b;
++  flex-shrink: 0;
++}
++.hub-console .hub-device:hover .hub-device-chevron {
++  color: #d5c5ff;
++}
++
++.hub-console .hub-record-type {
++  width: 100%;
++  min-height: 0;
++  padding: 4px 0;
++  text-align: left;
++  font: inherit;
++  font-size: 11px;
++  color: inherit;
++  background: transparent;
++  border: 0;
++  cursor: pointer;
++  border-radius: 6px;
++}
++/* Keep the count and chevron together on the right; a space-between row
++   stranded the number in the middle of the card. */
++.hub-console .hub-record-type > span:first-child {
++  flex: 1;
++  min-width: 0;
++}
++.hub-console .hub-record-type > strong {
++  min-width: 28px;
++  text-align: right;
++  font-variant-numeric: tabular-nums;
++}
++.hub-console .hub-record-type:hover {
++  background: transparent;
++  border-color: transparent;
++  color: #f0ecff;
++}
++.hub-console .hub-record-type:hover strong {
++  color: #d8c9ff;
++}
++.hub-record-type > svg {
++  color: #6f779b;
++  flex-shrink: 0;
++  margin-left: 4px;
++}
++.hub-console .hub-record-type:hover > svg {
++  color: #d5c5ff;
++}
++
++.hub-console .hub-service {
++  width: 100%;
++  min-height: 0;
++  padding: 6px 4px;
++  text-align: left;
++  font: inherit;
++  font-size: 11px;
++  color: inherit;
++  background: transparent;
++  border: 0;
++  border-radius: 8px;
++  cursor: pointer;
++  transition: background-color 150ms ease;
++}
++.hub-console .hub-service:hover {
++  background: #2a3150;
++}
++.hub-service-chevron {
++  color: #6f779b;
++  flex-shrink: 0;
++  margin-left: 2px;
++}
++.hub-console .hub-service:hover .hub-service-chevron {
++  color: #d5c5ff;
++}
++
++.hub-console .hub-memory-peek__item {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 12px;
++  width: 100%;
++  min-height: 0;
++  text-align: left;
++  font: inherit;
++  color: #e6e8f6;
++  background: #1a2034;
++  border: 1px solid #2f3652;
++  border-radius: 10px;
++  padding: 12px 14px;
++  margin: 8px 0;
++  cursor: pointer;
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++  transition:
++    background-color 150ms ease,
++    border-color 150ms ease;
++}
++.hub-console .hub-memory-peek__item:hover {
++  background: #232a44;
++  border-color: #5a6188;
++  color: #f2f4ff;
++}
++.hub-memory-peek__item > svg {
++  flex-shrink: 0;
++  color: #8f95b8;
++}
++
++/* Memory library list: selectable rows instead of bright primary buttons. */
++.hub-console .hub-content .sdk-memory-library > ul {
++  list-style: none;
++  padding-left: 0;
++  margin: 16px 0;
++  display: grid;
++  gap: 12px;
++}
++.hub-console .hub-content .sdk-memory-library > ul > li {
++  margin: 0;
++}
++.hub-console .hub-content .sdk-memory-library > ul > li > button:not([class]) {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 12px;
++  width: 100%;
++  min-height: 0;
++  text-align: left;
++  background: #1a2034;
++  border: 1px solid #2f3652;
++  color: #e6e8f6;
++  border-radius: 10px;
++  padding: 12px 14px;
++  line-height: 1.6;
++  cursor: pointer;
++  transition:
++    background-color 150ms ease,
++    border-color 150ms ease;
++}
++.hub-console
++  .hub-content
++  .sdk-memory-library
++  > ul
++  > li
++  > button:not([class]):hover {
++  background: #232a44;
++  border-color: #5a6188;
++  color: #f2f4ff;
++}
++
++/* History cards: keep the card look, make the disclosure obvious. */
++.hub-console .sdk-raw-history > ol > li:hover {
++  border-color: #464e73;
++  background: #1d2439;
++}
++.hub-console .sdk-raw-history > ol > li > button:not([class]) {
++  min-height: 0;
++  padding: 4px 12px;
++  background: #232a44;
++  border: 1px solid #3d4566;
++  color: #cdd3e6;
++  border-radius: 7px;
++  font-size: 12px;
++  cursor: pointer;
++}
++.hub-console .sdk-raw-history > ol > li > button:not([class]):hover {
++  background: #2c3350;
++  border-color: #5a6188;
++  color: #f0f2fb;
++}
++.hub-console .sdk-raw-history > nav button:not([class]) {
++  min-height: 0;
++  padding: 6px 14px;
++  background: #232a44;
++  border: 1px solid #3d4566;
++  color: #cdd3e6;
++  border-radius: 8px;
++  cursor: pointer;
++}
++.hub-console .sdk-raw-history > nav button:not([class]):hover:not(:disabled) {
++  background: #2c3350;
++  border-color: #5a6188;
++  color: #f0f2fb;
++}
++.hub-console .sdk-raw-history > nav button:not([class]):disabled,
++.hub-console .sdk-raw-history > ol > li > button:not([class]):disabled {
++  background: #232840;
++  border-color: #373d58;
++  color: #6f768f;
++  cursor: not-allowed;
++}
++/* Text/link-style controls default to a transparent background, so the shared
++   button:hover fills them with pale lavender and washes out their label. */
++.hub-console .hub-card-action:hover,
++.hub-console .hub-card-link:hover {
++  background: transparent;
++  border-color: transparent;
++  color: #e2d6ff;
++}
++.hub-console .hub-add-device:hover {
++  background: #8e7bc22e;
++  border-color: #a99bff;
++  color: #f0e9ff;
++}
++.hub-console .hub-activity:hover {
++  background: #222a42;
++  border-radius: 8px;
++  color: #eef0fa;
++}
++.hub-console .hub-menu-toggle:hover {
++  background: #292d46;
++  border-radius: 8px;
++  color: #e6ddff;
++}
++.hub-console .hub-sidebar-scrim:hover {
++  background: #040713a6;
++  border: 0;
++  border-radius: 0;
++}
++.hub-content .history-original > summary {
++  display: inline-flex;
++  align-items: center;
++  gap: 4px;
++  color: #b8a7e9;
++  min-height: 26px;
++}
++
++/* Network nodes respond to hover, focus and click. */
++.hub-console .hub-network__node {
++  transition: opacity 150ms ease;
++}
++.hub-console .hub-network__node:hover .hub-network__node-ring {
++  stroke: #a99bff;
++  stroke-width: 2;
++}
++.hub-network__node:focus {
++  outline: none;
++}
++.hub-network__node:focus-visible .hub-network__node-ring {
++  stroke: #c8b5ff;
++  stroke-width: 3;
++}
++
++/* === Detail overlay === */
++.hub-overlay {
++  position: fixed;
++  inset: 0;
++  z-index: 80;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  padding: 24px;
++  background: #05070fb8;
++  backdrop-filter: blur(4px);
++  animation: hub-overlay-in 180ms ease;
++}
++.hub-console .hub-overlay__backdrop {
++  position: absolute;
++  inset: 0;
++  min-height: 0;
++  padding: 0;
++  border: 0;
++  background: transparent;
++  cursor: default;
++}
++.hub-console .hub-overlay__backdrop:hover {
++  background: transparent;
++  border: 0;
++}
++.hub-overlay__panel {
++  position: relative;
++  z-index: 1;
++  width: min(680px, 100%);
++  max-height: min(80vh, 760px);
++  display: flex;
++  flex-direction: column;
++  border-radius: 20px;
++  border: 1px solid #3b4266;
++  background: linear-gradient(150deg, #1e253c, #161c2f);
++  box-shadow:
++    0 30px 80px #00000066,
++    inset 0 1px #ded9ff12;
++  animation: hub-overlay-zoom 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
++}
++@keyframes hub-overlay-in {
++  from {
++    opacity: 0;
++  }
++  to {
++    opacity: 1;
++  }
++}
++@keyframes hub-overlay-zoom {
++  from {
++    opacity: 0;
++    transform: translateY(12px) scale(0.96);
++  }
++  to {
++    opacity: 1;
++    transform: translateY(0) scale(1);
++  }
++}
++.hub-overlay__head {
++  display: flex;
++  align-items: flex-start;
++  justify-content: space-between;
++  gap: 16px;
++  padding: 20px 22px 14px;
++  border-bottom: 1px solid #2d3452;
++}
++.hub-overlay__titles h2 {
++  margin: 0;
++  font-size: 18px;
++  font-weight: 600;
++  color: #f4f3ff;
++}
++.hub-overlay__titles p {
++  margin: 6px 0 0;
++  color: #9da6c2;
++  font-size: 12px;
++  line-height: 1.5;
++}
++.hub-console .hub-overlay__close {
++  display: grid;
++  place-items: center;
++  width: 34px;
++  height: 34px;
++  min-height: 0;
++  flex-shrink: 0;
++  padding: 0;
++  border-radius: 10px;
++  border: 1px solid #3a4160;
++  background: #232a44;
++  color: #c9cee3;
++  cursor: pointer;
++}
++.hub-console .hub-overlay__close:hover {
++  background: #2c3350;
++  border-color: #5a6188;
++  color: #fff;
++}
++.hub-overlay__body {
++  padding: 16px 22px;
++  overflow-y: auto;
++}
++.hub-overlay__foot {
++  display: flex;
++  justify-content: flex-end;
++  gap: 10px;
++  padding: 14px 22px 20px;
++  border-top: 1px solid #2d3452;
++}
++.hub-overlay__list {
++  list-style: none;
++  margin: 0;
++  padding: 0;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++}
++.hub-overlay__list--plain {
++  gap: 0;
++}
++.hub-console .hub-overlay__row {
++  display: flex;
++  align-items: center;
++  gap: 12px;
++  width: 100%;
++  min-height: 0;
++  text-align: left;
++  font: inherit;
++  color: inherit;
++  background: #1a2034;
++  border: 1px solid #2f3652;
++  border-radius: 12px;
++  padding: 12px 14px;
++  cursor: pointer;
++  transition:
++    background-color 150ms ease,
++    border-color 150ms ease;
++}
++.hub-console .hub-overlay__row:hover {
++  background: #232a44;
++  border-color: #5a6188;
++}
++.hub-overlay__row-icon {
++  display: grid;
++  place-items: center;
++  width: 36px;
++  height: 36px;
++  flex-shrink: 0;
++  border-radius: 10px;
++  color: #bdaef4;
++  background: #2c2a48;
++  border: 1px solid #3d3a60;
++}
++.hub-overlay__row-main {
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  min-width: 0;
++  flex: 1;
++}
++.hub-overlay__row-main strong {
++  font-size: 13px;
++  font-weight: 500;
++  color: #eef0fa;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.hub-overlay__row-main > span {
++  color: #98a1c0;
++  font-size: 11px;
++  line-height: 1.5;
++  overflow-wrap: anywhere;
++}
++.hub-overlay__row-label {
++  display: inline-flex;
++  align-items: center;
++  gap: 8px;
++}
++.hub-overlay__row > svg {
++  color: #6f779b;
++  flex-shrink: 0;
++}
++.hub-console .hub-overlay__row:hover > svg {
++  color: #d5c5ff;
++}
++.hub-status-chip {
++  display: inline-flex;
++  align-items: center;
++  gap: 5px;
++  padding: 3px 9px;
++  border-radius: 999px;
++  border: 1px solid #3d4566;
++  background: #222a42;
++  color: #b7c0d8;
++  font-size: 10px;
++  white-space: nowrap;
++}
++.hub-status-chip.is-ready {
++  color: #a9e2c4;
++  border-color: #2f5a48;
++  background: #1c2f2a;
++}
++.hub-overlay__facts {
++  margin: 0;
++  display: flex;
++  flex-direction: column;
++  gap: 2px;
++}
++.hub-overlay__facts > div {
++  display: grid;
++  grid-template-columns: 96px minmax(0, 1fr);
++  gap: 14px;
++  padding: 11px 2px;
++  border-bottom: 1px solid #2a3150;
++}
++.hub-overlay__facts dt {
++  color: #8f99b8;
++  font-size: 12px;
++}
++.hub-overlay__facts dd {
++  margin: 0;
++  color: #e8eaf5;
++  font-size: 13px;
++  overflow-wrap: anywhere;
++}
++.hub-overlay__paragraph {
++  margin: 0 0 12px;
++  color: #c3c9dd;
++  font-size: 13px;
++  line-height: 1.7;
++}
++.hub-overlay__day {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  padding: 10px 2px;
++  border-bottom: 1px solid #2a3150;
++  color: #aeb6d2;
++  font-size: 13px;
++}
++.hub-overlay__day strong {
++  color: #e8eaf5;
++  font-weight: 500;
++}
++.hub-overlay__empty {
++  padding: 18px 4px;
++  color: #9da6c2;
++  font-size: 13px;
++  line-height: 1.7;
++}
++.hub-overlay__empty p {
++  margin: 0 0 12px;
++}
++.hub-console .hub-overlay__action,
++.hub-console .hub-overlay__ghost {
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  min-height: 38px;
++  padding: 8px 16px;
++  border-radius: 9px;
++  font: inherit;
++  font-size: 13px;
++  cursor: pointer;
++}
++.hub-console .hub-overlay__action {
++  border: 1px solid #b9a2ff;
++  background: #a78bfa;
++  color: #17132b;
++  font-weight: 500;
++}
++.hub-console .hub-overlay__action:hover {
++  background: #c2adff;
++  border-color: #c2adff;
++  color: #17132b;
++}
++.hub-console .hub-overlay__ghost {
++  border: 1px solid #3d4566;
++  background: transparent;
++  color: #b7c0d8;
++}
++.hub-console .hub-overlay__ghost:hover {
++  background: #232a44;
++  border-color: #5a6188;
++  color: #eef0fa;
++}
++
++@media (max-width: 620px) {
++  .hub-overlay {
++    padding: 12px;
++    align-items: flex-end;
++  }
++  .hub-overlay__panel {
++    max-height: 88vh;
++    border-radius: 18px;
++  }
++  .hub-overlay__head {
++    padding: 16px 16px 12px;
++  }
++  .hub-overlay__body {
++    padding: 14px 16px;
++  }
++  .hub-overlay__foot {
++    padding: 12px 16px 16px;
++  }
++  .hub-overlay__facts > div {
++    grid-template-columns: 78px minmax(0, 1fr);
++  }
++}
++@media (prefers-reduced-motion: reduce) {
++  .hub-overlay,
++  .hub-overlay__panel {
++    animation: none;
++  }
++  .hub-console .hub-metric:hover {
++    transform: none;
++  }
++}
++
++/* Native select arrows sit flush against the border; draw the chevron ourselves. */
++.hub-console .hub-content select,
++.hub-console .hub-content .r6-settings select,
++.hub-console .hub-content .r6-settings .model-form select {
++  appearance: none;
++  padding-right: 38px;
++  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239ca3c0' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
++  background-repeat: no-repeat;
++  background-position: right 13px center;
++  background-size: 12px 12px;
++}
++
++/* Custom dropdown: native select popups cannot follow the Hub palette. */
++.hub-select {
++  position: relative;
++  display: inline-flex;
++  min-width: 0;
++}
++.hub-select__trigger {
++  display: inline-flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 10px;
++  width: 100%;
++  height: 44px;
++  min-width: 0;
++  padding: 9px 12px;
++  border: 1px solid #454b68;
++  border-radius: 8px;
++  background: #141a2d;
++  color: #edf0fa;
++  font-size: 13px;
++  text-align: left;
++  transition:
++    border-color 140ms ease,
++    background-color 140ms ease,
++    box-shadow 140ms ease;
++}
++.hub-select__trigger:hover {
++  border-color: #5b6288;
++  background: #182036;
++}
++.hub-select__trigger[aria-expanded="true"] {
++  border-color: #7d6bb0;
++  background: #182036;
++  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.16);
++}
++.hub-select__trigger:disabled {
++  opacity: 0.55;
++}
++.hub-select__value {
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.hub-select__value.is-placeholder {
++  color: #8e95b3;
++}
++.hub-select__chevron {
++  flex: none;
++  color: #9ca3c0;
++  transition: transform 140ms ease;
++}
++.hub-select__trigger[aria-expanded="true"] .hub-select__chevron {
++  transform: rotate(180deg);
++  color: #c2adff;
++}
++.hub-select.is-bare .hub-select__trigger {
++  width: auto;
++  height: 34px;
++  padding: 0 8px;
++  border: 0;
++  background: transparent;
++  color: #bec4db;
++  font-size: 12px;
++}
++.hub-select.is-bare .hub-select__trigger:hover {
++  border: 0;
++  background: #1a2035;
++  color: #f3f4fc;
++}
++.hub-select.is-bare .hub-select__trigger[aria-expanded="true"] {
++  border: 0;
++  background: #1a2035;
++  box-shadow: none;
++  color: #f3f4fc;
++}
++.hub-select__menu {
++  position: fixed;
++  z-index: 100;
++  box-sizing: border-box;
++  margin: 0;
++  padding: 6px;
++  overflow-y: auto;
++  overscroll-behavior: contain;
++  list-style: none;
++  border: 1px solid #363d5c;
++  border-radius: 10px;
++  background: #161b2e;
++  box-shadow:
++    0 18px 44px rgba(3, 5, 12, 0.6),
++    0 2px 8px rgba(3, 5, 12, 0.45);
++  font-family:
++    Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", system-ui,
++    sans-serif;
++  animation: hub-select-in 120ms ease;
++}
++.hub-select.is-bare .hub-select__menu {
++  min-width: 240px;
++}
++.hub-select__option {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 12px;
++  padding: 9px 10px;
++  border-radius: 7px;
++  color: #d7dbee;
++  font-size: 13px;
++  line-height: 1.4;
++  cursor: pointer;
++}
++.hub-select__option.is-active {
++  background: #262c45;
++  color: #f3f4fc;
++}
++.hub-select__option[aria-selected="true"] {
++  background: #2c2748;
++  color: #efe9ff;
++}
++.hub-select__option[aria-selected="true"].is-active {
++  background: #353052;
++}
++.hub-select__option[aria-disabled="true"] {
++  opacity: 0.5;
++  cursor: not-allowed;
++}
++.hub-select__option-label {
++  min-width: 0;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.hub-select__check {
++  flex: none;
++  color: #c2adff;
++}
++@keyframes hub-select-in {
++  from {
++    opacity: 0;
++    transform: translateY(-4px);
++  }
++}
++@media (prefers-reduced-motion: reduce) {
++  .hub-select__menu {
++    animation: none;
++  }
++  .hub-select__chevron {
++    transition: none;
++  }
++}
++/* Footnote sits on the card's bottom edge, level with the device card footnote. */
++.hub-network-card .hub-network {
++  display: flex;
++  flex: 1;
++  flex-direction: column;
++  align-items: stretch;
++}
++.hub-network-card .hub-network figcaption {
++  margin-top: auto;
++  line-height: 1.55;
++}
++.hub-network-card .hub-network__empty {
++  margin: auto;
++}
+diff --git a/memhub/apps/web/src/model-setup-next.css b/memhub/apps/web/src/model-setup-next.css
+index 837eda0..3207503 100644
+--- a/memhub/apps/web/src/model-setup-next.css
++++ b/memhub/apps/web/src/model-setup-next.css
+@@ -105,6 +105,48 @@
+   overflow-wrap: anywhere;
+ }
+ 
++.model-settings .model-setup-success {
++  display: flex;
++  align-items: flex-start;
++  gap: 10px;
++  margin: 16px 0 8px;
++  padding: 14px 16px;
++  border: 1px solid var(--ok-bd, #a3bdaf);
++  border-radius: 10px;
++  background: var(--ok-bg, #edf4f0);
++  color: var(--ok, #2f6b57);
++}
++
++.model-settings .model-setup-success > svg {
++  flex-shrink: 0;
++  margin-top: 1px;
++}
++
++.model-settings .model-setup-success > div {
++  flex: 1 1 auto;
++  min-width: 0;
++}
++
++.model-settings .model-setup-success strong {
++  display: block;
++  font-size: 14px;
++  font-weight: 600;
++}
++
++.model-settings .model-setup-success p {
++  margin: 4px 0 0;
++  font-size: 12px;
++  line-height: 1.6;
++  color: inherit;
++  opacity: 0.82;
++  overflow-wrap: anywhere;
++}
++
++.model-settings .model-setup-success button {
++  flex-shrink: 0;
++  align-self: center;
++}
++
+ .model-settings .model-refresh-notice {
+   display: flex;
+   align-items: center;

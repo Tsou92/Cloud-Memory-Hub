@@ -1,4 +1,5 @@
 import asyncio
+import time
 from uuid import uuid4
 
 import pytest
@@ -209,5 +210,21 @@ def test_purging_latest_revision_keeps_its_source_rule_on_older_original(archive
         ]
         page = await markdown(history, scope, anchor)
         assert page["markdown"] == "# 会话原文\n\n## 助手\n\n可继续共享的进展。\n\n"
+
+    asyncio.run(scenario())
+
+
+def test_history_without_client_time_reports_hub_acceptance_time(archive):
+    # The admin activity list and handoff overlay show a date for every original.
+    history, (scope, _), _, source = archive
+    before = int(time.time()) - 1
+    anchor = source(scope)(("assistant", "没有客户端时间的合成原文。"))
+    namespace = f"cmh:{history.ingest.access.instance_id}:{scope}"
+
+    async def scenario():
+        records, total = await history.page(namespace, 5, 0)
+        assert total == 1 and records[0].raw_id == anchor
+        assert before <= records[0].memory_at <= int(time.time()) + 1
+        assert (await history.get(anchor)).memory_at == records[0].memory_at
 
     asyncio.run(scenario())

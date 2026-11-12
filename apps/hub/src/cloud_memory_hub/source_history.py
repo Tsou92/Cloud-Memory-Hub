@@ -1,8 +1,11 @@
 """History view of the complete, filtered events retained at acceptance."""
 
 import re
+import sqlite3
 import unicodedata
+from datetime import datetime
 
+from one_memory.database_access import main_database
 from one_memory.hy_memory_bridge import HySdkRawRecord, _joined_thread
 from pydantic import ValidationError
 
@@ -58,7 +61,36 @@ class SourceHistory:
     def __init__(self, ingest):
         self.ingest = ingest
 
-    def _record(self, row):
+    def _accepted_times(self, rows):
+        """Hub acceptance time per receipt, the same source the dashboard trend uses."""
+        if not rows:
+            return {}
+        try:
+            placeholders = ",".join("?" for _ in rows)
+            with main_database(self.ingest._queue().database_path).read(
+                row_factory=sqlite3.Row
+            ) as db:
+                found = db.execute(
+                    "SELECT job_id,idempotency_key,created_at FROM memory_write_jobs "
+                    f"WHERE idempotency_key IN ({placeholders})",
+                    [row["request_id"] for row in rows],
+                ).fetchall()
+        except (sqlite3.Error, OSError, AttributeError, AccessError):
+            return {}  # Optional display data; the record itself stays readable.
+        receipts = {row["request_id"]: row["receipt_id"] for row in rows}
+        times = {}
+        for job in found:
+            if receipts.get(job["idempotency_key"]) != job["job_id"]:
+                continue
+            try:
+                created = datetime.fromisoformat(job["created_at"])
+            except (TypeError, ValueError):
+                continue
+            if created.tzinfo is not None:
+                times[job["job_id"]] = int(created.timestamp())
+        return times
+
+    def _record(self, row, accepted_at=None):
         event = validate_original(row, self.ingest.access.instance_id)
         canonical_uuid(row["receipt_id"])
         return HySdkRawRecord(
@@ -68,7 +100,9 @@ class SourceHistory:
             agent_id="cmh:" + event.source_id,
             session_id=event.conversation_id,
             source=row["adapter_id"],
-            memory_at=int(event.occurred_at.timestamp()) if event.occurred_at else None,
+            memory_at=int(event.occurred_at.timestamp())
+            if event.occurred_at
+            else (accepted_at or {}).get(row["receipt_id"]),
         )
 
     def _page(self, namespace, limit, offset):
@@ -86,7 +120,8 @@ class SourceHistory:
                 "ORDER BY receipt.rowid DESC LIMIT ? OFFSET ?",
                 (scope, limit, offset),
             ).fetchall()
-            return [self._record(row) for row in rows], total
+        times = self._accepted_times(rows)
+        return [self._record(row, times) for row in rows], total
 
     def _get(self, identity):
         try:
@@ -101,7 +136,7 @@ class SourceHistory:
                 "JOIN cmh_sources source USING(source_id) WHERE receipt.receipt_id=?",
                 (receipt,),
             ).fetchone()
-            return self._record(row) if row is not None else None
+        return self._record(row, self._accepted_times([row])) if row is not None else None
 
     async def page(self, namespace, limit, offset):
         return await _joined_thread(self._page, namespace, limit, offset)

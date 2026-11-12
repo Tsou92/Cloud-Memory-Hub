@@ -18,7 +18,7 @@ from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[1]
 CONNECTOR = ROOT / "apps/hub/src/cloud_memory_hub/onboarding/connect.py"
-DEFAULT_TAG = "v0.1.6"
+DEFAULT_TAG = "v0.1.7"
 STABLE_TAG = re.compile(r"v(?:0|[1-9][0-9]{0,7})(?:\.(?:0|[1-9][0-9]{0,7})){2}")
 SSH_TARGET = re.compile(
     r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?(?:[A-Za-z0-9][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])"
