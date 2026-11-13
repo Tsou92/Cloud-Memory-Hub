@@ -1,0 +1,187 @@
+--- a/memhub/apps/web/src/HubConnections.tsx
++++ b/memhub/apps/web/src/HubConnections.tsx
+@@ -2,6 +2,7 @@
+ import { HubAgentConnect } from "./HubAgentConnect";
+ import { HubSelect } from "./HubSelect";
+ import type { HubProject } from "./hub-api";
++import { getHubSummary } from "./hub-api";
+ import {
+   agentAdapter,
+   checkPairing,
+@@ -228,6 +229,12 @@
+   ready: "配对文件已准备",
+   rotate_unknown: "核对凭据重新签发结果",
+ };
++/** Three honest states for derived upload activity: unknown, none, a real time. */
++function deviceAcceptedLabel(seconds: number | null | undefined): string {
++  if (seconds === undefined) return "最近上传：暂时无法确认";
++  if (seconds === null) return "最近上传：尚无记录";
++  return `最近上传：${new Date(seconds * 1000).toLocaleString("zh-CN")}`;
++}
+ function HubDevicePairing({
+   instance,
+   project,
+@@ -238,6 +245,8 @@
+   const scope = project.scope_id;
+   const [devices, setDevices] = useState<PairDevice[]>([]);
+   const [sources, setSources] = useState<PairSource[]>([]);
++  // Optional "last accepted upload" per device; absence is shown as unknown.
++  const [acceptedAt, setAcceptedAt] = useState<Record<string, number | null>>({});
+   const [loaded, setLoaded] = useState(false);
+   const [name, setName] = useState("");
+   const [progress, setProgress] = useState<PairProgress | null>(null);
+@@ -303,6 +312,24 @@
+       setDevices(nextDevices);
+       setSources(nextSources);
+       setLoaded(true);
++      // Best effort: a missing summary only hides the timestamp, never the list.
++      void getHubSummary(instance, scope, 0, current.signal).then(
++        (summary) => {
++          if (current.signal.aborted || !alive.current) return;
++          const times: Record<string, number | null> = {};
++          for (const row of summary.sources) {
++            const stamp = row.last_accepted_at ?? null;
++            if (stamp === null) continue;
++            const seen = times[row.device_id];
++            if (seen === undefined || seen === null || stamp > seen)
++              times[row.device_id] = stamp;
++          }
++          setAcceptedAt(times);
++        },
++        () => {
++          if (!current.signal.aborted && alive.current) setAcceptedAt({});
++        },
++      );
+       const saved = readProgress(instance, scope);
+       if (
+         saved?.phase === "grants_unknown" &&
+@@ -943,6 +970,14 @@
+                   : hasPermissions(device, scope)
+                     ? "本项目授权有效"
+                     : "本项目授权不完整"}
++                {device.status !== "revoked" ? (
++                  <p className="hub-device-activity">
++                    {deviceAcceptedLabel(acceptedAt[device.device_id])}
++                    <span className="hub-device-activity-note">
++                      （已接纳上传的时间，不代表设备当前在线）
++                    </span>
++                  </p>
++                ) : null}
+                 <ul>
+                   {sources
+                     .filter(
+--- a/memhub/apps/web/src/hub-api.ts
++++ b/memhub/apps/web/src/hub-api.ts
+@@ -26,6 +26,8 @@
+   status: string;
+   device_display_name: string;
+   device_status: string;
++  /** Unix seconds of the last accepted upload; absent when it cannot be proven. */
++  last_accepted_at?: number | null;
+ }
+ export interface HubSummary {
+   scope: HubProject;
+@@ -217,6 +219,13 @@
+       ].every((key) => typeof row[key] === "string")
+     )
+       invalid();
++    // Optional: a missing acceptance time means "cannot be proven", never zero.
++    if (
++      row.last_accepted_at !== undefined &&
++      row.last_accepted_at !== null &&
++      !Number.isSafeInteger(row.last_accepted_at)
++    )
++      invalid();
+   }
+   return value as unknown as HubSummary;
+ }
+--- a/memhub/apps/web/src/hub-api.test.ts
++++ b/memhub/apps/web/src/hub-api.test.ts
+@@ -144,4 +144,72 @@
+       "不一致",
+     );
+   });
++  it("carries an optional acceptance time without turning it into zero", async () => {
++    const base = {
++      source_id: "source-1",
++      device_id: "device-1",
++      scope_id: "project-a",
++      display_name: "来源",
++      adapter_id: "claude-code",
++      status: "active",
++      device_display_name: "设备",
++      device_status: "active",
++    };
++    const bodies: Array<Record<string, unknown>> = [
++      { ...base, last_accepted_at: 1_700_000_000 },
++      { ...base, last_accepted_at: null },
++      base,
++    ];
++    for (const row of bodies) {
++      vi.stubGlobal(
++        "fetch",
++        vi.fn().mockResolvedValue(
++          Response.json({
++            schema_version: 1,
++            instance_id: "instance",
++            scope: { scope_id: "project-a", display_name: "A" },
++            sources: [row],
++            sources_total: 1,
++            next_offset: null,
++            visible_memory_total: null,
++            visible_history_total: null,
++          }),
++        ),
++      );
++      const summary = await getHubSummary("instance", "project-a");
++      expect(summary.sources[0].last_accepted_at).toBe(row.last_accepted_at);
++    }
++  });
++  it("rejects a non-integer acceptance time", async () => {
++    vi.stubGlobal(
++      "fetch",
++      vi.fn().mockResolvedValue(
++        Response.json({
++          schema_version: 1,
++          instance_id: "instance",
++          scope: { scope_id: "project-a", display_name: "A" },
++          sources: [
++            {
++              source_id: "source-1",
++              device_id: "device-1",
++              scope_id: "project-a",
++              display_name: "来源",
++              adapter_id: "claude-code",
++              status: "active",
++              device_display_name: "设备",
++              device_status: "active",
++              last_accepted_at: "yesterday",
++            },
++          ],
++          sources_total: 1,
++          next_offset: null,
++          visible_memory_total: null,
++          visible_history_total: null,
++        }),
++      ),
++    );
++    await expect(getHubSummary("instance", "project-a")).rejects.toThrow(
++      "不一致",
++    );
++  });
+ });
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -2815,4 +2815,12 @@
+ }
+ .hub-library-empty li + li {
+   margin-top: 4px;
++}
++.hub-device-activity {
++  margin: 4px 0 0;
++  font-size: 11px;
++  color: #a9b1c2;
+ }
++.hub-device-activity-note {
++  color: #8b93a5;
++}

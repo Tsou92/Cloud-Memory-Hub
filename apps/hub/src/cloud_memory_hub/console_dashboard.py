@@ -90,6 +90,57 @@ def _queue_times(queue, rows, deadline):
     return {row["idempotency_key"]: (row["job_id"], row["created_at"]) for row in records}
 
 
+def last_accepted_times(console, scope_id, *, deadline=None):
+    """Most recent accepted upload per device in this scope.
+
+    Derived from receipts plus the write queue's acceptance time, the same
+    pair the dashboard trend already trusts. It is deliberately "last accepted
+    upload", not "online": no heartbeat is written, so a device that is
+    running but idle is indistinguishable from one that is off. Callers must
+    label it that way rather than inventing a presence state.
+    """
+    deadline = deadline or monotonic() + _READ_SECONDS
+    latest = {}
+    by_device = {}
+    try:
+        with console.ingest._database() as db:
+            cursor = db.execute(
+                "SELECT device_id,receipt_id,request_id FROM cmh_event_receipts "
+                "WHERE scope_id=? ORDER BY rowid",
+                (scope_id,),
+            )
+            while batch := cursor.fetchmany(_BATCH_SIZE):
+                if monotonic() > deadline:
+                    return latest
+                hidden = console.reads.suppressed(scope_id)
+                for row in batch:
+                    if "cmhe:" + row["receipt_id"] in hidden:
+                        continue
+                    by_device.setdefault(row["device_id"], []).append(dict(row))
+    except (sqlite3.Error, OSError, AttributeError, AccessError):
+        return latest
+    for device_id, rows in by_device.items():
+        rows = rows[-_BATCH_SIZE:]
+        try:
+            times = _queue_times(console.ingest._queue(), rows, deadline)
+        except (sqlite3.Error, OSError, AttributeError, AccessError):
+            continue
+        for row in rows:
+            matched = times.get(row["request_id"])
+            if matched is None or matched[0] != row["receipt_id"]:
+                continue
+            try:
+                created = datetime.fromisoformat(matched[1])
+            except (TypeError, ValueError):
+                continue
+            if created.tzinfo is None:
+                continue
+            stamp = int(created.timestamp())
+            if stamp > latest.get(device_id, 0):
+                latest[device_id] = stamp
+    return latest
+
+
 def dashboard(console, scope_id, privacy, *, now=None):
     now = now or datetime.now(UTC)
     days = {str((now - timedelta(days=offset)).date()): 0 for offset in range(6, -1, -1)}

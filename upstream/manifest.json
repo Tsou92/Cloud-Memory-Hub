@@ -244,6 +244,11 @@
       "path": "patches/0048-hub-console-state-clarity.patch",
       "scope": "remember_selected_project_tie_service_status_to_real_state_explain_empty_memory_library_and_offer_relogin",
       "digest": "sha256:342aa2a5d48fc3b0e9d8a178a7c8284728b9913194d8d8e82c43a3cfcd8980d2"
+    },
+    {
+      "path": "patches/0049-hub-device-last-accepted.patch",
+      "scope": "show_derived_last_accepted_upload_per_device_with_unknown_and_none_states_never_zero",
+      "digest": "sha256:3e1fc6d9eccba9086147d3b4f680caf03332a90e3a95d7742fb81d24453bd297"
     }
   ]
 }

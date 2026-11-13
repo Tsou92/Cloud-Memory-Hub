@@ -9,7 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
-from cloud_memory_hub.console_dashboard import dashboard
+from cloud_memory_hub.console_dashboard import dashboard, last_accepted_times
 from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
 from cloud_memory_hub.read_contract import (
     READ_RESPONSE_BYTES,
@@ -145,6 +145,10 @@ class ConsoleRead:
             ]
             if any(row["device_display_name"] is None for row in sources):
                 raise AccessError("console_unavailable", 503)
+        # Optional display data: an unavailable timestamp is omitted, never drawn as zero.
+        accepted = last_accepted_times(self, request.scope_id)
+        for row in sources:
+            row["last_accepted_at"] = accepted.get(row["device_id"])
         return self._metadata(
             {
                 "schema_version": 1,
