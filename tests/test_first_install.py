@@ -282,7 +282,7 @@ class FirstInstallTests(unittest.TestCase):
                         [
                             shutil.which("bash"),
                             str(FILE.with_name("install_nas.sh")),
-                            "v0.1.7",
+                            "v0.1.8",
                             str(root / "absent/installation"),
                             "cloud-memory-hub",
                             "8800",

@@ -102,8 +102,7 @@ def test_real_two_project_reads_match_device_content_and_show_registered_sources
                 # a missing value must stay absent rather than become zero.
                 accepted = state["sources"][0]["last_accepted_at"]
                 assert accepted is None or (
-                    isinstance(accepted, int)
-                    and 0 < accepted <= int(time.time())
+                    isinstance(accepted, int) and 0 < accepted <= int(time.time())
                 )
                 assert "credential" not in summary.text
             assert ids(await read(web, admin, "global")) == set()

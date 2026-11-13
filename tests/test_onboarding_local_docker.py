@@ -17,7 +17,7 @@ from unittest.mock import patch
 from scripts import install_local_docker as local
 from scripts import install_release_fetch as release
 
-TAG = "v0.1.7"
+TAG = "v0.1.8"
 IMAGE = "sha256:" + "a" * 64
 COMMIT = "b" * 40
 CONTAINER = "c" * 64

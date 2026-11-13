@@ -234,16 +234,10 @@ def reset_admin_password(config: HubConfig, new_password: str) -> None:
     temporary = None
     try:
         info = config.config_dir.lstat()
-        if (
-            not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077
-        ):
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise AdminCredentialError("admin_credential_unavailable", 503)
         read_private_file(path)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=".admin-token-", dir=config.config_dir
-        )
+        descriptor, temporary = tempfile.mkstemp(prefix=".admin-token-", dir=config.config_dir)
         with os.fdopen(descriptor, "wb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(replacement.encode("ascii") + b"\n")
@@ -251,9 +245,7 @@ def reset_admin_password(config: HubConfig, new_password: str) -> None:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         temporary = None
-        directory = os.open(
-            config.config_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        )
+        directory = os.open(config.config_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             os.fsync(directory)
         finally:

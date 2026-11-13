@@ -4,7 +4,7 @@ set -eu
 umask 077
 unset TAR_OPTIONS GZIP
 
-cmh_tag=v0.1.7
+cmh_tag=v0.1.8
 cmh_prefix="cloud-memory-hub-$cmh_tag"
 cmh_archive="$cmh_prefix-source.tar.gz"
 cmh_release="https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/$cmh_tag"
