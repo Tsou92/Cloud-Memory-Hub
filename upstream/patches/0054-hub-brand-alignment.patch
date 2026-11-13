@@ -1,0 +1,22 @@
+--- a/memhub/apps/web/index.html
++++ b/memhub/apps/web/index.html
+@@ -3,7 +3,7 @@
+   <head>
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <title>MemHub</title>
++    <title>Cloud Memory Hub</title>
+   </head>
+   <body>
+     <div id="root"></div>
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -172,7 +172,7 @@
+         >
+           <InfinityIcon size={48} strokeWidth={2.4} />
+           <span>
+-            <strong>MemoryHub</strong>
++            <strong>Cloud Memory Hub</strong>
+             <small>多 Agent 记忆协同平台</small>
+           </span>
+         </button>
