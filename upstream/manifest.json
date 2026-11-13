@@ -254,6 +254,11 @@
       "path": "patches/0050-hub-experimental-and-data-notice.patch",
       "scope": "persistent_experimental_banner_in_console_linking_a_data_and_privacy_page",
       "digest": "sha256:09938a77dd07dcaf38c716ab3bc23131c56ef08a4512993d25968bd60decce8a"
+    },
+    {
+      "path": "patches/0051-hub-memory-search.patch",
+      "scope": "wire_existing_scoped_memory_search_into_the_console_library_with_clear_action",
+      "digest": "sha256:be0afa3bb9e43e4eea54976c0d710287668ada6b0cbee39cc4df5d531106152a"
     }
   ]
 }

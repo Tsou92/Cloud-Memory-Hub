@@ -1,0 +1,202 @@
+--- a/memhub/apps/web/src/SdkMemoryLibrary.tsx
++++ b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+@@ -31,6 +31,11 @@
+     offset?: number,
+     signal?: AbortSignal,
+   ): Promise<LibraryMemory>;
++  /** Semantic search over this project's memories, when the Hub offers it. */
++  search?(
++    query: string,
++    signal?: AbortSignal,
++  ): Promise<{ memories: LibraryMemory[]; next_offset: number | null }>;
+   errorMessage?(reason: unknown): string;
+ }
+ 
+@@ -76,6 +81,8 @@
+   const [draft, setDraft] = useState("");
+   const [busy, setBusy] = useState(false);
+   const [error, setError] = useState("");
++  const [query, setQuery] = useState("");
++  const [searching, setSearching] = useState(false);
+   const limit = reader ? 10 : 100;
+   const alive = useRef(true);
+   const request = useRef(0);
+@@ -123,6 +130,34 @@
+     }
+   }, [active, offset, status, reader, limit, detailOnly]);
+ 
++  const search = useCallback(
++    async (term: string) => {
++      if (!reader?.search) return;
++      const ticket = ++request.current;
++      setSearching(true);
++      setBusy(true);
++      setError("");
++      setRows([]);
++      setSelected(null);
++      try {
++        const page = await reader.search(term);
++        if (!alive.current || ticket !== request.current) return;
++        setRows(page.memories);
++        setNextOffset(page.next_offset);
++        setOffset(0);
++      } catch (reason) {
++        if (alive.current && ticket === request.current)
++          setError(reader.errorMessage?.(reason) ?? "搜索未完成，请重试。");
++      } finally {
++        if (alive.current && ticket === request.current) {
++          setBusy(false);
++          setSearching(false);
++        }
++      }
++    },
++    [reader],
++  );
++
+   useEffect(() => {
+     void refresh();
+   }, [refresh]);
+@@ -247,10 +282,47 @@
+             : "当前项目的可用记忆。此处仅供查看，不提供修改、忘记或彻底删除。"}
+         </p>
+       )}
++      {!detailOnly && reader?.search ? (
++        <form
++          className="sdk-memory-search"
++          onSubmit={(event) => {
++            event.preventDefault();
++            const term = query.trim();
++            if (term) void search(term);
++          }}
++        >
++          <input
++            type="search"
++            value={query}
++            onChange={(event) => setQuery(event.target.value)}
++            placeholder="在当前项目的记忆中搜索"
++            aria-label="在当前项目的记忆中搜索"
++            disabled={busy}
++          />
++          <button type="submit" disabled={busy || !query.trim()}>
++            {searching ? "搜索中…" : "搜索"}
++          </button>
++          {searching || !query ? null : (
++            <R6Button
++              variant="quiet"
++              disabled={busy}
++              onClick={() => {
++                setQuery("");
++                setSearching(false);
++                void refresh();
++              }}
++            >
++              清除搜索
++            </R6Button>
++          )}
++        </form>
++      ) : null}
+       {!detailOnly && !busy && !error && (
+         <p aria-live="polite">
+           {reader
+-            ? `本页 ${rows.length} 条`
++            ? searching
++              ? ""
++              : `本页 ${rows.length} 条`
+             : total === null
+               ? ""
+               : `共 ${total} 条`}
+--- a/memhub/apps/web/src/SdkMemoryLibrary.test.tsx
++++ b/memhub/apps/web/src/SdkMemoryLibrary.test.tsx
+@@ -190,4 +190,32 @@
+     expect(screen.getByRole("button", { name: "保存修改" })).toBeTruthy();
+     expect(screen.getByRole("button", { name: "删除记忆" })).toBeTruthy();
+   });
++
++  it("searches within the scope and can clear back to the full list", async () => {
++    const found = { ...memory, memory_id: "found-1", content: "命中的内容" };
++    const list = vi.fn().mockResolvedValue({ memories: [memory], next_offset: null });
++    const search = vi.fn().mockResolvedValue({ memories: [found], next_offset: null });
++    const reader: MemoryLibraryReader = {
++      list,
++      get: vi.fn().mockResolvedValue(memory),
++      search,
++    };
++    render(<SdkMemoryLibrary active reader={reader} />);
++    await screen.findByRole("button", { name: "original" });
++    const box = screen.getByRole("searchbox", { name: "在当前项目的记忆中搜索" });
++    await userEvent.type(box, "合成问题");
++    await userEvent.click(screen.getByRole("button", { name: "搜索" }));
++    expect(search).toHaveBeenCalledWith("合成问题");
++    expect(await screen.findByText("命中的内容")).toBeTruthy();
++    await userEvent.click(screen.getByRole("button", { name: "清除搜索" }));
++    expect(await screen.findByText("original")).toBeTruthy();
++    expect(list).toHaveBeenCalled();
++  });
++  it("hides search when the Hub reader has no search endpoint", async () => {
++    render(<SdkMemoryLibrary active reader={readerFor(memory)} />);
++    await screen.findByRole("button", { name: "original" });
++    expect(
++      screen.queryByRole("searchbox", { name: "在当前项目的记忆中搜索" }),
++    ).toBeNull();
++  });
+ });
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -433,6 +433,20 @@
+             limit: 10,
+             offset,
+           });
++          return {
++            memories: page.items.map(memory),
++            next_offset: page.next_offset,
++          };
++        },
++        async search(query: string, signal?: AbortSignal) {
++          // The backend endpoint already existed; the console simply never called it.
++          const page = await readHub(
++            instance,
++            scope,
++            "memory-search",
++            { query, limit: 10 },
++            signal,
++          );
+           return {
+             memories: page.items.map(memory),
+             next_offset: page.next_offset,
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -2844,4 +2844,34 @@
+ .hub-experimental a {
+   color: #c5b1ff;
+   text-underline-offset: 2px;
++}
++.sdk-memory-search {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 8px;
++  margin: 10px 0 6px;
++}
++.sdk-memory-search input {
++  flex: 1 1 220px;
++  min-width: 0;
++  padding: 8px 11px;
++  border: 1px solid #a0a6dc30;
++  border-radius: 8px;
++  background: #0e1426;
++  color: #eef0fa;
++  font: inherit;
+ }
++.sdk-memory-search button[type="submit"] {
++  padding: 8px 14px;
++  border: 1px solid #c7baff44;
++  border-radius: 8px;
++  background: #2a2f4a;
++  color: #e6e2ff;
++  font: inherit;
++  cursor: pointer;
++}
++.sdk-memory-search button[type="submit"]:disabled {
++  opacity: 0.55;
++  cursor: default;
++}
