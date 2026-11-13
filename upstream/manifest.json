@@ -259,6 +259,11 @@
       "path": "patches/0051-hub-memory-search.patch",
       "scope": "wire_existing_scoped_memory_search_into_the_console_library_with_clear_action",
       "digest": "sha256:be0afa3bb9e43e4eea54976c0d710287668ada6b0cbee39cc4df5d531106152a"
+    },
+    {
+      "path": "patches/0052-hub-console-purge.patch",
+      "scope": "offer_confirmed_purge_alongside_forget_when_the_proven_scope_allows_it_with_action_scoped_pending_keys",
+      "digest": "sha256:2747681ec541a4001ea3a3a60095f61eebcae85c991958ee60d60049293d37cb"
     }
   ]
 }

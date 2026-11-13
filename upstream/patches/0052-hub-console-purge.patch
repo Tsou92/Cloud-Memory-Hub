@@ -1,0 +1,333 @@
+--- a/memhub/apps/web/src/hub-governance.ts
++++ b/memhub/apps/web/src/hub-governance.ts
+@@ -10,9 +10,10 @@
+   unresolved_origin: boolean;
+   proposed_effect: "retain_for_explicit_read" | "suppress_automatic_use";
+ }
++export type GovernanceAction = "forget" | "purge";
+ export interface ForgetPreview {
+   scope_id: string;
+-  action: "forget";
++  action: GovernanceAction;
+   view_digest: string;
+   execution_available: boolean;
+   total: number;
+@@ -24,7 +25,7 @@
+ }
+ export interface ForgetRequest {
+   scope_id: string;
+-  action: "forget";
++  action: GovernanceAction;
+   record_ids: [string];
+   expected_view: string;
+   operation_id: string;
+@@ -40,7 +41,7 @@
+ export interface ForgetResult {
+   operation_id: string;
+   scope_id: string;
+-  action: "forget";
++  action: GovernanceAction;
+   state: "completed";
+   suppressed_count: number;
+ }
+@@ -115,12 +116,13 @@
+   offset = 0,
+   expectedView?: string,
+   signal?: AbortSignal,
++  action: GovernanceAction = "forget",
+ ): Promise<ForgetPreview> {
+   const row = await request(
+     "preview",
+     {
+       scope_id: scope,
+-      action: "forget",
++      action,
+       record_ids: [id],
+       offset,
+       limit: 50,
+@@ -130,7 +132,7 @@
+   );
+   if (
+     row.scope_id !== scope ||
+-    row.action !== "forget" ||
++    row.action !== action ||
+     typeof row.view_digest !== "string" ||
+     !digestPattern.test(row.view_digest) ||
+     (expectedView && row.view_digest !== expectedView) ||
+@@ -217,7 +219,7 @@
+   const row = await request("execute", pending.request, signal);
+   if (
+     row.scope_id !== pending.request.scope_id ||
+-    row.action !== "forget" ||
++    row.action !== pending.request.action ||
+     row.operation_id !== pending.request.operation_id ||
+     row.state !== "completed" ||
+     row.suppressed_count !== pending.total
+@@ -225,22 +227,38 @@
+     invalid();
+   return row as unknown as ForgetResult;
+ }
+-export function pendingKey(instance: string, scope: string) {
++export function pendingKey(instance: string, scope: string, action: GovernanceAction = "forget") {
++  return `cmh-governance:${action}:${encodeURIComponent(instance)}:${encodeURIComponent(scope)}`;
++}
++/** Keys written before purge existed; a pending forget must stay recoverable. */
++function legacyPendingKey(instance: string, scope: string) {
+   return `cmh-forget:${encodeURIComponent(instance)}:${encodeURIComponent(scope)}`;
+ }
++export function clearPending(
++  instance: string,
++  scope: string,
++  action: GovernanceAction = "forget",
++) {
++  sessionStorage.removeItem(pendingKey(instance, scope, action));
++  if (action === "forget") sessionStorage.removeItem(legacyPendingKey(instance, scope));
++}
+ export function readPending(
+   instance: string,
+   scope: string,
++  action: GovernanceAction = "forget",
+ ): PendingForget | null {
+-  const serialized = sessionStorage.getItem(pendingKey(instance, scope));
++  const serialized =
++    sessionStorage.getItem(pendingKey(instance, scope, action)) ??
++    (action === "forget" ? sessionStorage.getItem(legacyPendingKey(instance, scope)) : null);
+   if (!serialized) return null;
+   const value = object(JSON.parse(serialized));
+   const request = object(value.request);
+   if (
+     value.version !== 1 ||
++    request.action !== action ||
+     value.instance !== instance ||
+     request.scope_id !== scope ||
+-    request.action !== "forget" ||
++    (request.action !== "forget" && request.action !== "purge") ||
+     !Array.isArray(request.record_ids) ||
+     request.record_ids.length !== 1 ||
+     typeof request.record_ids[0] !== "string" ||
+--- a/memhub/apps/web/src/HubGovernance.tsx
++++ b/memhub/apps/web/src/HubGovernance.tsx
+@@ -5,8 +5,10 @@
+   executeForget,
+   type ForgetPreview,
+   type ForgetResult,
++  type GovernanceAction,
+   GovernanceError,
+   type PendingForget,
++  clearPending,
+   pendingKey,
+   previewForget,
+   readPending,
+@@ -39,6 +41,7 @@
+   const [error, setError] = useState("");
+   const [storageError, setStorageError] = useState(false);
+   const [changed, setChanged] = useState(false);
++  const [action, setAction] = useState<GovernanceAction>("forget");
+   const controller = useRef<AbortController | null>(null);
+   const alive = useRef(true);
+   const target = useRef<string | null>(recordId);
+@@ -60,6 +63,7 @@
+           previous?.next_offset ?? 0,
+           previous?.view_digest,
+           current.signal,
++          action,
+         );
+         if (alive.current && !current.signal.aborted)
+           setPreview(previous ? appendPreview(previous, page) : page);
+@@ -76,12 +80,12 @@
+         if (alive.current && !current.signal.aborted) setBusy(false);
+       }
+     },
+-    [scope],
++    [scope, action],
+   );
+   useEffect(() => {
+     alive.current = true;
+     try {
+-      const stored = readPending(instance, scope);
++      const stored = readPending(instance, scope, action);
+       target.current = stored?.request.record_ids[0] ?? recordId;
+       setPending(stored);
+       if (target.current && !stored) void load();
+@@ -92,7 +96,7 @@
+       alive.current = false;
+       controller.current?.abort();
+     };
+-  }, [instance, scope, recordId, load]);
++  }, [instance, scope, recordId, action, load]);
+ 
+   async function execute(existing?: PendingForget) {
+     if (busy || storageError) return;
+@@ -104,7 +108,7 @@
+         instance,
+         request: {
+           scope_id: scope,
+-          action: "forget",
++          action,
+           record_ids: [target.current],
+           expected_view: preview.view_digest,
+           operation_id: createTraceId(),
+@@ -115,7 +119,7 @@
+       };
+       try {
+         sessionStorage.setItem(
+-          pendingKey(instance, scope),
++          pendingKey(instance, scope, action),
+           JSON.stringify(operation),
+         );
+       } catch {
+@@ -134,7 +138,7 @@
+       const result = await executeForget(operation, current.signal);
+       if (!alive.current || current.signal.aborted) return;
+       try {
+-        sessionStorage.removeItem(pendingKey(instance, scope));
++        clearPending(instance, scope, action);
+       } catch {
+         setStorageError(true);
+         return;
+@@ -161,7 +165,7 @@
+   function restart() {
+     if (!changed) return;
+     try {
+-      sessionStorage.removeItem(pendingKey(instance, scope));
++      clearPending(instance, scope, action);
+     } catch {
+       setStorageError(true);
+       return;
+@@ -181,13 +185,52 @@
+   );
+   const eligible =
+     complete && !unsupported && preview?.unresolved_origin_count === 0;
++  // Purge removes the body itself. Offer it only for a fully proven scope:
++  // everything the server could fail to clear has already been refused above.
++  const purgeEligible = eligible && preview?.action === "purge";
+   if (!recordId && !pending && !storageError && !preview && !busy) return null;
+   return (
+     <section className="hub-card hub-governance" aria-label="忘记记忆">
+-      <h2>{pending ? "核对忘记操作" : "忘记的影响范围"}</h2>
++      <h2>
++        {pending
++          ? pending.request.action === "purge"
++            ? "核对彻底删除操作"
++            : "核对忘记操作"
++          : preview?.action === "purge"
++            ? "彻底删除的影响范围"
++            : "忘记的影响范围"}
++      </h2>
++      <fieldset className="hub-governance-action" disabled={busy || !!pending}>
++        <legend>处理方式</legend>
++        <label>
++          <input
++            type="radio"
++            name="governance-action"
++            checked={action === "forget"}
++            onChange={() => {
++              setAction("forget");
++              setConfirmed(false);
++            }}
++          />
++          忘记：停止自动使用与再次提炼，原始历史仍可按 ID 主动查阅。
++        </label>
++        <label>
++          <input
++            type="radio"
++            name="governance-action"
++            checked={action === "purge"}
++            onChange={() => {
++              setAction("purge");
++              setConfirmed(false);
++            }}
++          />
++          彻底删除：在服务能证明的范围内一并清除 Hub 保存的相关正文。
++        </label>
++      </fieldset>
+       <p>
+-        忘记会停止自动使用和再次自动提炼这些内容；原始历史仍可按 ID
+-        主动查阅。已经发送给 Agent 的内容无法撤回。
++        {action === "purge"
++          ? "彻底删除后正文不可恢复；无法证明可清理的范围会被拒绝，不会显示成完成。已经发送给 Agent 的内容无法撤回。"
++          : "忘记会停止自动使用和再次自动提炼这些内容；原始历史仍可按 ID 主动查阅。已经发送给 Agent 的内容无法撤回。"}
+       </p>
+       {storageError ? (
+         <p role="alert">
+@@ -272,14 +315,20 @@
+                       disabled={!eligible || busy}
+                       onChange={(event) => setConfirmed(event.target.checked)}
+                     />
+-                    我已查看全部影响范围，同意停止自动使用这些内容。
++                    {action === "purge"
++                      ? "我已查看全部影响范围，同意彻底删除这些内容及其正文。"
++                      : "我已查看全部影响范围，同意停止自动使用这些内容。"}
+                   </label>
+                   <R6Button
+                     variant="primary"
+-                    disabled={!eligible || !confirmed || busy}
++                    disabled={
++                      action === "purge"
++                        ? !purgeEligible || !confirmed || busy
++                        : !eligible || !confirmed || busy
++                    }
+                     onClick={() => void execute()}
+                   >
+-                    确认忘记
++                    {action === "purge" ? "确认彻底删除" : "确认忘记"}
+                   </R6Button>
+                 </>
+               )}
+@@ -294,10 +343,11 @@
+           {error && <p role="alert">{error}</p>}
+         </>
+       )}
+-      <p>
+-        彻底删除还会清除 Hub
+-        内的相关正文。当前预览尚不能证明所有副本可清理，网页暂不提供此操作。
+-      </p>
++      {action === "forget" ? (
++        <p>
++          需要连正文一起清除时，选择上方的「彻底删除」。服务只对能证明全部可清理的范围执行，否则会明确拒绝。
++        </p>
++      ) : null}
+     </section>
+   );
+ }
+--- a/memhub/apps/web/src/HubGovernance.test.tsx
++++ b/memhub/apps/web/src/HubGovernance.test.tsx
+@@ -303,3 +303,38 @@
+     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+   );
+ });
++
++it("offers purge, sends the chosen action, and records it under its own pending key", async () => {
++  const bodies: Array<Record<string, unknown>> = [];
++  fetcher.mockImplementation(async (url: string, init: RequestInit) => {
++    const body = JSON.parse(String(init.body));
++    bodies.push(body);
++    if (url.endsWith("execute"))
++      return Response.json({
++        operation_id: body.operation_id,
++        scope_id: body.scope_id,
++        action: body.action,
++        state: "completed",
++        suppressed_count: 1,
++      });
++    return Response.json(preview({ action: body.action }));
++  });
++  render(<HubGovernance {...props} />);
++  const purge = await screen.findByRole("radio", { name: /彻底删除/ });
++  await userEvent.click(purge);
++  expect(await screen.findByRole("heading", { name: /彻底删除的影响范围/ })).toBeTruthy();
++  await userEvent.click(screen.getByRole("checkbox"));
++  await userEvent.click(screen.getByRole("button", { name: "确认彻底删除" }));
++  await waitFor(() => expect(props.onCompleted).toHaveBeenCalledOnce());
++  const executed = bodies.find((body) => body.action === "purge" && body.expected_view);
++  expect(executed?.record_ids).toEqual([selected]);
++  expect(
++    sessionStorage.getItem(pendingKey("synthetic-instance", "project-a", "purge")),
++  ).toBeNull();
++});
++it("keeps the default action forget and its checkbox wording", async () => {
++  render(<HubGovernance {...props} />);
++  const forget = await screen.findByRole("radio", { name: /忘记：/ });
++  expect((forget as HTMLInputElement).checked).toBe(true);
++  expect(screen.getByText(/同意停止自动使用这些内容/)).toBeTruthy();
++});
