@@ -63,20 +63,29 @@ def _auth_page(title: str, body: str, script: str = "") -> str:
 
 LOGIN_PAGE = _auth_page(
     "登录",
-    """<p>欢迎回来。输入管理员凭证，进入你的共享记忆中枢。</p>
+    """<p>欢迎回来。输入管理员密码，进入你的共享记忆中枢。</p>
 {{error}}
-<form method="post" action="/hub/login"><label for="credential">管理员凭证</label>
+<form method="post" action="/hub/login"><label for="credential">管理员密码</label>
 <input id="credential" name="credential" type="password" autocomplete="current-password"
-required><button>登录</button></form>""",
+required><button>登录</button></form>
+<small>首次登录时由安装器设置。忘记密码时可在这台 NAS 的执行环境中重置，
+不会影响已连接的 Agent 与已有数据；步骤见使用文档的「重置管理员密码」。</small>""",
 )
 SETUP_PAGE = _auth_page("设置管理员密码", SETUP_FORM, f"<script>{SETUP_SCRIPT}</script>")
 SETUP_REQUIRED_PAGE = _auth_page(
     "初始化",
-    "<p>此实例需要先设置管理员密码。请打开安装器提供的初始化链接。</p>",
+    """<p>此实例还需要先设置管理员密码，由安装器生成的一次性初始化链接完成。</p>
+<ol>
+<li>在运行 Hub 的 NAS 上执行：<br>
+<code>docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub setup-link</code></li>
+<li>命令会打印一个只在本机可用的初始化链接，在本机浏览器打开它。</li>
+<li>这次运行只对当前实例有效；命令不会打印或重置管理员密码。</li>
+</ol>
+<p>如果 Hub 不是用 Docker Compose 启动的，改用你实际使用的启动方式执行同一条模块命令。</p>""",
 )
 SETUP_FINISHED_PAGE = _auth_page(
     "初始化链接已失效",
-    '<p>请使用当前管理员凭证。<a href="/hub/login">返回登录</a></p>',
+    '<p>请使用当前管理员密码。<a href="/hub/login">返回登录</a></p>',
 )
 
 
@@ -419,7 +428,7 @@ class CloudBoundary:
         messages = {
             "invalid_credential": "凭证不正确，请重新输入。",
             "login_rate_limited": "尝试次数较多，请稍后再试。",
-            "request_too_large": "输入内容过长，请重新输入管理员凭证。",
+            "request_too_large": "输入内容过长，请重新输入管理员密码。",
         }
         # Only constant, trusted messages enter HTML; never echo submitted credentials.
         message = '<p role="alert">' + messages[detail] + "</p>"

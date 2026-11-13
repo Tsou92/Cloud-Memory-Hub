@@ -213,3 +213,58 @@ class AdminCredentials:
                         pass
             self._token = replacement
             self._known = known
+
+
+def reset_admin_password(config: HubConfig, new_password: str) -> None:
+    """Replace the administrator credential offline, with the service stopped.
+
+    A forgotten password otherwise means permanently losing the console while
+    the NAS still holds the data. This reuses the atomic publication an in-page
+    change uses; it does not touch device credentials, projects, memory, or the
+    encryption key. Callers must stop the Hub first: a running process caches
+    the old credential and would silently keep accepting it.
+    """
+    if not isinstance(new_password, str) or not new_password.strip():
+        raise AdminCredentialError("invalid_new_credential", 422)
+    if not config.config_dir.is_dir():
+        raise AdminCredentialError("admin_credential_unavailable", 503)
+    path = config.config_dir / "admin-token"
+    replacement = _credential_record(new_password)
+    CredentialFilter((replacement, config.encryption_key.decode(), "x" * 43))
+    temporary = None
+    try:
+        info = config.config_dir.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+        ):
+            raise AdminCredentialError("admin_credential_unavailable", 503)
+        read_private_file(path)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".admin-token-", dir=config.config_dir
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(replacement.encode("ascii") + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        directory = os.open(
+            config.config_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except AdminCredentialError:
+        raise
+    except (OSError, ValueError):
+        raise AdminCredentialError("admin_credential_unavailable", 503) from None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass

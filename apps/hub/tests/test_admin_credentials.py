@@ -368,3 +368,36 @@ def test_real_hub_composition_updates_console_preview_and_preserves_device_crede
                 assert app.governance.access.authenticate(device_credential) == before_device
 
     asyncio.run(scenario())
+
+
+def test_offline_password_reset_replaces_only_the_admin_credential(tmp_path):
+    """A forgotten password must be recoverable without losing the instance."""
+    config = configuration(tmp_path)
+    devices = config.config_dir / "device-authority.sqlite3"
+    devices.write_bytes(b"synthetic device authority")
+    before = devices.read_bytes()
+    admin_credentials.reset_admin_password(config, "新密码 with space")
+    # The replacement is a verifiable password record, not plaintext.
+    stored = read_private_file(config.config_dir / "admin-token").decode("ascii").strip()
+    assert stored.startswith(admin_credentials._PASSWORD_RECORD_PREFIX)
+    assert "新密码" not in stored
+    replacement = AdminCredentials(replace(config, admin_token=stored))
+    assert replacement.valid_password("新密码 with space")
+    assert not replacement.valid_password(OLD)
+    # Device authority bytes are untouched: reset is about the console only.
+    assert devices.read_bytes() == before
+    assert read_private_file(config.config_dir / "encryption-key").strip() == (
+        config.encryption_key.strip()
+    )
+
+
+def test_offline_password_reset_rejects_empty_and_unsafe_directories(tmp_path):
+    config = configuration(tmp_path)
+    with pytest.raises(AdminCredentialError):
+        admin_credentials.reset_admin_password(config, "   ")
+    config.config_dir.chmod(0o755)
+    try:
+        with pytest.raises(AdminCredentialError):
+            admin_credentials.reset_admin_password(config, "synthetic-replacement")
+    finally:
+        config.config_dir.chmod(0o700)
