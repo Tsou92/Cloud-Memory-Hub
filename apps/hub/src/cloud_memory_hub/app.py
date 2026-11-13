@@ -18,7 +18,7 @@ def create_hub(config: HubConfig):
     from cloud_memory_hub.admin_credentials import AdminCredentials
     from cloud_memory_hub.backup_api import backup_routes
     from cloud_memory_hub.boundary import CloudBoundary
-    from cloud_memory_hub.console_api import console_routes, usage_routes
+    from cloud_memory_hub.console_api import console_routes, correct_routes, usage_routes
     from cloud_memory_hub.console_qa import ConsoleQuestions, console_question_routes
     from cloud_memory_hub.console_read import ConsoleRead
     from cloud_memory_hub.governance_authority import open_authority
@@ -188,6 +188,7 @@ def create_hub(config: HubConfig):
     remote_api.routes.append(Route(MCP_PATH, remote_mcp))
     remote_api.routes.extend(console_routes(console))
     remote_api.routes.extend(usage_routes(core))
+    remote_api.routes.extend(correct_routes(console))
     remote_api.routes.extend(backup_routes(config))
     questions = ConsoleQuestions(core, console)
     core.state.cmh_questions = questions

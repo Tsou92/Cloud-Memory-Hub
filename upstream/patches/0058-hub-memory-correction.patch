@@ -1,0 +1,227 @@
+--- a/memhub/apps/web/src/hub-api.ts
++++ b/memhub/apps/web/src/hub-api.ts
+@@ -358,4 +358,24 @@
+   }
+   if (operation.endsWith("-get") && value.items.length !== 1) invalid();
+   return value as unknown as HubPage;
++}
++
++/** Scope-checked correction; the server re-reads the record before writing. */
++export async function correctHubMemory(
++  scope: string,
++  recordId: string,
++  content: string,
++): Promise<{ record_id: string; content: string }> {
++  const value = object(
++    await request("correct", { scope_id: scope, record_id: recordId, content }),
++  );
++  if (
++    value.schema_version !== 1 ||
++    value.scope_id !== scope ||
++    value.record_id !== recordId ||
++    typeof value.content !== "string" ||
++    value.state !== "corrected"
++  )
++    invalid();
++  return { record_id: recordId, content: value.content };
+ }
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -25,6 +25,7 @@
+   type HubItem,
+   type HubProject,
+   hubErrorMessage,
++  correctHubMemory,
+   readHub,
+ } from "./hub-api";
+ import { R6Button } from "./R6Controls";
+@@ -562,6 +563,11 @@
+             reader={readers.memory}
+             renderActions={actions}
+             onOpenSource={setSourceId}
++            correct={async (id, content) => {
++              // Return the stored body, not a locally assumed one.
++              const saved = await correctHubMemory(scope, id, content);
++              return { memory_id: saved.record_id, content: saved.content, layer: "", status: "active" };
++            }}
+             renderEmpty={() => (
+               <div className="hub-library-empty" role="note">
+                 <strong>记忆库还是空的。</strong>
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -250,7 +250,7 @@
+   ).toBeTruthy();
+   expect(local).not.toHaveBeenCalled();
+ });
+-it("reuses the library read-only and removes old mutation and lifecycle controls", async () => {
++it("offers in-place correction but never the local SDK delete", async () => {
+   render(<HubConsole />);
+   await select();
+   await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
+@@ -258,8 +258,9 @@
+     await screen.findByRole("button", { name: "project-a 的合成内容" }),
+   );
+   expect(await screen.findByLabelText("SDK 记忆详情")).toBeTruthy();
++  // Correction is a scoped console write; deletion stays a governance action.
++  expect(screen.getByRole("button", { name: "保存修改" })).toBeTruthy();
+   expect(screen.queryByRole("button", { name: "删除记忆" })).toBeNull();
+-  expect(screen.queryByRole("button", { name: "保存修改" })).toBeNull();
+   expect(screen.queryByRole("button", { name: "已被取代" })).toBeNull();
+   expect(local).not.toHaveBeenCalled();
+ });
+@@ -345,7 +346,12 @@
+   await userEvent.click(
+     await screen.findByRole("button", { name: "继续读取" }),
+   );
+-  await screen.findByText("第一段第二段");
++  // The body now renders in the correction textarea.
++  await waitFor(() =>
++    expect(
++      (screen.getByLabelText("记忆内容") as HTMLTextAreaElement).value,
++    ).toBe("第一段第二段"),
++  );
+   expect(fetcher).toHaveBeenCalledWith(
+     "/hub/v1/console/read/memory-get",
+     expect.objectContaining({
+@@ -840,4 +846,54 @@
+   // No button here may claim the server can import on its own.
+   expect(within(card).queryByRole("button", { name: /开始导入/ })).toBeNull();
+   expect(within(card).getByText(/已删除的内容不会被重新导入/)).toBeTruthy();
++});
++
++it("saves a correction through the scoped console endpoint and shows the stored body", async () => {
++  fetcher.mockImplementation((url: string, init?: RequestInit) => {
++    if (String(url).endsWith("/console/correct")) {
++      if (!init?.body) return handler(url, init);
++      const body = JSON.parse(String(init.body));
++      return Promise.resolve(
++        Response.json({
++          schema_version: 1,
++          scope_id: body.scope_id,
++          record_id: body.record_id,
++          content: "服务端实际保存的内容",
++          state: "corrected",
++        }),
++      );
++    }
++    return handler(url, init);
++  });
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "记忆库" }));
++  await userEvent.click(
++    await screen.findByRole("button", { name: "project-a 的合成内容" }),
++  );
++  const editor = (await screen.findByLabelText("记忆内容")) as HTMLTextAreaElement;
++  await userEvent.clear(editor);
++  await userEvent.type(editor, "我改的内容");
++  await waitFor(() => expect(editor.value).toBe("我改的内容"));
++  await userEvent.click(screen.getByRole("button", { name: "保存修改" }));
++  await waitFor(() =>
++    expect(
++      fetcher.mock.calls.some(([url]) => String(url).endsWith("/console/correct")),
++    ).toBe(true),
++  );
++  // The request carries exactly the typed body and the record identity.
++  const call = fetcher.mock.calls.find(([url]) =>
++    String(url).endsWith("/console/correct"),
++  );
++  const sent = JSON.parse(String(call?.[1]?.body));
++  expect(sent).toEqual({
++    scope_id: "project-a",
++    record_id: "project-a-item",
++    content: "我改的内容",
++  });
++  // Saving returns to the list, which re-reads through the Hub endpoint.
++  await waitFor(() =>
++    expect(screen.queryByLabelText("SDK 记忆详情")).toBeNull(),
++  );
++  expect(local).not.toHaveBeenCalled();
+ });
+--- a/memhub/apps/web/src/SdkMemoryLibrary.tsx
++++ b/memhub/apps/web/src/SdkMemoryLibrary.tsx
+@@ -60,6 +60,7 @@
+   renderActions,
+   onOpenSource,
+   renderEmpty,
++  correct,
+ }: {
+   active: boolean;
+   onChanged?(): void;
+@@ -71,6 +72,8 @@
+   onOpenSource?(sourceId: string): void;
+   /** Explains an empty first page instead of leaving a bare "本页 0 条". */
+   renderEmpty?(): ReactNode;
++  /** Scope-checked correction; when present the reader path can edit in place. */
++  correct?(id: string, content: string): Promise<LibraryMemory>;
+ }) {
+   const [status, setStatus] = useState<SdkMemoryStatus>("active");
+   const [offset, setOffset] = useState(0);
+@@ -192,7 +195,27 @@
+   }, [active, focusedMemoryId, open]);
+ 
+   async function save() {
+-    if (reader || !selected || !draft.trim()) return;
++    if (!selected) return;
++    if (reader) {
++      if (!correct || !draft.trim()) return;
++      setBusy(true);
++      setError("");
++      try {
++        const memory = await correct(selected.memory_id, draft);
++        if (!alive.current) return;
++        setSelected(memory);
++        setDraft(memory.content);
++        await refresh();
++        onChanged?.();
++      } catch (reason) {
++        if (alive.current)
++          setError(reader.errorMessage?.(reason) ?? "修改未完成，请重试。");
++      } finally {
++        if (alive.current) setBusy(false);
++      }
++      return;
++    }
++    if (!draft.trim()) return;
+     setBusy(true);
+     setError("");
+     try {
+@@ -236,8 +259,12 @@
+         selected.next_content_offset,
+         controller.signal,
+       );
+-      if (alive.current && !controller.signal.aborted)
+-        setSelected({ ...next, content: selected.content + next.content });
++      if (alive.current && !controller.signal.aborted) {
++        const merged = { ...next, content: selected.content + next.content };
++        setSelected(merged);
++        // The editor renders draft; keep it in step with the loaded body.
++        setDraft(merged.content);
++      }
+     } catch {
+       if (alive.current && !controller.signal.aborted)
+         setError("后续内容读取失败，请重试。");
+@@ -393,7 +420,7 @@
+             {memoryLayerLabels.get(selected.layer) ??
+               (selected.layer || "未标注类型")}
+           </p>
+-          {!reader && selected.status === "active" ? (
++          {(reader ? correct && selected.status === "active" : selected.status === "active") ? (
+             <>
+               <textarea
+                 aria-label="记忆内容"
+@@ -409,9 +436,11 @@
+               >
+                 保存修改
+               </R6Button>
+-              <R6Button pending={busy} onClick={() => void remove()}>
+-                删除记忆
+-              </R6Button>
++              {!reader ? (
++                <R6Button pending={busy} onClick={() => void remove()}>
++                  删除记忆
++                </R6Button>
++              ) : null}
+             </>
+           ) : (
+             <p>{selected.content}</p>

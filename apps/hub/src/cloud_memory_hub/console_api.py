@@ -5,6 +5,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.routing import Route
 
+from cloud_memory_hub.console_correct import CorrectRequest, correct_memory
 from cloud_memory_hub.console_read import ConsolePageRequest
 from cloud_memory_hub.read_contract import READ_OPERATIONS, ListRequest, ScopeRequest
 from cloud_memory_hub.remote_access import AccessError
@@ -89,3 +90,14 @@ def console_routes(console):
             if not operation.startswith("session-")
         ],
     ]
+
+
+def correct_routes(console):
+    """Administrator correction; scope is proven before anything is written."""
+
+    async def correct(request: Request):
+        require_admin(request)
+        body = await read_body(request, CorrectRequest, max_bytes=32768)
+        return response(await correct_memory(console, body))
+
+    return [Route("/hub/v1/console/correct", correct, methods=["POST"])]

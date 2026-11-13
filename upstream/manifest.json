@@ -289,6 +289,11 @@
       "path": "patches/0057-hub-history-import-guidance.patch",
       "scope": "explain_history_import_as_a_client_side_capture_job_with_copyable_commands_never_a_dead_button",
       "digest": "sha256:9532cdff319dfacc2ca0dcffea0158a7fb05e641ce97ceda57aaa7a38e9e446d"
+    },
+    {
+      "path": "patches/0058-hub-memory-correction.patch",
+      "scope": "scope_proven_in_place_correction_of_a_distilled_memory_never_the_unscoped_sdk_update",
+      "digest": "sha256:080b31bdbe0ad1b54893434c503f774f7ce56271a091a9f450b56f37ca4e864b"
     }
   ]
 }
