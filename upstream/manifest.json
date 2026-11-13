@@ -274,6 +274,11 @@
       "path": "patches/0054-hub-brand-alignment.patch",
       "scope": "unify_console_and_page_title_on_cloud_memory_hub_leaving_upstream_attribution_intact",
       "digest": "sha256:c405d3056d4fb71a09fd4d96d3ce97fe08bfe2ebd3aacbda4f93584357a3ba20"
+    },
+    {
+      "path": "patches/0055-hub-model-usage.patch",
+      "scope": "administrator_usage_page_over_the_existing_content_free_audit_store_and_explicit_no_cross_project_merge_note",
+      "digest": "sha256:77129d48e886f23e9def6b117a918368303189d4711196ab6ddb7cc500043a07"
     }
   ]
 }
