@@ -249,6 +249,11 @@
       "path": "patches/0049-hub-device-last-accepted.patch",
       "scope": "show_derived_last_accepted_upload_per_device_with_unknown_and_none_states_never_zero",
       "digest": "sha256:3e1fc6d9eccba9086147d3b4f680caf03332a90e3a95d7742fb81d24453bd297"
+    },
+    {
+      "path": "patches/0050-hub-experimental-and-data-notice.patch",
+      "scope": "persistent_experimental_banner_in_console_linking_a_data_and_privacy_page",
+      "digest": "sha256:09938a77dd07dcaf38c716ab3bc23131c56ef08a4512993d25968bd60decce8a"
     }
   ]
 }

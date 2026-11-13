@@ -6,6 +6,8 @@
 
 在电脑运行一条命令，即可部署到 NAS 或本机 Docker。然后在后台创建共享项目并配对设备。
 
+> **实验版本。** 请勿把它当作唯一记忆来源。完整历史导入、离线读取缓存、多模态解析和费用统计尚未实现；数据存在哪、什么时候会发给外部模型，见[数据会去到哪里](docs/data-and-privacy.md)。
+
 [![最新发行版](https://img.shields.io/github/v/release/Tsou92/Cloud-Memory-Hub?style=flat-square&color=8b5cf6&logo=github)](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-64748b?style=flat-square)](LICENSE)
 [![Docker 自托管](https://img.shields.io/badge/self--hosted-Docker-2496ed?style=flat-square&logo=docker&logoColor=white)](docs/development-runtime.md#发行版首次运行)
@@ -88,6 +90,8 @@
 | 首次部署、升级或排查 NAS 服务 | [让 Agent 帮你安装](docs/nas-installation.md) · [运行指南](docs/development-runtime.md) |
 | 连接 Agent、启用高级本地采集 | [设备与 Agent 接入](docs/client-installation.md) · [自动召回](docs/agent-recall.md) |
 | 配置备份、恢复历史版本 | [备份与恢复](docs/backup-and-recovery.md) |
+| 了解数据存在哪、何时发给外部模型 | [数据会去到哪里](docs/data-and-privacy.md) |
+| 忘记后台密码 | [重置管理员密码](docs/development-runtime.md#忘记管理员密码) |
 | 查看已完成与待完成能力 | [发布计划](docs/release-plan.md) · [需求说明](docs/requirements.md) |
 | 参与开发或报告安全问题 | [贡献指南](CONTRIBUTING.md) · [工程规范](docs/engineering.md) · [安全说明](SECURITY.md) |
 
