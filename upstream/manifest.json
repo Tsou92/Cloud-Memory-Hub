@@ -264,6 +264,11 @@
       "path": "patches/0052-hub-console-purge.patch",
       "scope": "offer_confirmed_purge_alongside_forget_when_the_proven_scope_allows_it_with_action_scoped_pending_keys",
       "digest": "sha256:2747681ec541a4001ea3a3a60095f61eebcae85c991958ee60d60049293d37cb"
+    },
+    {
+      "path": "patches/0053-hub-backup-command-guidance.patch",
+      "scope": "replace_vague_backup_note_with_copyable_export_and_restore_commands_and_the_reason_they_cannot_run_in_page",
+      "digest": "sha256:b20e9b376b3383bd3e5f49c404c77420b2a37c2f6726fb8b277d9950d3a7de17"
     }
   ]
 }

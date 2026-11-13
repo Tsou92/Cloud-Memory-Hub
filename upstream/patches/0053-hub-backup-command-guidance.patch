@@ -1,0 +1,105 @@
+--- a/memhub/apps/web/src/HubBackups.tsx
++++ b/memhub/apps/web/src/HubBackups.tsx
+@@ -10,8 +10,13 @@
+   requestBackup,
+   saveBackupSchedule,
+ } from "./hub-backups";
++import { copyText } from "./copy-text";
+ import { R6Button, R6Field, R6Switch } from "./R6Controls";
+ 
++const exportCommand =
++  "docker compose stop hub && docker compose exec -T hub /opt/cmh/venv/bin/python -m cloud_memory_hub.backup_maintenance export --version BACKUP_ID --output /backups/private.cmh.tar";
++const restoreCommand =
++  "docker compose stop hub && docker compose exec -T hub /opt/cmh/venv/bin/python -m cloud_memory_hub.backup_maintenance restore --writers-stopped --version BACKUP_ID";
+ const stateLabels = {
+   not_run: "尚未运行",
+   running: "正在备份",
+@@ -44,7 +49,16 @@
+   const [writing, setWriting] = useState<"schedule" | "request" | null>(null);
+   const [unknown, setUnknown] = useState<"schedule" | "request" | null>(null);
+   const [message, setMessage] = useState("");
++  const [copied, setCopied] = useState<"export" | "restore" | null>(null);
+   const [actionError, setActionError] = useState("");
++  async function copy(value: string, which: "export" | "restore") {
++    try {
++      await copyText(value);
++      setCopied(which);
++    } catch {
++      setMessage("未能自动复制，请选中命令手动复制。");
++    }
++  }
+   const dirtyRef = useRef(false);
+   const writeBusy = useRef(false);
+   const statusBusy = useRef(false);
+@@ -390,10 +404,30 @@
+       )}
+       <div className="r6-setting-row">
+         <div>
+-          <h3>恢复与完整导出</h3>
++          <h3>导出与恢复</h3>
+           <p>
+-            完整导出、导入和历史版本回滚目前通过 NAS
+-            命令行执行。此页面可管理备份计划、请求备份和查看版本，暂不提供恢复操作。
++            导出和恢复需要停止服务并取得存储租约，不能在网页里点击完成，否则可能写到一半就失去一致性。这不是权限限制，而是为了避免生成一个看起来成功、实际不完整的版本。
++          </p>
++          <p>在 NAS 上执行，先停服再操作：</p>
++          <pre className="hub-backup-command">
++            <code>{exportCommand}</code>
++          </pre>
++          <div className="hub-help-actions">
++            <R6Button
++              variant="quiet"
++              onClick={() => void copy(exportCommand, "export")}
++            >
++              {copied === "export" ? "已复制" : "复制导出命令"}
++            </R6Button>
++            <R6Button
++              variant="quiet"
++              onClick={() => void copy(restoreCommand, "restore")}
++            >
++              {copied === "restore" ? "已复制" : "复制恢复命令"}
++            </R6Button>
++          </div>
++          <p>
++            把 BACKUP_ID 换成上方列表中你确认过的版本。列表状态为「已生成，恢复前完整校验」，导出的归档必须通过完整校验才算可恢复；校验失败时保留现场，不要用旧卷覆盖当前实例。
+           </p>
+           <a
+             href="https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/backup-and-recovery.md"
+--- a/memhub/apps/web/src/HubBackups.test.tsx
++++ b/memhub/apps/web/src/HubBackups.test.tsx
+@@ -118,10 +118,15 @@
+   render(<HubBackups />);
+   await ready();
+   expect(screen.getByText(/备份时记忆服务会短暂停止/)).toBeTruthy();
++  expect(screen.getByText(/不能在网页里点击完成/)).toBeTruthy();
++  expect(screen.getByText(/必须通过完整校验才算可恢复/)).toBeTruthy();
+   expect(
+-    screen.getByText(/完整导出、导入和历史版本回滚目前通过 NAS 命令行执行/),
++    screen.getByRole("button", { name: "复制导出命令" }),
+   ).toBeTruthy();
+   expect(
++    screen.getByRole("button", { name: "复制恢复命令" }),
++  ).toBeTruthy();
++  expect(
+     screen
+       .getByRole("link", { name: "查看备份与恢复指南" })
+       .getAttribute("href"),
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -2875,3 +2875,16 @@
+   opacity: 0.55;
+   cursor: default;
+ }
++.hub-backup-command {
++  margin: 8px 0;
++  padding: 10px 12px;
++  border: 1px solid #a0a6dc30;
++  border-radius: 8px;
++  background: #0b1120;
++  color: #cfd5e8;
++  font-size: 11px;
++  line-height: 1.6;
++  overflow-x: auto;
++  white-space: pre-wrap;
++  word-break: break-all;
++}
