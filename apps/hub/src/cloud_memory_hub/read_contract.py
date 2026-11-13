@@ -39,6 +39,26 @@ class SearchRequest(ScopeRequest):
         return value
 
 
+class HistorySearchRequest(ScopeRequest):
+    """Bounded keyword search over this scope's accepted original text.
+
+    Deliberately not a subclass of ListRequest: the read path dispatches on
+    ListRequest first, and a history search must go through query filtering.
+    """
+
+    query: str = Field(strict=True, min_length=1, max_length=4096, repr=False)
+    limit: int = Field(default=10, strict=True, ge=1, le=10)
+    offset: int = Field(default=0, strict=True, ge=0, le=2**31 - 1)
+    privacy_policy: Literal[POLICY_VERSION] = POLICY_VERSION
+
+    @field_validator("query")
+    @classmethod
+    def nonempty(cls, value):
+        if not value.strip():
+            raise ValueError("empty_query")
+        return value
+
+
 class GetRequest(ScopeRequest):
     record_id: str = Field(strict=True, pattern=r"^[A-Za-z0-9_:-]{1,200}$")
     content_offset: int = Field(default=0, strict=True, ge=0, le=2**31 - 1)
@@ -67,13 +87,20 @@ class SessionMarkdownRequest(ScopeRequest):
 SESSION_MARKDOWN_PATH = "/hub/v1/sessions/markdown"
 SESSION_MARKDOWN_CHARS = 16384
 ReadOperation = Literal[
-    "memory-list", "memory-search", "memory-get", "history-list", "history-get", "session-briefs"
+    "memory-list",
+    "memory-search",
+    "memory-get",
+    "history-list",
+    "history-search",
+    "history-get",
+    "session-briefs",
 ]
 READ_OPERATIONS = {
     "memory-list": ("/hub/v1/memories/list", ListRequest),
     "memory-search": ("/hub/v1/memories/search", SearchRequest),
     "memory-get": ("/hub/v1/memories/get", GetRequest),
     "history-list": ("/hub/v1/history/list", ListRequest),
+    "history-search": ("/hub/v1/history/search", HistorySearchRequest),
     "history-get": ("/hub/v1/history/get", GetRequest),
     "session-briefs": ("/hub/v1/sessions/recent", SessionBriefRequest),
 }

@@ -279,6 +279,11 @@
       "path": "patches/0055-hub-model-usage.patch",
       "scope": "administrator_usage_page_over_the_existing_content_free_audit_store_and_explicit_no_cross_project_merge_note",
       "digest": "sha256:77129d48e886f23e9def6b117a918368303189d4711196ab6ddb7cc500043a07"
+    },
+    {
+      "path": "patches/0056-hub-history-search.patch",
+      "scope": "scoped_keyword_search_over_accepted_originals_reusing_the_read_contract_and_suppression_rules",
+      "digest": "sha256:8724f2b48efb869d934d8353738e678dc3e47c0c4b1a0d791c030fdcc09dda14"
     }
   ]
 }
