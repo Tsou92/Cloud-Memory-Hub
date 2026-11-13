@@ -284,6 +284,11 @@
       "path": "patches/0056-hub-history-search.patch",
       "scope": "scoped_keyword_search_over_accepted_originals_reusing_the_read_contract_and_suppression_rules",
       "digest": "sha256:8724f2b48efb869d934d8353738e678dc3e47c0c4b1a0d791c030fdcc09dda14"
+    },
+    {
+      "path": "patches/0057-hub-history-import-guidance.patch",
+      "scope": "explain_history_import_as_a_client_side_capture_job_with_copyable_commands_never_a_dead_button",
+      "digest": "sha256:9532cdff319dfacc2ca0dcffea0158a7fb05e641ce97ceda57aaa7a38e9e446d"
     }
   ]
 }
