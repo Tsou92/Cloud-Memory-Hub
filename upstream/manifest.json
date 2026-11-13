@@ -239,6 +239,61 @@
       "path": "patches/0047-hub-admin-ui-refresh.patch",
       "scope": "hub_admin_console_layout_interaction_and_model_setup_feedback_from_user_ui_copy",
       "digest": "sha256:6e9caf1bd4f4bcf017dd412a58be347b12da54e70368b3df34888cd207eb691b"
+    },
+    {
+      "path": "patches/0048-hub-console-state-clarity.patch",
+      "scope": "remember_selected_project_tie_service_status_to_real_state_explain_empty_memory_library_and_offer_relogin",
+      "digest": "sha256:342aa2a5d48fc3b0e9d8a178a7c8284728b9913194d8d8e82c43a3cfcd8980d2"
+    },
+    {
+      "path": "patches/0049-hub-device-last-accepted.patch",
+      "scope": "show_derived_last_accepted_upload_per_device_with_unknown_and_none_states_never_zero",
+      "digest": "sha256:3e1fc6d9eccba9086147d3b4f680caf03332a90e3a95d7742fb81d24453bd297"
+    },
+    {
+      "path": "patches/0050-hub-experimental-and-data-notice.patch",
+      "scope": "persistent_experimental_banner_in_console_linking_a_data_and_privacy_page",
+      "digest": "sha256:09938a77dd07dcaf38c716ab3bc23131c56ef08a4512993d25968bd60decce8a"
+    },
+    {
+      "path": "patches/0051-hub-memory-search.patch",
+      "scope": "wire_existing_scoped_memory_search_into_the_console_library_with_clear_action",
+      "digest": "sha256:be0afa3bb9e43e4eea54976c0d710287668ada6b0cbee39cc4df5d531106152a"
+    },
+    {
+      "path": "patches/0052-hub-console-purge.patch",
+      "scope": "offer_confirmed_purge_alongside_forget_when_the_proven_scope_allows_it_with_action_scoped_pending_keys",
+      "digest": "sha256:2747681ec541a4001ea3a3a60095f61eebcae85c991958ee60d60049293d37cb"
+    },
+    {
+      "path": "patches/0053-hub-backup-command-guidance.patch",
+      "scope": "replace_vague_backup_note_with_copyable_export_and_restore_commands_and_the_reason_they_cannot_run_in_page",
+      "digest": "sha256:b20e9b376b3383bd3e5f49c404c77420b2a37c2f6726fb8b277d9950d3a7de17"
+    },
+    {
+      "path": "patches/0054-hub-brand-alignment.patch",
+      "scope": "unify_console_and_page_title_on_cloud_memory_hub_leaving_upstream_attribution_intact",
+      "digest": "sha256:c405d3056d4fb71a09fd4d96d3ce97fe08bfe2ebd3aacbda4f93584357a3ba20"
+    },
+    {
+      "path": "patches/0055-hub-model-usage.patch",
+      "scope": "administrator_usage_page_over_the_existing_content_free_audit_store_and_explicit_no_cross_project_merge_note",
+      "digest": "sha256:77129d48e886f23e9def6b117a918368303189d4711196ab6ddb7cc500043a07"
+    },
+    {
+      "path": "patches/0056-hub-history-search.patch",
+      "scope": "scoped_keyword_search_over_accepted_originals_reusing_the_read_contract_and_suppression_rules",
+      "digest": "sha256:8724f2b48efb869d934d8353738e678dc3e47c0c4b1a0d791c030fdcc09dda14"
+    },
+    {
+      "path": "patches/0057-hub-history-import-guidance.patch",
+      "scope": "explain_history_import_as_a_client_side_capture_job_with_copyable_commands_never_a_dead_button",
+      "digest": "sha256:9532cdff319dfacc2ca0dcffea0158a7fb05e641ce97ceda57aaa7a38e9e446d"
+    },
+    {
+      "path": "patches/0058-hub-memory-correction.patch",
+      "scope": "scope_proven_in_place_correction_of_a_distilled_memory_never_the_unscoped_sdk_update",
+      "digest": "sha256:080b31bdbe0ad1b54893434c503f774f7ce56271a091a9f450b56f37ca4e864b"
     }
   ]
 }

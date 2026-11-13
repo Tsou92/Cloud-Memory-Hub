@@ -1,6 +1,7 @@
 """FR-01/03/10/12: administrator console reads the real scoped Hub authority."""
 
 import asyncio
+import time
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -97,6 +98,12 @@ def test_real_two_project_reads_match_device_content_and_show_registered_sources
                 assert state["sources"][0]["device_status"] == "active"
                 assert state["visible_memory_total"] is state["visible_history_total"] is None
                 assert state["count_state"] == "not_computed"
+                # Last accepted upload is derived from receipts plus queue time;
+                # a missing value must stay absent rather than become zero.
+                accepted = state["sources"][0]["last_accepted_at"]
+                assert accepted is None or (
+                    isinstance(accepted, int) and 0 < accepted <= int(time.time())
+                )
                 assert "credential" not in summary.text
             assert ids(await read(web, admin, "global")) == set()
             wrong_scope = await read(

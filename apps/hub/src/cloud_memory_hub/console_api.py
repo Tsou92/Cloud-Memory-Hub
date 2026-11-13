@@ -1,13 +1,43 @@
 """Thin administrator routes using the existing authenticated Hub boundary."""
 
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.routing import Route
 
+from cloud_memory_hub.console_correct import CorrectRequest, correct_memory
 from cloud_memory_hub.console_read import ConsolePageRequest
 from cloud_memory_hub.read_contract import READ_OPERATIONS, ListRequest, ScopeRequest
 from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.remote_api import read_body, require_admin, response
+
+
+def usage_routes(core):
+    """Content-free model usage for the administrator console (requirement 9).
+
+    Reuses the Core audit store that already records every precipitation call.
+    It reports counts and token totals only — never prompts, responses or
+    provider identifiers beyond the stage name.
+    """
+
+    async def usage(request: Request):
+        require_admin(request)
+        if request.method not in {"GET", "HEAD"}:
+            raise AccessError("method_not_allowed", 405)
+        if request.query_params:
+            raise AccessError("invalid_request", 422)
+        store = getattr(core.state, "model_request_audit_store", None)
+        if store is None:
+            raise AccessError("usage_unavailable", 503)
+        try:
+            report = await run_in_threadpool(store.report)
+        except Exception:
+            raise AccessError("usage_unavailable", 503) from None
+        return response(
+            {"schema_version": 1, **report, "billing": "provider_statement_is_authoritative"}
+        )
+
+    return [Route("/hub/v1/console/usage", usage, methods=["GET"])]
 
 
 def console_routes(console):
@@ -60,3 +90,14 @@ def console_routes(console):
             if not operation.startswith("session-")
         ],
     ]
+
+
+def correct_routes(console):
+    """Administrator correction; scope is proven before anything is written."""
+
+    async def correct(request: Request):
+        require_admin(request)
+        body = await read_body(request, CorrectRequest, max_bytes=32768)
+        return response(await correct_memory(console, body))
+
+    return [Route("/hub/v1/console/correct", correct, methods=["POST"])]

@@ -1,0 +1,48 @@
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -305,6 +305,18 @@
+           </div>
+         </header>
+         <main id="main-content" className="hub-content">
++          {/* A self-hosted memory service is not a backup product; say so where
++              it cannot be missed, not only in the repository README. */}
++          <aside className="hub-experimental" role="note">
++            <strong>实验版本。</strong> 请勿把这里当作唯一记忆来源；重要内容仍需保留原始记录或其他备份。{" "}
++            <a
++              href="https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/data-and-privacy.md"
++              target="_blank"
++              rel="noreferrer"
++            >
++              数据会去到哪里
++            </a>
++          </aside>
+           {error ? (
+             <p role="alert" className="hub-shell-error">
+               {error}
+--- a/memhub/apps/web/src/hub-console.css
++++ b/memhub/apps/web/src/hub-console.css
+@@ -2824,3 +2824,24 @@
+ .hub-device-activity-note {
+   color: #8b93a5;
+ }
++.hub-experimental {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: baseline;
++  gap: 4px;
++  margin: 0 0 14px;
++  padding: 9px 13px;
++  border: 1px solid #d8b46a2e;
++  border-radius: 9px;
++  background: #6d54200f;
++  color: #c9c2b4;
++  font-size: 12px;
++  line-height: 1.6;
++}
++.hub-experimental strong {
++  color: #e6d3a8;
++}
++.hub-experimental a {
++  color: #c5b1ff;
++  text-underline-offset: 2px;
++}

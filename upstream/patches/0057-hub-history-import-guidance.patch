@@ -1,0 +1,101 @@
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -588,7 +588,10 @@
+         </>
+       )}
+       {view === "history" && (
+-        <SdkRawHistory key={refreshVersion} reader={readers.history} />
++        <>
++          <SdkRawHistory key={refreshVersion} reader={readers.history} />
++          <HubHistoryImport />
++        </>
+       )}
+       {view === "ask" && (
+         <>
+@@ -738,5 +741,60 @@
+         </R6Button>
+       </div>
+     </aside>
++  );
++}
++
++/** Importing older conversations is a client-side job: the session files live
++ *  on the Macs, not on the NAS, and the server never scans the filesystem.
++ *  Offer the exact steps instead of a button that cannot work. */
++function HubHistoryImport() {
++  const [copied, setCopied] = useState(false);
++  const command =
++    "cloud-memory-connector capture-init --state-dir /path/to/private-state \\n" +
++    "  --connection-file /path/to/private/connection.json \\n" +
++    "  --source-file /path/to/private/source.json\n" +
++    "cloud-memory-connector collect --state-dir /path/to/private-state \\n" +
++    "  --connection-file /path/to/private/connection.json \\n" +
++    "  --source-file /path/to/private/source.json";
++  return (
++    <section className="hub-card" aria-label="导入已有会话">
++      <h2>导入已有会话</h2>
++      <p>
++        更早的对话保存在每台电脑上，不在 NAS 里，服务端无法自行扫描。导入需要在已配对的
++        那台电脑上运行客户端：它读取本机会话、过滤凭证，再走与日常采集相同的上传通道。
++      </p>
++      <ol>
++        <li>在「项目与设备接入」为这台电脑登记一个 <code>claude-code</code> 来源，记下来源与项目 UUID。</li>
++        <li>按接入指南写一份 0600 的 source 文件，<code>source_root</code> 指向该项目的会话目录，<code>workspace</code> 必须与会话里的 cwd 完全一致。</li>
++        <li>在电脑上运行下面的命令，重复执行直到输出 <code>queued=0</code>；之后由后台服务继续补传。</li>
++      </ol>
++      <pre className="hub-backup-command">
++        <code>{command}</code>
++      </pre>
++      <div className="hub-help-actions">
++        <R6Button
++          variant="quiet"
++          onClick={() => {
++            void navigator.clipboard.writeText(command).then(
++              () => setCopied(true),
++              () => setCopied(false),
++            );
++          }}
++        >
++          {copied ? "已复制" : "复制导入命令"}
++        </R6Button>
++        <a
++          href="https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/source-capture.md"
++          target="_blank"
++          rel="noreferrer"
++        >
++          查看来源采集说明
++        </a>
++      </div>
++      <p>
++        导入的是原文，不等于已提炼成长期记忆；「已接纳」也不代表另一台设备已经能检索到。
++        忘记与彻底删除的规则在导入时同样生效，已删除的内容不会被重新导入。
++      </p>
++    </section>
+   );
+ }
+--- a/memhub/apps/web/src/HubConsole.test.tsx
++++ b/memhub/apps/web/src/HubConsole.test.tsx
+@@ -1,5 +1,5 @@
+ // @vitest-environment jsdom
+-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
++import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+ import userEvent from "@testing-library/user-event";
+ import { afterEach, beforeEach, expect, it, vi } from "vitest";
+ import { HubConsole } from "./HubConsole";
+@@ -828,4 +828,16 @@
+   expect(
+     screen.getByRole("heading", { name: "系统设置", level: 1 }),
+   ).toBeTruthy();
++});
++
++it("explains history import as a client-side job instead of offering a dead button", async () => {
++  render(<HubConsole />);
++  await select();
++  await userEvent.click(screen.getByRole("button", { name: "历史原文" }));
++  const card = await screen.findByRole("region", { name: "导入已有会话" });
++  expect(within(card).getByText(/不在 NAS 里/)).toBeTruthy();
++  expect(within(card).getByRole("button", { name: "复制导入命令" })).toBeTruthy();
++  // No button here may claim the server can import on its own.
++  expect(within(card).queryByRole("button", { name: /开始导入/ })).toBeNull();
++  expect(within(card).getByText(/已删除的内容不会被重新导入/)).toBeTruthy();
+ });

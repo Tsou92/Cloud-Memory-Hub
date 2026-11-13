@@ -68,6 +68,29 @@ class SourceConfiguration(BaseModel):
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+_MEDIA_BLOCK_TYPES = frozenset({"image", "document", "audio", "video", "file"})
+# A schema may declare a property *named* attachments; only real entries are files.
+_SCHEMA_KEYS = frozenset({"properties", "input_schema", "json_schema", "parameters"})
+
+
+def _is_media_block(value):
+    """True only for a real content block, not any dict carrying a 'type' key.
+
+    Tool results embed JSON Schema fragments where 'type' is a list such as
+    ["object", "null"], and schemas can declare a property called
+    'attachments'. Treating those as media aborted a whole capture batch.
+    """
+    if not isinstance(value, dict):
+        return False
+    kind = value.get("type")
+    if isinstance(kind, str) and kind in _MEDIA_BLOCK_TYPES:
+        return True
+    attachments = value.get("attachments")
+    if isinstance(attachments, list) and attachments:
+        return not _SCHEMA_KEYS.intersection(value)
+    return False
+
+
 def _reject_unsupported_media(record):
     # The upstream text parser intentionally omits media blocks; do not let a
     # mixed text+image record silently pass as a complete import.
@@ -79,9 +102,7 @@ def _reject_unsupported_media(record):
         if count > 20_000 or depth > 24:
             raise CaptureError("source_record_too_complex")
         if isinstance(value, dict):
-            if value.get("type") in {"image", "document", "audio", "video", "file"}:
-                raise CaptureError("source_media_not_supported")
-            if value.get("attachments"):
+            if _is_media_block(value):
                 raise CaptureError("source_media_not_supported")
             pending.extend((child, depth + 1) for child in value.values())
         elif isinstance(value, list):

@@ -14,7 +14,7 @@ from pathlib import Path
 BOOTSTRAP = Path(__file__).resolve().parents[1] / "scripts/bootstrap-install.ps1"
 POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 WINDOWS_POWERSHELL = shutil.which("powershell") if os.name == "nt" else None
-TAG = "v0.1.7"
+TAG = "v0.1.8"
 PREFIX = f"cloud-memory-hub-{TAG}"
 ARCHIVE = f"{PREFIX}-source.tar.gz"
 FILES = (
@@ -46,7 +46,7 @@ $ErrorActionPreference = 'Stop'
 $offset = [Array]::IndexOf($args, '-o')
 $url = $args[$offset - 1]
 $target = $args[$offset + 1]
-$base = 'https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/v0.1.7/'
+$base = 'https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/v0.1.8/'
 if (-not $url.StartsWith($base) -or
     $args -notcontains '--proto' -or $args -notcontains '--proto-redir') {
     throw 'unexpected curl request'

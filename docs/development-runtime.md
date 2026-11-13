@@ -57,6 +57,21 @@ docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub setup-link
 
 不要把该输出粘贴到公开日志、Issue 或聊天。网页通过受限会话访问；容器重启后重新登录。模型配置界面来自上游，真实模型的测试／激活会访问相应提供商，当前验证使用未激活的合成配置。
 
+## 忘记管理员密码
+
+忘记密码不等于丢失数据。密码只保护后台登录，与设备凭证、项目授权、记忆和加密密钥相互独立；重置不会让已连接的 Agent 断开。
+
+先停服，再用**同一个数据、配置和治理卷**执行重置。新密码从标准输入读取，不进入命令参数或 shell 历史：
+
+```sh
+docker compose stop hub
+printf '%s\n' '这里换成你的新密码' | \
+  docker compose run --rm -T hub reset-admin-password --writers-stopped
+docker compose up -d --no-build hub
+```
+
+成功后用新密码登录。命令只替换 `hub_config` 卷中的管理员凭证记录，不迁移、不删除数据；旧后台会话全部失效。失败时返回非零并保持原文件不变，按提示检查配置卷权限（目录 0700、文件 0600、属主为运行用户）。这不是加密密钥轮换；配置卷仍应纳入私有备份。
+
 ## 数据与停止
 
 新增严格诊断策略的开发镜像在创建服务前接管该进程的 Python 日志输出。debug 仍可使用，但日志只保存步骤、耗时、计数、规范请求标识和安全错误定位，不保存提示、响应或任意异常正文。SDK 独立使用仍有 legacy 默认。直接调用 create_hub 也会分离宿主的自定义日志处理器，保留对象且不关闭文件；应在专用进程运行 Hub。活跃旧日志资源会导致策略启用明确拒绝，应先结束旧资源后重试。见 [ADR-0041](adr/0041-strict-diagnostic-content-policy.md)。

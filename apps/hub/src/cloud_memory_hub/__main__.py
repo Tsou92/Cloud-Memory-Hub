@@ -83,6 +83,7 @@ def _main() -> None:
             "supervise",
             "init",
             "setup-link",
+            "reset-admin-password",
             "migrate-governance",
             "migrate-originals",
             "diagnostic-preview",
@@ -161,6 +162,20 @@ def _main() -> None:
             print("Administrator setup is already complete.", file=sys.stderr)
             raise SystemExit(1)
         print(config.public_origin + "/hub/setup#proof=" + proof)
+        return
+    if args.command == "reset-admin-password":
+        # Reads the new password from stdin so it never lands in shell history.
+        from cloud_memory_hub.admin_credentials import AdminCredentialError, reset_admin_password
+
+        if not args.writers_stopped:
+            parser.error("reset-admin-password requires --writers-stopped")
+        new_password = sys.stdin.readline().rstrip("\n")
+        try:
+            reset_admin_password(HubConfig.from_environment(), new_password)
+        except AdminCredentialError:
+            print("Administrator password was not changed; inspect the config volume.")
+            raise SystemExit(2) from None
+        print("Administrator password replaced. Start the Hub and sign in with it.")
         return
     if args.command == "migrate-originals":
         from cloud_memory_hub.original_archive import migrate_originals
