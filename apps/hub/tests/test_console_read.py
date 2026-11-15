@@ -100,10 +100,9 @@ def test_real_two_project_reads_match_device_content_and_show_registered_sources
                 assert state["count_state"] == "not_computed"
                 # Last accepted upload is derived from receipts plus queue time;
                 # a missing value must stay absent rather than become zero.
+                # produce() always leaves receipts and jobs, so it must be set.
                 accepted = state["sources"][0]["last_accepted_at"]
-                assert accepted is None or (
-                    isinstance(accepted, int) and 0 < accepted <= int(time.time())
-                )
+                assert isinstance(accepted, int) and 0 < accepted <= int(time.time())
                 assert "credential" not in summary.text
             assert ids(await read(web, admin, "global")) == set()
             wrong_scope = await read(
