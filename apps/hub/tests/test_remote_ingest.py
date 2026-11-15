@@ -603,6 +603,29 @@ def test_remember_projection_does_not_rewrite_accepted_frozen_jobs(tmp_path, mon
     asyncio.run(scenario())
 
 
+def test_acceptance_rejects_the_hubs_own_admin_and_encryption_credentials(tmp_path):
+    config = config_for(tmp_path)
+
+    async def scenario():
+        app = create_hub(config)
+        async with app.core.router.lifespan_context(app.core):
+            async with AsyncClient(
+                transport=ASGITransport(app), base_url=config.public_origin
+            ) as client:
+                _, headers, _, raw = await provision(client, config)
+                for secret in (config.admin_token, config.encryption_key.decode()):
+                    dirty = {
+                        **raw,
+                        "event_id": str(uuid4()),
+                        "content": {"messages": [{"role": "user", "text": "我们记一下 " + secret}]},
+                    }
+                    refused = await client.post("/hub/v1/events", headers=headers, json=dirty)
+                    assert refused.status_code == 422 and secret not in refused.text
+                assert count_jobs(config) == 0
+
+    asyncio.run(scenario())
+
+
 def test_upstream_callback_preserves_local_policy_and_callback_errors_deny(tmp_path, monkeypatch):
     import one_memory.api as upstream
     from one_memory.config import Settings

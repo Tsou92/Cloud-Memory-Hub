@@ -159,13 +159,22 @@ def write_request(event: EventEnvelope, *, request_id: str | None = None) -> Wri
 
 
 class RemoteIngest:
-    def __init__(self, access: DeviceAccessStore, queue_provider, *, read_only=False):
+    def __init__(
+        self,
+        access: DeviceAccessStore,
+        queue_provider,
+        *,
+        read_only=False,
+        known_credentials_source=None,
+    ):
         if read_only and not access.read_only:
             raise AccessError("ingest_read_only_access_required", 503)
         self.access = access
         self.read_only = read_only
         self.queue_provider = queue_provider
-        self.privacy = CredentialFilter()
+        # Acceptance is the last point where a leaked admin password or Fernet
+        # key can be stopped before it is persisted and sent for extraction.
+        self.privacy = CredentialFilter(known_credentials_source=known_credentials_source)
         self.suppressed = lambda scope: {}
         self.require_source_allowed = lambda event: None
         self.require_source_rules = lambda scope: None
