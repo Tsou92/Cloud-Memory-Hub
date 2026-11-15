@@ -27,6 +27,7 @@ from cloud_memory_hub.read_contract import (
     SESSION_MARKDOWN_PATH,
     TEXT_BLOCK,
     GetRequest,
+    HistorySearchRequest,
     ListRequest,
     ReadItem,
     ReadReply,
@@ -458,7 +459,11 @@ async def _read_remote_verified(
             raise TransportError("remote_read_mismatch")
     elif len(result.items) > request.limit:
         raise TransportError("remote_read_mismatch")
-    expected_next = request.offset + request.limit if isinstance(request, ListRequest) else None
+    expected_next = (
+        request.offset + request.limit
+        if isinstance(request, (ListRequest, HistorySearchRequest))
+        else None
+    )
     if result.next_offset is not None and result.next_offset != expected_next:
         raise TransportError("remote_read_mismatch")
     # This private helper returns unmodified fragments only to the filtering wrappers.

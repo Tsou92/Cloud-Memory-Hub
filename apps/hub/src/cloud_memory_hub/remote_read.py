@@ -221,7 +221,11 @@ class RemoteRead:
             # HySdkRawHit subclasses the record, so it can be used directly;
             # re-reading by id would only add a round trip per hit.
             records = [hit for hit in hits if visible(hit, history=True)]
-            if len(records) >= wanted:
+            if wanted < request.offset + request.limit:
+                # The SDK has no cursor. Asking past the cap would return the
+                # same 50 hits for every offset, so the window ends here.
+                next_offset = None
+            elif len(records) >= wanted:
                 # More may exist beyond this page; the caller can page again.
                 next_offset = request.offset + request.limit
             records = records[request.offset : request.offset + request.limit]

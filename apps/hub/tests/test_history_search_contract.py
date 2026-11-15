@@ -1,15 +1,17 @@
 """History full-text search: request shape, query filtering and paging.
 
-The end-to-end path is covered by the existing remote-read fixture; these
-tests pin the parts that are easy to break by accident: the request must not
-be mistaken for a list request, the query is normalized and filtered like
-every other query, and paging slices the SDK's offset-less result.
+The HTTP path is covered by the remote-read fixture; these tests pin the
+parts that are easy to break by accident: the request must not be mistaken
+for a list request, the query is normalized and filtered like every other
+query, and paging slices the SDK's offset-less result without inventing an
+endless cursor past the search cap.
 """
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
+from cloud_memory_hub.privacy import CredentialFilter
 from cloud_memory_hub.read_contract import (
     READ_OPERATIONS,
     HistorySearchRequest,
@@ -72,3 +74,61 @@ def test_offset_is_validated():
 def test_search_request_still_requires_a_query():
     with pytest.raises(ValidationError):
         HistorySearchRequest(scope_id="global", query="   ")
+
+
+class _Access:
+    instance_id = "instance-1"
+
+
+class _Raw:
+    def __init__(self, index):
+        self.raw_id = f"cmhe:raw-{index}"
+        self.user_id = "cmh:instance-1:global"
+        self.content = f"合成原文 {index}"
+        self.agent_id = "synthetic"
+        self.session_id = "synthetic"
+        self.source = "synthetic"
+        self.memory_at = 1
+
+
+class _RawBridge:
+    def __init__(self, total):
+        self.total = total
+        self.limits = []
+
+    async def search_sdk_raw(self, query, *, user_id, limit):
+        self.limits.append(limit)
+        return [_Raw(index) for index in range(min(limit, self.total))]
+
+
+def _pager(bridge):
+    reader = RemoteRead(_Access(), lambda: bridge)
+
+    async def bounded(read):
+        return await read()
+
+    reader._bounded_read = bounded
+    return reader
+
+
+def _page(reader, *, offset, limit):
+    request = HistorySearchRequest(scope_id="global", query="原文", offset=offset, limit=limit)
+    return asyncio.run(reader._read("history-search", request, CredentialFilter()))
+
+
+def test_paging_advances_until_the_search_cap():
+    bridge = _RawBridge(total=120)
+    reader = _pager(bridge)
+
+    first = _page(reader, offset=0, limit=10)
+    assert [item.record_id for item in first.items] == [f"cmhe:raw-{i}" for i in range(10)]
+    assert first.next_offset == 10
+
+    last = _page(reader, offset=MAX_HISTORY_SEARCH - 5, limit=10)
+    assert [item.record_id for item in last.items] == [
+        f"cmhe:raw-{i}" for i in range(MAX_HISTORY_SEARCH - 5, MAX_HISTORY_SEARCH)
+    ]
+    assert last.next_offset is None
+
+    beyond = _page(reader, offset=MAX_HISTORY_SEARCH, limit=10)
+    assert beyond.items == () and beyond.next_offset is None
