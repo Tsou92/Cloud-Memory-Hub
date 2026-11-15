@@ -48,14 +48,14 @@ def archive(tmp_path):
             )
         )["source_id"]
 
-        def append(*messages, record_id=None, revision=1):
+        def append(*messages, record_id=None, revision=1, conversation_id=None):
             event = EventEnvelope(
                 event_id=str(uuid4()),
                 instance_id=access.instance_id,
                 device_id=device_id,
                 source_id=source_id,
                 scope_id=scope_id,
-                conversation_id=conversation,
+                conversation_id=conversation_id or conversation,
                 record_id=record_id or str(uuid4()),
                 revision=revision,
                 kind="conversation_turn",
@@ -210,6 +210,22 @@ def test_purging_latest_revision_keeps_its_source_rule_on_older_original(archive
         ]
         page = await markdown(history, scope, anchor)
         assert page["markdown"] == "# 会话原文\n\n## 助手\n\n可继续共享的进展。\n\n"
+
+    asyncio.run(scenario())
+
+
+def test_long_current_conversation_does_not_hide_other_sessions(archive):
+    # The hook asks for briefs every turn, excluding the conversation it just
+    # captured. A session longer than the recent-row window must not starve it.
+    history, (scope, _), conversation, source = archive
+    append = source(scope)
+    anchor = append(("assistant", "另一个会话的进展。"), conversation_id=str(uuid4()))
+    for index in range(60):
+        append(("user", f"当前会话第 {index} 条。"))
+
+    async def scenario():
+        selected = await briefs(history, scope, exclude=conversation)
+        assert [item["session_ref"] for item in selected] == [anchor]
 
     asyncio.run(scenario())
 

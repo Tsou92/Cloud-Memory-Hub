@@ -199,19 +199,22 @@ class SourceHistory:
         terms = tuple(dict.fromkeys(re.findall(r"\w+", query)))[:24]
         hidden = self.ingest.suppressed(scope_id)
         sessions = {}
+        # Exclude this conversation in SQL: a long running session would
+        # otherwise fill the recent-row window and hide every other session.
+        clause, args = "scope_id=?", [scope_id]
+        if exclude_conversation_id is not None:
+            clause += " AND conversation_id<>?"
+            args.append(exclude_conversation_id)
         with self.ingest._database() as db:
             candidates = db.execute(
                 "SELECT rowid AS position, receipt_id, source_id, conversation_id "
                 "FROM cmh_event_receipts INDEXED BY cmh_original_scope "
-                "WHERE scope_id=? ORDER BY rowid DESC LIMIT ?",
-                (scope_id, _RECENT_ROWS),
+                f"WHERE {clause} ORDER BY rowid DESC LIMIT ?",
+                (*args, _RECENT_ROWS),
             )
             loaded = 0
             for candidate in candidates:
-                if (
-                    candidate["conversation_id"] == exclude_conversation_id
-                    or PREFIX + candidate["receipt_id"] in hidden
-                ):
+                if PREFIX + candidate["receipt_id"] in hidden:
                     continue
                 key = _session_key(candidate)
                 if key in sessions and len(sessions[key][1]) == 2:
