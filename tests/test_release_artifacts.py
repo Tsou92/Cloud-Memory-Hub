@@ -28,8 +28,12 @@ class ReleaseFixture(unittest.TestCase):
         (self.source / "apps/hub/pyproject.toml").write_text(
             f'[project]\nname="synthetic-release"\nversion="{self.release_version}"\n'
         )
-        for name in ("LICENSE", "NOTICE", "CHANGELOG.md"):
+        for name in ("LICENSE", "NOTICE"):
             (self.source / name).write_text("Synthetic public fixture\n")
+        (self.source / "CHANGELOG.md").write_text(
+            f"## 未发布\n\n- Synthetic work in progress\n\n"
+            f"## {self.release_version}\n\n- Synthetic fixture\n"
+        )
         self.git("init", "--quiet")
         self.git("add", ".")
         self.git(
@@ -231,6 +235,24 @@ class ArtifactTests(ReleaseFixture):
             release.validate_source(self.source, "v1.2.3", self.commit)
         (self.source / "untracked").write_text("fixture")
         with self.assertRaisesRegex(release.ReleaseError, "source_dirty"):
+            release.validate_source(self.source, "v1.2.3rc1", self.commit)
+
+    def test_changelog_must_name_the_released_version(self):
+        (self.source / "CHANGELOG.md").write_text("## 未发布\n\n- Synthetic work in progress\n")
+        self.git("add", "CHANGELOG.md")
+        self.git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "Synthetic missing release heading",
+        )
+        self.commit = self.git("rev-parse", "HEAD")
+        self.git("tag", "-f", "v1.2.3rc1")
+        with self.assertRaisesRegex(release.ReleaseError, "changelog_missing"):
             release.validate_source(self.source, "v1.2.3rc1", self.commit)
 
     def test_invalid_version_aliases_and_dispatch_branch_are_rejected(self):
