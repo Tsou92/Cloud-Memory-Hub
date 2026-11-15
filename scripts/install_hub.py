@@ -200,6 +200,12 @@ def offer_admin_setup(args, connector, origin):
     print("需要登录后台时，请用同一安装器的 --open-admin 打开管理员入口。")
 
 
+def print_install_directory(directory):
+    # Every later manual step (reset password, backup, upgrade) is run with
+    # docker compose from here, so the path has to be visible once.
+    print(f"安装目录：{directory}（重置密码、备份、升级时在此目录执行 docker compose）", flush=True)
+
+
 def remote_script(args, remote_command, script, *, private=False):
     result = subprocess.run(
         ssh_command(args, remote_command),
@@ -521,13 +527,15 @@ def main(argv=None):
             except installer.LocalInstallError as error:
                 raise InstallError(str(error)) from None
             print("本机 Docker 已就绪。管理页面：" + origin + "/hub", flush=True)
+            print_install_directory(installer.directory_for(home, args.compose_project))
             if args.home is None:
                 offer_admin_setup(args, connector, origin)
             return 0
         if args.nas_only:
             print("正在通过 SSH 安装 NAS 服务…", flush=True)
-            origin, _, _ = deploy(args, connector)
+            origin, directory, _ = deploy(args, connector)
             print("NAS 已就绪。管理页面：" + origin + "/hub", flush=True)
+            print_install_directory(directory)
             if args.home is None:
                 offer_admin_setup(args, connector, origin)
             print("登录后可从「连接 Agent」为设备生成配对链接。")
@@ -545,6 +553,7 @@ def main(argv=None):
         print("正在通过 SSH 安装 NAS 服务…", flush=True)
         origin, directory, access = deploy(args, connector)
         print("管理页面：" + origin + "/hub", flush=True)
+        print_install_directory(directory)
         print("正在创建项目并连接这台电脑…", flush=True)
         result = install_client(args, connector, home, workspace, origin, directory, access)
         print("共享项目目录：" + str(workspace), flush=True)

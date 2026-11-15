@@ -106,6 +106,8 @@ class FirstInstallTests(unittest.TestCase):
         workspace.assert_not_called()
         directory.assert_not_called()
         self.assertIn(ORIGIN + "/hub", output.getvalue())
+        # Later reset, backup and upgrade commands all run in this directory.
+        self.assertIn("/safe", output.getvalue())
 
     def test_ssh_placeholder_is_rejected_before_network_or_client_setup(self):
         self.args.nas = "USER@NAS"
@@ -232,8 +234,10 @@ class FirstInstallTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             installer.return_value.deploy_local.return_value = origin
+            installer.return_value.directory_for.return_value = Path("/synthetic/local-server")
             self.assertEqual(install.main(["--local", "--port", "8890"]), 0)
         self.assertIn(origin + "/hub", output.getvalue())
+        self.assertIn("/synthetic/local-server", output.getvalue())
         nas.assert_not_called()
         client.assert_not_called()
         self.assertEqual(setup.call_args.args[-1], origin)

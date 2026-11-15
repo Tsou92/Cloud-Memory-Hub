@@ -76,11 +76,15 @@ SETUP_REQUIRED_PAGE = _auth_page(
     "初始化",
     """<p>此实例还需要先设置管理员密码，由安装器生成的一次性初始化链接完成。</p>
 <ol>
-<li>在运行 Hub 的 NAS 上执行：<br>
+<li>在运行 Hub 的主机上进入安装目录执行：<br>
 <code>docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub setup-link</code></li>
 <li>命令会打印一个只在本机可用的初始化链接，在本机浏览器打开它。</li>
 <li>这次运行只对当前实例有效；命令不会打印或重置管理员密码。</li>
 </ol>
+<p><b>本机 Docker：</b>安装目录是 <code>~/.cloud-memory-hub/local-server/&lt;项目名&gt;</code>，
+也可以重新运行安装命令并加 <code>--local --open-admin</code>（Windows 加
+<code>-Local -OpenAdmin</code>）。<b>NAS：</b>安装目录默认是
+<code>~/cloud-memory-hub-install</code>，安装器完成时会打印实际路径。</p>
 <p>如果 Hub 不是用 Docker Compose 启动的，改用你实际使用的启动方式执行同一条模块命令。</p>""",
 )
 SETUP_FINISHED_PAGE = _auth_page(

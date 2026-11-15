@@ -51,6 +51,11 @@ def _workspace(home, project):
     return path
 
 
+def directory_for(home, project):
+    """The compose directory shown to the user after a local install."""
+    return _workspace(home, project)
+
+
 @contextmanager
 def _lock(directory):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
