@@ -2,7 +2,9 @@
 
 状态：2026-11-10 用户已要求按上线发布标准逐一完善，最终让其他人通过 GitHub 自行部署 NAS 并在网页配置；既有产品主页 `Memory-Hub-Website` 一并完善并重新发布 Vercel。初始基线为 `1279f1b`；下表按实际证据更新状态，未执行项不计通过。初始问题见[发布准备度审计](reviews/2026-11-10-release-readiness.md)。
 
-当前公开版为 [v0.1.6](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.6)，固定源码 `f9441f2b4d7681f1ba8fe6196ac07b7f3ffb9b61`，Release ID `441563414`，已设为 latest。[发行 CI 43002946244](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/43002946244) 已成功（publish 按设计跳过），七附件在公开前完整回下载校验，公开后匿名入口逐一核验；同一 Linux 镜像完成隔离 Docker 首装与日常 NAS 冷备升级、原 MCP 读写读回，官网与指南已发布 v0.1.6 并完成真实渲染下的桌面／窄屏／菜单／动效／无 JS 检查，见 [v0.1.6 验收记录](reviews/2026-11-11-v016-release-acceptance.md)。该实例已完成管理员首次设密，后台页面以真实 Chrome 带管理员会话渲染核对通过（项目、设备、共享记录、历史原文、记忆库空状态、模型未配置状态、备份状态与版本列表均与数据库和 API 读数一致，版本徽章 0.1.6）；Mac arm64 本机重装、升级失败回退、双物理机复验仍为未执行项，不计通过。
+当前公开版为 [v0.1.8](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.8)，固定源码 `483ed6f2101d659924999b927f2fd7a0bff1d4d7`，公开时间 2026-11-13，七个附件，公开仓库的 latest 指向它；范围、验证结果、发布后 CI 差异与站点更新见 [v0.1.8 发布记录](reviews/2026-11-13-release-018.md)。
+
+此前公开版为 [v0.1.6](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.6)，固定源码 `f9441f2b4d7681f1ba8fe6196ac07b7f3ffb9b61`，Release ID `441563414`。[发行 CI 43002946244](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/43002946244) 已成功（publish 按设计跳过），七附件在公开前完整回下载校验，公开后匿名入口逐一核验；同一 Linux 镜像完成隔离 Docker 首装与日常 NAS 冷备升级、原 MCP 读写读回，官网与指南已发布 v0.1.6 并完成真实渲染下的桌面／窄屏／菜单／动效／无 JS 检查，见 [v0.1.6 验收记录](reviews/2026-11-11-v016-release-acceptance.md)。该实例已完成管理员首次设密，后台页面以真实 Chrome 带管理员会话渲染核对通过（项目、设备、共享记录、历史原文、记忆库空状态、模型未配置状态、备份状态与版本列表均与数据库和 API 读数一致，版本徽章 0.1.6）；Mac arm64 本机重装、升级失败回退、双物理机复验仍为未执行项，不计通过。
 
 此前公开版为 [v0.1.3](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.3)（源码 `25b9f7526bd5509d031dd9511845f6521f3acf92`，[发行 CI 42854414851](https://github.com/Tsou92/Cloud-Memory-Hub/actions/runs/42854414851)），其隔离 NAS 烟测、冷备升级、原 MCP 写入读回与 Mac arm64 原包验收见 [v0.1.3 验收记录](reviews/2026-11-11-v013-release-acceptance.md)。v0.1.4 与 v0.1.5 的发行记录见[补记](reviews/2026-11-11-v014-v015-release-records.md)，其中 v0.1.4 的发行 CI 只有最后一个 `publish` 任务失败（`release_draft_not_found`），制品可信依据是前十个任务产物与本地完整回下载校验，不能写成全绿。旧 v0.1.2 Release 已转为草稿并撤回公开附件，其[历史记录](reviews/2026-11-10-final-artifact-acceptance.md)只保留原时点证据。
 
@@ -62,6 +64,8 @@
 ## 第三阶段：备份恢复、发行制品与 CI
 
 关联 FR-11、FR-13、ENG-01；解决 RR-08、RR-09、RR-10、RR-12。该阶段包含用户确认的自动定期备份，不以一段手工归档命令替代。优先复用 Core 备份与维护恢复能力，补齐 Hub 多卷和治理协调。
+
+下表各项的「当前状态」停在 v0.1.6 验收时点，是当时证据；当前公开版与最新状态以本页开头和 [v0.1.8 发布记录](reviews/2026-11-13-release-018.md)为准。
 
 | 门槛 | 当前状态 | 可观察的完成条件 |
 | --- | --- | --- |
