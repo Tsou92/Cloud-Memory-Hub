@@ -38,7 +38,7 @@ async def correct_memory(console, request):
     """Replace the body of one active memory, after proving it is in scope."""
     await console.require_scope(request.scope_id)
     namespace = f"cmh:{console.access.instance_id}:{request.scope_id}"
-    bridge = console.reads.bridge
+    bridge = console.reads.bridge()
     try:
         current = await bridge.get_sdk_memory(request.record_id)
     except Exception:

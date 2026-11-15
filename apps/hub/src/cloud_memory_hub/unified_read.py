@@ -47,6 +47,13 @@ class UnifiedReadBridge:
             return await self.productivity.get(identity)
         return await self.bridge.get_sdk_memory(identity)
 
+    async def update(self, identity, content):
+        # Originals live in the Hub archive and productivity rows project the
+        # SDK's own stores; neither is a writable SDK memory.
+        if identity.startswith((PREFIX, ORIGINAL_PREFIX)):
+            raise ValueError("read_reserved_identity_conflict")
+        return await self.bridge.update(identity, content)
+
     @staticmethod
     def _ordinary(records):
         if any(
