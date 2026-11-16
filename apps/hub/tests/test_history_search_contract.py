@@ -82,7 +82,7 @@ class _Access:
 
 class _Raw:
     def __init__(self, index):
-        self.raw_id = f"cmhe:raw-{index}"
+        self.raw_id = f"raw-{index}"
         self.user_id = "cmh:instance-1:global"
         self.content = f"合成原文 {index}"
         self.agent_id = "synthetic"
@@ -116,17 +116,55 @@ def _page(reader, *, offset, limit):
     return asyncio.run(reader._read("history-search", request, CredentialFilter()))
 
 
+def test_unified_bridge_delegates_raw_search():
+    """The app wires RemoteRead to UnifiedReadBridge, not the raw SDK bridge."""
+    from cloud_memory_hub.unified_read import UnifiedReadBridge
+
+    calls = []
+
+    class _Sdk:
+        async def search_sdk_raw(self, query, *, user_id, limit):
+            calls.append((query, user_id, limit))
+            return [_Raw(0)]
+
+    hits = asyncio.run(
+        UnifiedReadBridge(_Sdk()).search_sdk_raw("原文", user_id="cmh:instance-1:global", limit=5)
+    )
+    assert [hit.raw_id for hit in hits] == ["raw-0"]
+    assert calls == [("原文", "cmh:instance-1:global", 5)]
+
+
+def test_unified_bridge_refuses_a_reserved_raw_identity():
+    from cloud_memory_hub.unified_read import UnifiedReadBridge
+
+    class _Colliding(_Raw):
+        def __init__(self):
+            super().__init__(0)
+            self.raw_id = "cmhe:receipt-1"
+
+    class _Sdk:
+        async def search_sdk_raw(self, query, *, user_id, limit):
+            return [_Colliding()]
+
+    with pytest.raises(ValueError, match="read_reserved_identity_conflict"):
+        asyncio.run(
+            UnifiedReadBridge(_Sdk()).search_sdk_raw(
+                "原文", user_id="cmh:instance-1:global", limit=5
+            )
+        )
+
+
 def test_paging_advances_until_the_search_cap():
     bridge = _RawBridge(total=120)
     reader = _pager(bridge)
 
     first = _page(reader, offset=0, limit=10)
-    assert [item.record_id for item in first.items] == [f"cmhe:raw-{i}" for i in range(10)]
+    assert [item.record_id for item in first.items] == [f"raw-{i}" for i in range(10)]
     assert first.next_offset == 10
 
     last = _page(reader, offset=MAX_HISTORY_SEARCH - 5, limit=10)
     assert [item.record_id for item in last.items] == [
-        f"cmhe:raw-{i}" for i in range(MAX_HISTORY_SEARCH - 5, MAX_HISTORY_SEARCH)
+        f"raw-{i}" for i in range(MAX_HISTORY_SEARCH - 5, MAX_HISTORY_SEARCH)
     ]
     assert last.next_offset is None
 
