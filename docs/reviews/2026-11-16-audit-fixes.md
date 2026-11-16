@@ -19,6 +19,7 @@
 | CHANGELOG 缺 0.1.8 | `CHANGELOG.md` | 已发布内容标成「未发布」，并有一份重复段落 |
 | 版本标题无人校验 | `release_artifacts.py` | 新增发布门禁：CHANGELOG 没有对应版本标题就拒绝发布 |
 | DSH 插件测试从未执行 | `.github/workflows/quality.yml` | 5 个插件测试加入 CI |
+| 真实接线缺 `search_sdk_raw` | `unified_read.py` | 实机测试发现：搜索接口拿到的是 `UnifiedReadBridge`，该桥没有此方法，0.1.8 的原文搜索在真实部署里必定 503 |
 
 ## 同时处理的可用性问题
 
@@ -47,8 +48,18 @@
 - `apps/hub` 完整 pytest：先获取内置嵌入模型（`fetch_embedding_model.py`），再运行 **2344 通过、6 跳过、0 失败**。
   未获取模型时该套件有 196 项因 `MissingEmbeddingAssetsError` 失败；改前与改后的失败清单 `diff` 完全一致，证明与本轮改动无关。
 
+## 实机验证（NAS）
+
+在本机 Docker 不可用的情况下，用真实 NAS（自建 `ssh nas`，x86_64）从分支源码构建镜像，另起独立端口 18800 与独立数据卷的实例，不接触生产容器：
+
+- 镜像构建成功，容器健康检查通过。
+- 20 项真实 HTTP 断言全部通过，覆盖：项目／设备／来源建立，入库拒绝 hub 自身管理员令牌（422 且不回显），事件接纳，长会话后其他会话摘要仍可见，纠错返回 404 而不是 503，历史原文搜索首页 10 条 / 次页 5 条 / 越过 50 条窗口返回空页且无游标，以及 connector 客户端接受满页。
+- 首轮实机测试暴露了 `UnifiedReadBridge` 缺 `search_sdk_raw`（见上表），修复后重建镜像复测通过。
+- 测试结束后已删除测试容器、三个测试卷、构建目录和测试镜像；生产 `cloud-memory-hub-hub-1` 仍运行 `cloud-memory-hub:v0.1.8`，状态未变。
+
 ## 剩余风险与回滚
 
-- 未在本机执行 Docker 构建与真实 NAS 升级：`make check-container`、`check-web` 和真机验收不在本轮范围。
+- 本轮没有在生产实例上升级验证，也没有执行 `make check-container`／`check-web`；实机证据来自独立测试实例。
+- `apps/hub` 需要内置嵌入模型才能跑全量；干净检出首次运行需先执行模型获取脚本。
 - 所有改动都在独立分支，单次 `git checkout main` 即可回滚；无数据库、协议或存储变更。
 - 已发布的 v0.1.8 GitHub Release 正文由旧 CHANGELOG 生成，仓库修复不会改写它；如需更正要单独编辑 Release。
