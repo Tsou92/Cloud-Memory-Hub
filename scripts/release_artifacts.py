@@ -65,6 +65,13 @@ def validate_source(root, tag, commit, ref=None, ref_type=None):
     require(not git("status", "--porcelain", "--untracked-files=all"), "release_source_dirty")
     version = tomllib.loads((root / "apps/hub/pyproject.toml").read_text())["project"]["version"]
     require(version == tag[1:], "release_version_mismatch")
+    # RELEASE_NOTES.md is the whole CHANGELOG, so an unrenamed "## 未发布"
+    # heading publishes released changes as unreleased.
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    require(
+        re.search(rf"^## {re.escape(version)}(?:$|\s|（)", changelog, re.MULTILINE) is not None,
+        "release_changelog_missing",
+    )
     return {"tag": tag, "version": version, "commit": commit}
 
 

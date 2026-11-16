@@ -36,7 +36,9 @@ def _console(instance_id, bridge):
 
     return SimpleNamespace(
         access=SimpleNamespace(instance_id=instance_id),
-        reads=SimpleNamespace(bridge=bridge),
+        # Production hands over the factory, not an instance: a callable here
+        # keeps the test on the same contract as app.py.
+        reads=SimpleNamespace(bridge=lambda: bridge),
         require_scope=require_scope,
     )
 
@@ -97,3 +99,22 @@ def test_content_is_bounded_and_rejects_whitespace():
         CorrectRequest(
             scope_id="11111111-1111-4111-8111-111111111111", record_id="m", content="x" * 16385
         )
+
+
+def test_read_only_projections_never_reach_the_sdk_update():
+    """Raw originals and productivity rows are views, not writable memories."""
+    from cloud_memory_hub.unified_read import UnifiedReadBridge
+
+    writes = []
+
+    class _Sdk:
+        async def update(self, memory_id, content):
+            writes.append((memory_id, content))
+
+    bridge = UnifiedReadBridge(_Sdk())
+    for identity in ("cmhe:receipt-1", "cmhp:w:e:1", "cmhp:c:f:2"):
+        with pytest.raises(ValueError, match="read_reserved_identity_conflict"):
+            asyncio.run(bridge.update(identity, "新内容"))
+    assert writes == []
+    asyncio.run(bridge.update("mem-1", "新内容"))
+    assert writes == [("mem-1", "新内容")]

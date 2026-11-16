@@ -2,6 +2,7 @@ param(
     [string]$Nas,
     [switch]$Local,
     [ValidateRange(1024,65535)][int]$Port,
+    [ValidateRange(1024,65535)][int]$ServePort,
     [ValidateRange(1,65535)][int]$SshPort,
     [string]$Origin,
     [string]$TailscaleContainer,
@@ -136,6 +137,9 @@ try {
         if ($OpenAdmin) { $installerArgs += '--open-admin' }
         elseif (-not $Local) { $installerArgs += '--nas-only' }
         if ($PSBoundParameters.ContainsKey('Port')) { $installerArgs += @('--port', "$Port") }
+        if ($PSBoundParameters.ContainsKey('ServePort')) {
+            $installerArgs += @('--serve-port', "$ServePort")
+        }
         if ($PSBoundParameters.ContainsKey('SshPort')) { $installerArgs += @('--ssh-port', "$SshPort") }
         if ($Origin) { $installerArgs += @('--origin', $Origin) }
         if ($TailscaleContainer) { $installerArgs += @('--tailscale-container', $TailscaleContainer) }

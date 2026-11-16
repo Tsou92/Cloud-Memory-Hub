@@ -61,7 +61,7 @@ docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub setup-link
 
 忘记密码不等于丢失数据。密码只保护后台登录，与设备凭证、项目授权、记忆和加密密钥相互独立；重置不会让已连接的 Agent 断开。
 
-先停服，再用**同一个数据、配置和治理卷**执行重置。新密码从标准输入读取，不进入命令参数或 shell 历史：
+先停服，再用**同一个数据、配置和治理卷**执行重置。以下命令在 NAS 的安装目录执行（默认 `~/cloud-memory-hub-install`，安装器完成时会打印实际路径）。新密码从标准输入读取，不进入命令参数或 shell 历史：
 
 ```sh
 docker compose stop hub

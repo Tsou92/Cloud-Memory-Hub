@@ -36,6 +36,20 @@ jobs:
       - name: Run repository quality checks
         run: make check
 
+  plugin:
+    name: DSH capture plugin
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Run capture plugin tests
+        run: node --test packages/dsh-plugin/test/plugin.test.js
+
   onboarding:
     name: Agent setup (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

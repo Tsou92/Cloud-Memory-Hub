@@ -59,7 +59,11 @@ def create_hub(config: HubConfig):
     )
     devices = governance.access
     sdk_admission = SdkAdmission()
-    ingest = RemoteIngest(devices, lambda: core.state.memory_write_queue)
+    ingest = RemoteIngest(
+        devices,
+        lambda: core.state.memory_write_queue,
+        known_credentials_source=admin_credentials.known_credentials,
+    )
     lineage = OutputLineage(ingest, lambda: _sdk_library_bridge(core), governance)
     reconciler = SdkReconciler(
         lambda: core.state.memory_write_queue,

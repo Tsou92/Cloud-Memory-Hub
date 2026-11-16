@@ -24,12 +24,13 @@
 
 安装器处理 SSH、运行环境、下载校验、镜像导入和健康检查。首次下载可能需要几分钟。服务启动后，登录后台并从「连接 Agent」配对。要在 Mac 同时配置首台设备，可将 `--nas-only` 换为 `--agent codex` 或 `--agent claude`。
 
-NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Tailscale，或已有 HTTPS 反代。Mac/Linux 参数加在命令末尾的右括号前，PowerShell 参数加在末尾。已有实例使用[升级指南](development-runtime.md#已有实例升级保持配置和身份)。
+NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Tailscale，或已有 HTTPS 反代。NAS 上还需要 `curl`、`sha256sum`、`tar`、`flock` 和 `python3`；安装器只检查，不会替你安装。Mac/Linux 参数加在命令末尾的右括号前，PowerShell 参数加在末尾。已有实例使用[升级指南](development-runtime.md#已有实例升级保持配置和身份)。
 
 | 场景 | Mac / Linux | Windows PowerShell |
 | --- | --- | --- |
 | NAS 有多个 Tailscale 容器，需指定其中一个 | `--tailscale-container tailscale` | `-TailscaleContainer 'tailscale'` |
 | 已有 HTTPS 反代指向 NAS 回环端口 | `--origin https://hub.example.com` | `-Origin 'https://hub.example.com'` |
+| Tailscale HTTPS 端口已被占用 | `--serve-port 8444` | `-ServePort 8444` |
 | SSH 使用非默认端口 | `--ssh-port 2222` | `-SshPort 2222` |
 
 支持 Apple Silicon Mac 上的 Claude Code CLI 和 Codex 桌面自动收发。安装器写好项目钩子，Codex 首次打开项目时按 **Review hooks** 提示信任。等待信任会显示为待完成。完成后普通聊天即可；模型配置只在需要长期记忆提炼时使用。OpenCode、Hermes 和通用 MCP 的范围见[设备接入指南](client-installation.md)。
@@ -74,6 +75,7 @@ Linux、Windows 和其他 Agent 可使用 MCP。按安装结果重新加载连�
 | --- | --- |
 | 应用中心、套件中心或容器管理 | 安装并启动 Docker／Container Manager。当前预编译镜像支持 Intel／AMD 的 Linux amd64 NAS；ARM NAS 暂不按已支持处理。 |
 | 控制面板中的终端、SSH 或远程终端 | 开启 SSH，记下连接地址、登录用户名和端口。不同 NAS 的菜单名称可能不同。 |
+| NAS 的系统命令 | 安装器在下载任何文件前检查 `curl`、`sha256sum`、`tar`、`flock`、`python3` 和 Docker CLI。缺少时安装会停止并提示缺哪一个，先用应用中心或包管理器补装后重试。 |
 
 电脑需要能连接 NAS：可以在同一局域网，也可以通过已有的 Tailscale 私有网络。这里填写的是 **NAS 地址**，不是 Docker 容器的内部地址；不用把 SSH 开放到公网。
 
