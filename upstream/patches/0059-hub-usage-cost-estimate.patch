@@ -65,7 +65,7 @@
  }
  
  export async function getHubUsage(signal?: AbortSignal): Promise<HubUsageReport> {
-@@ -129,10 +159,26 @@
+@@ -129,10 +159,28 @@
                  <dt>合计 tokens</dt>
                  <dd>{number(report.total_tokens)}</dd>
                </div>
@@ -73,7 +73,9 @@
 +                <div>
 +                  <dt>估算费用</dt>
 +                  <dd>
-+                    {report.cost.currency} {report.cost.total.toFixed(4)}
++                    {report.cost.priced_requests === 0
++                      ? "暂无可定价模型"
++                      : `${report.cost.currency} ${report.cost.total.toFixed(4)}`}
 +                  </dd>
 +                </div>
 +              ) : null}
@@ -94,7 +96,7 @@
              网页问答的调用尚未计入这里；历史全量导入与多模态解析也未实现。
 --- a/memhub/apps/web/src/HubUsage.test.tsx
 +++ b/memhub/apps/web/src/HubUsage.test.tsx
-@@ -45,6 +45,38 @@
+@@ -45,6 +45,63 @@
    expect(parseUsage(report)).toEqual(report);
  });
  
@@ -128,6 +130,31 @@
 +  expect(
 +    parseUsage({ ...report, cost: { available: true, total: "x" } }).cost,
 +  ).toBeUndefined();
++});
++
++it("says no model is priced instead of showing a zero amount", async () => {
++  vi.stubGlobal(
++    "fetch",
++    vi.fn().mockResolvedValue(
++      Response.json({
++        ...report,
++        cost: {
++          available: true,
++          currency: "USD",
++          estimated: true,
++          total: 0,
++          priced_requests: 0,
++          unpriced_requests: 12,
++          models: [],
++          unpriced_models: ["deepseek-v4.1-flash"],
++        },
++      }),
++    ),
++  );
++  render(<HubUsage />);
++  expect(await screen.findByText("暂无可定价模型")).toBeTruthy();
++  expect(screen.queryByText(/USD 0\.0000/)).toBeNull();
++  expect(screen.getByText(/deepseek-v4\.1-flash/)).toBeTruthy();
 +});
 +
  it("refreshes on demand", async () => {

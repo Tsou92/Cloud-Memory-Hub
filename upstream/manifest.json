@@ -298,7 +298,7 @@
     {
       "path": "patches/0059-hub-usage-cost-estimate.patch",
       "scope": "estimated_model_spend_from_the_existing_audit_store_with_a_dated_builtin_price_table_named_unpriced_models_and_no_guessing",
-      "digest": "sha256:91fb0ced137b3f666228da95a3c787ee5d72bba9082ddca9cf74a68bb69d7f96"
+      "digest": "sha256:71b2d99b85cd0925d9163cf69e29230a09498ebd326d160c0d0c1dbdc45dc2ee"
     }
   ]
 }
