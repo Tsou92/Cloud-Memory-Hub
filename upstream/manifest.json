@@ -299,6 +299,11 @@
       "path": "patches/0059-hub-usage-cost-estimate.patch",
       "scope": "estimated_model_spend_from_the_existing_audit_store_with_a_dated_builtin_price_table_named_unpriced_models_and_no_guessing",
       "digest": "sha256:71b2d99b85cd0925d9163cf69e29230a09498ebd326d160c0d0c1dbdc45dc2ee"
+    },
+    {
+      "path": "patches/0060-llm-retry-transport-by-type.patch",
+      "scope": "retry_transport_errors_by_type_so_a_dns_failure_without_the_word_connection_is_still_retried",
+      "digest": "sha256:ab0bd0a3717950ae3fcb42502ae014928bf56a2d2e96e6e5387b8006cb610241"
     }
   ]
 }
