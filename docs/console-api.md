@@ -72,6 +72,46 @@ sources_total 是所选项目中包含 active/revoked 的来源记录数；状�
 
 items 完全沿用 ReadItem，包括 record_id、kind、content、分页位置、来源引用与截断标识。returned_count 仅为本次返回项数。SDK 候选总数不发布为可见总数；页面可能因抑制过滤为空，next_offset 非空时仍可继续。memory-get 和 history-get 的不同入口不可互换。忘记原文排除于历史列表，明确按 ID history-get 仍可查看；彻底删除原文返回 404。
 
+## 用量与费用估算
+
+`GET /hub/v1/console/usage` 汇总 Core 审计库里每次模型调用的次数与 token，并附带 `cost` 段。数值来自本地记录，不含提示词或响应正文。
+
+```json
+{
+  "schema_version": 1,
+  "request_count": 12,
+  "prompt_tokens": 1200,
+  "completion_tokens": 340,
+  "cost": {
+    "available": true,
+    "currency": "USD",
+    "estimated": true,
+    "prices_source": "builtin",
+    "price_table_date": "2026-11-03",
+    "total": 0.0134,
+    "priced_requests": 10,
+    "unpriced_requests": 2,
+    "models": [
+      { "model": "claude-opus-5-5", "requests": 10, "prompt_tokens": 1200,
+        "completion_tokens": 340, "cached_prompt_tokens": 0,
+        "estimated_cost": 0.0134 }
+    ],
+    "unpriced_models": ["custom-gateway-model"]
+  },
+  "billing": "provider_statement_is_authoritative"
+}
+```
+
+估算规则：`(prompt − cached) × 输入单价 + cached × 缓存读取单价 + completion × 输出单价`，单价单位为每百万 token；缓存 token 先按 prompt 上限截断，避免重复计费。表里没有的模型只计入 `unpriced_models`，不猜价格。`available=false` 表示审计库不存在或不可读，此时不输出 `total`。
+
+内置单价是 Anthropic 一方 API 在 `price_table_date` 时点的价格，实际以服务商账单为准。可用 `CMH_MODEL_PRICES` 覆盖：
+
+```sh
+CMH_MODEL_PRICES='{"claude-opus-5-5":{"input":4,"output":20,"cache_read":0.2}}'
+```
+
+未填 `cache_read` 时按输入单价计；配置不是合法 JSON、为空或全部条目无效时回退到内置表，`prices_source` 为 `builtin_config_invalid`。
+
 ## 错误与边界
 
 无管理员权限返回 403 `administrator_required`；会话缺少同源证明返回 403 `origin_required`，跨 Origin 为 `origin_not_allowed`。未知项目为 404 `console_scope_not_found`；不存在或越界记录统一 404 `record_not_found`。缺少／非法 scope、额外字段、超限分页为 422 `invalid_request`；非 JSON 为 `json_required`，请求超过 64 KiB 为 413 `request_too_large`。

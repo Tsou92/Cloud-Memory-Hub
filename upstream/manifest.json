@@ -294,6 +294,11 @@
       "path": "patches/0058-hub-memory-correction.patch",
       "scope": "scope_proven_in_place_correction_of_a_distilled_memory_never_the_unscoped_sdk_update",
       "digest": "sha256:080b31bdbe0ad1b54893434c503f774f7ce56271a091a9f450b56f37ca4e864b"
+    },
+    {
+      "path": "patches/0059-hub-usage-cost-estimate.patch",
+      "scope": "estimated_model_spend_from_the_existing_audit_store_with_a_dated_builtin_price_table_named_unpriced_models_and_no_guessing",
+      "digest": "sha256:91fb0ced137b3f666228da95a3c787ee5d72bba9082ddca9cf74a68bb69d7f96"
     }
   ]
 }

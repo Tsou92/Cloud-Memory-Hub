@@ -7,6 +7,7 @@ from starlette.routing import Route
 
 from cloud_memory_hub.console_correct import CorrectRequest, correct_memory
 from cloud_memory_hub.console_read import ConsolePageRequest
+from cloud_memory_hub.cost_report import build_cost_report
 from cloud_memory_hub.read_contract import READ_OPERATIONS, ListRequest, ScopeRequest
 from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.remote_api import read_body, require_admin, response
@@ -33,8 +34,20 @@ def usage_routes(core):
             report = await run_in_threadpool(store.report)
         except Exception:
             raise AccessError("usage_unavailable", 503) from None
+        settings = getattr(core.state, "settings", None)
+        data_dir = getattr(settings, "data_dir", None)
+        cost = (
+            await run_in_threadpool(build_cost_report, data_dir)
+            if data_dir is not None
+            else {"schema_version": 1, "available": False, "reason": "settings_missing"}
+        )
         return response(
-            {"schema_version": 1, **report, "billing": "provider_statement_is_authoritative"}
+            {
+                "schema_version": 1,
+                **report,
+                "cost": cost,
+                "billing": "provider_statement_is_authoritative",
+            }
         )
 
     return [Route("/hub/v1/console/usage", usage, methods=["GET"])]

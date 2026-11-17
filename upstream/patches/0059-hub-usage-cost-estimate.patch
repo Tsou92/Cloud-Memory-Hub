@@ -1,0 +1,135 @@
+--- a/memhub/apps/web/src/HubUsage.tsx
++++ b/memhub/apps/web/src/HubUsage.tsx
+@@ -4,8 +4,9 @@
+ /** Content-free model usage for the administrator console (requirement 9).
+  *
+  * Counts and token totals come from the Core audit store, which already
+- * records every precipitation call. Nothing here estimates money: provider
+- * statements remain authoritative, and the page says so.
++ * records every precipitation call. The Hub may also add an estimated cost
++ * derived from a dated price table; it is an estimate, provider statements
++ * remain authoritative, and unknown models are named instead of guessed.
+  */
+ export interface HubUsageReport {
+   request_count: number;
+@@ -15,14 +16,41 @@
+   prompt_tokens: number;
+   completion_tokens: number;
+   total_tokens: number;
++  cost?: HubUsageCost | null;
+ }
+ 
++export interface HubUsageCost {
++  currency: string;
++  total: number;
++  priced_requests: number;
++  unpriced_models: string[];
++}
++
+ function integer(value: unknown): number | null {
+   return Number.isSafeInteger(value) && Number(value) >= 0
+     ? Number(value)
+     : null;
+ }
+ 
++function cost(value: unknown): HubUsageCost | null {
++  if (!value || typeof value !== "object") return null;
++  const row = value as Record<string, unknown>;
++  if (row.available !== true) return null;
++  const total = typeof row.total === "number" && Number.isFinite(row.total) && row.total >= 0
++    ? row.total
++    : null;
++  if (total === null) return null;
++  const models = Array.isArray(row.unpriced_models)
++    ? row.unpriced_models.filter((item): item is string => typeof item === "string")
++    : [];
++  return {
++    currency: typeof row.currency === "string" ? row.currency : "USD",
++    total,
++    priced_requests: integer(row.priced_requests) ?? 0,
++    unpriced_models: models,
++  };
++}
++
+ export function parseUsage(value: unknown): HubUsageReport {
+   const row = value as Record<string, unknown>;
+   const report = {
+@@ -36,7 +64,9 @@
+   };
+   if (Object.values(report).some((item) => item === null))
+     throw new Error("usage_response_invalid");
+-  return report as unknown as HubUsageReport;
++  const parsed = report as unknown as HubUsageReport;
++  const estimated = cost(row?.cost);
++  return estimated ? { ...parsed, cost: estimated } : parsed;
+ }
+ 
+ export async function getHubUsage(signal?: AbortSignal): Promise<HubUsageReport> {
+@@ -129,10 +159,26 @@
+                 <dt>合计 tokens</dt>
+                 <dd>{number(report.total_tokens)}</dd>
+               </div>
++              {report.cost ? (
++                <div>
++                  <dt>估算费用</dt>
++                  <dd>
++                    {report.cost.currency} {report.cost.total.toFixed(4)}
++                  </dd>
++                </div>
++              ) : null}
+             </dl>
+           ) : loading ? (
+             <p role="status">正在读取用量…</p>
+           ) : null}
++          {report?.cost ? (
++            <p>
++              费用按内置单价估算，以服务商账单为准。
++              {report.cost.unpriced_models.length
++                ? `未定价模型未计入：${report.cost.unpriced_models.join("、")}。`
++                : ""}
++            </p>
++          ) : null}
+           {error ? <p role="alert">{error}</p> : null}
+           <p>
+             网页问答的调用尚未计入这里；历史全量导入与多模态解析也未实现。
+--- a/memhub/apps/web/src/HubUsage.test.tsx
++++ b/memhub/apps/web/src/HubUsage.test.tsx
+@@ -45,6 +45,38 @@
+   expect(parseUsage(report)).toEqual(report);
+ });
+ 
++it("shows the estimated cost and names unpriced models", async () => {
++  vi.stubGlobal(
++    "fetch",
++    vi.fn().mockResolvedValue(
++      Response.json({
++        ...report,
++        cost: {
++          available: true,
++          currency: "USD",
++          estimated: true,
++          total: 0.24,
++          priced_requests: 12,
++          unpriced_requests: 0,
++          models: [],
++          unpriced_models: ["custom-gateway-model"],
++        },
++      }),
++    ),
++  );
++  render(<HubUsage />);
++  expect(await screen.findByText("USD 0.2400")).toBeTruthy();
++  expect(screen.getByText(/custom-gateway-model/)).toBeTruthy();
++  expect(screen.getByText(/以服务商账单为准/)).toBeTruthy();
++});
++
++it("hides an unavailable cost block instead of showing zero", () => {
++  expect(parseUsage({ ...report, cost: { available: false } }).cost).toBeUndefined();
++  expect(
++    parseUsage({ ...report, cost: { available: true, total: "x" } }).cost,
++  ).toBeUndefined();
++});
++
+ it("refreshes on demand", async () => {
+   const fetcher = vi.fn().mockResolvedValue(Response.json(report));
+   vi.stubGlobal("fetch", fetcher);
