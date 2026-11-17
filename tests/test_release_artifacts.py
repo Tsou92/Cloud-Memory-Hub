@@ -584,6 +584,25 @@ class PublicationTests(ReleaseFixture):
         ):
             return release.publish(self.output, self.identity, "example/cloud-memory-hub")
 
+    def test_draft_listing_race_is_retried(self):
+        # A created draft can be missing from the next releases list page.
+        # 0.1.9 failed exactly there; the publish flow must wait it out.
+        lists_after_create = []
+        original = self.api
+
+        def api(path):
+            if "/releases?" in path and self.created:
+                lists_after_create.append(path)
+                if len(lists_after_create) < 3:
+                    return []
+            return original(path)
+
+        with patch.object(release.time, "sleep") as sleep:
+            result = self.publish(api=api)
+        self.assertEqual(result["state"], "published")
+        self.assertGreaterEqual(len(lists_after_create), 3)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_upload_draft_download_verify_then_publish_prerelease(self):
         # For existing tags this display field is not the commit authority.
         # Both remote tag reads still have to peel to the immutable source SHA.

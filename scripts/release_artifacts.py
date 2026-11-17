@@ -17,6 +17,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 import tomllib
 from pathlib import Path, PurePosixPath
 
@@ -25,6 +26,9 @@ from scripts.client_distribution.install import digest
 from scripts.client_distribution.install import verify as verify_client
 
 MAX_ASSET_BYTES = 2 * 1024**3
+# Creating a draft is not immediately visible to the releases list API.
+RELEASE_LIST_ATTEMPTS = 10
+RELEASE_LIST_DELAY_SECONDS = 3.0
 TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:rc[1-9][0-9]*)?\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 IMAGE_INDEX = "application/vnd.oci.image.index.v1+json"
@@ -489,6 +493,23 @@ def find_release(repository, tag):
     raise ReleaseError("release_remote_list_incomplete")
 
 
+def wait_for_release(repository, tag):
+    """Return the release once the list endpoint shows it.
+
+    Creating a draft and listing releases is not atomic. The 0.1.9 publish run
+    created the draft and the next list still returned an empty page, which
+    surfaced as release_draft_not_found. Wait a bounded time instead of failing
+    on that read-after-write window.
+    """
+    for attempt in range(RELEASE_LIST_ATTEMPTS):
+        found = find_release(repository, tag)
+        if found is not None:
+            return found
+        if attempt + 1 < RELEASE_LIST_ATTEMPTS:
+            time.sleep(RELEASE_LIST_DELAY_SECONDS)
+    return None
+
+
 def remote_tag(repository, identity):
     value = gh_api(f"repos/{repository}/git/ref/tags/{identity['tag']}")["object"]
     for _ in range(10):
@@ -550,7 +571,7 @@ def publish(directory, identity, repository):
             *(["--prerelease"] if "rc" in identity["version"] else []),
         ]
     )
-    created = find_release(repository, identity["tag"])
+    created = wait_for_release(repository, identity["tag"])
     require(created is not None and created.get("draft") is True, "release_draft_not_found")
     endpoint = f"repos/{repository}/releases/{created['id']}"
     release = gh_api(endpoint)
