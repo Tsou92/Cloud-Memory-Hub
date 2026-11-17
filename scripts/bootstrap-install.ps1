@@ -11,7 +11,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$cmhTag = 'v0.1.9'
+$cmhTag = 'v0.1.10'
 $cmhRelease = "https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/$cmhTag"
 $cmhArchiveName = "cloud-memory-hub-$cmhTag-source.tar.gz"
 $cmhTemp = Join-Path ([IO.Path]::GetTempPath()) ('cmh-release-' + [Guid]::NewGuid().ToString('N'))
