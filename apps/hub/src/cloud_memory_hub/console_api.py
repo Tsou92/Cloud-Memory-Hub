@@ -34,6 +34,11 @@ def usage_routes(core):
             report = await run_in_threadpool(store.report)
         except Exception:
             raise AccessError("usage_unavailable", 503) from None
+        # The audit store nests its totals under "summary"; the console reads
+        # them at the top level, so publish both shapes.
+        summary = report.get("summary") if isinstance(report, dict) else None
+        if not isinstance(summary, dict):
+            summary = {}
         settings = getattr(core.state, "settings", None)
         data_dir = getattr(settings, "data_dir", None)
         cost = (
@@ -44,7 +49,8 @@ def usage_routes(core):
         return response(
             {
                 "schema_version": 1,
-                **report,
+                **summary,
+                **(report if isinstance(report, dict) else {}),
                 "cost": cost,
                 "billing": "provider_statement_is_authoritative",
             }

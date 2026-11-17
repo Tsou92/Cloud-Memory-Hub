@@ -210,6 +210,36 @@ def test_usage_endpoint_adds_cost_without_touching_the_existing_fields(tmp_path)
     assert client.get("/hub/v1/console/usage?x=1").status_code == 422
 
 
+def test_usage_endpoint_flattens_the_nested_audit_summary(tmp_path):
+    """The store nests totals under "summary"; the page reads them at top level."""
+    _database(
+        tmp_path / "one-memory.sqlite3",
+        [("claude-opus-5-5", "2026-11-17T12:00:00Z", 1_000_000, 0, 0, 1_000_000)],
+    )
+    core = _core(
+        tmp_path,
+        report={
+            "summary": {
+                "request_count": 3,
+                "succeeded": 2,
+                "failed": 1,
+                "in_flight": 0,
+                "prompt_tokens": 1_000_000,
+                "completion_tokens": 0,
+                "total_tokens": 1_000_000,
+            },
+            "requests": [],
+            "by_minute": [],
+        },
+    )
+    body = _client(core).get("/hub/v1/console/usage").json()
+    assert body["request_count"] == 3
+    assert body["succeeded"] == 2 and body["failed"] == 1
+    assert body["prompt_tokens"] == 1_000_000
+    assert body["summary"]["request_count"] == 3
+    assert body["cost"]["total"] == 4.0
+
+
 def test_usage_endpoint_without_settings_still_answers(tmp_path):
     core = _core(tmp_path)
     core.state.settings = None
