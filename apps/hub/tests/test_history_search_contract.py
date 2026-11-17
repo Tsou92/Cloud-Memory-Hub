@@ -1,10 +1,9 @@
 """History full-text search: request shape, query filtering and paging.
 
-The HTTP path is covered by the remote-read fixture; these tests pin the
-parts that are easy to break by accident: the request must not be mistaken
+The archive itself is covered by the session-history fixture; these tests pin
+the parts that are easy to break by accident: the request must not be mistaken
 for a list request, the query is normalized and filtered like every other
-query, and paging slices the SDK's offset-less result without inventing an
-endless cursor past the search cap.
+query, and paging follows the archive's has-more answer at any depth.
 """
 
 import asyncio
@@ -18,7 +17,7 @@ from cloud_memory_hub.read_contract import (
     ListRequest,
 )
 from cloud_memory_hub.remote_access import AccessError
-from cloud_memory_hub.remote_read import MAX_HISTORY_SEARCH, RemoteRead
+from cloud_memory_hub.remote_read import RemoteRead
 from pydantic import ValidationError
 
 
@@ -68,7 +67,6 @@ def test_offset_is_validated():
         HistorySearchRequest(scope_id="global", query="x", offset=-1)
     with pytest.raises(ValidationError):
         HistorySearchRequest(scope_id="global", query="x", limit=11)
-    assert MAX_HISTORY_SEARCH >= 10
 
 
 def test_search_request_still_requires_a_query():
@@ -91,18 +89,19 @@ class _Raw:
         self.memory_at = 1
 
 
-class _RawBridge:
+class _Originals:
     def __init__(self, total):
         self.total = total
-        self.limits = []
+        self.calls = []
 
-    async def search_sdk_raw(self, query, *, user_id, limit):
-        self.limits.append(limit)
-        return [_Raw(index) for index in range(min(limit, self.total))]
+    async def search(self, namespace, query, *, limit, offset):
+        self.calls.append((namespace, query, limit, offset))
+        items = [_Raw(index) for index in range(offset, min(offset + limit, self.total))]
+        return items, offset + limit < self.total
 
 
-def _pager(bridge):
-    reader = RemoteRead(_Access(), lambda: bridge)
+def _pager(originals):
+    reader = RemoteRead(_Access(), lambda: None, originals=originals)
 
     async def bounded(read):
         return await read()
@@ -116,57 +115,25 @@ def _page(reader, *, offset, limit):
     return asyncio.run(reader._read("history-search", request, CredentialFilter()))
 
 
-def test_unified_bridge_delegates_raw_search():
-    """The app wires RemoteRead to UnifiedReadBridge, not the raw SDK bridge."""
-    from cloud_memory_hub.unified_read import UnifiedReadBridge
-
-    calls = []
-
-    class _Sdk:
-        async def search_sdk_raw(self, query, *, user_id, limit):
-            calls.append((query, user_id, limit))
-            return [_Raw(0)]
-
-    hits = asyncio.run(
-        UnifiedReadBridge(_Sdk()).search_sdk_raw("原文", user_id="cmh:instance-1:global", limit=5)
-    )
-    assert [hit.raw_id for hit in hits] == ["raw-0"]
-    assert calls == [("原文", "cmh:instance-1:global", 5)]
-
-
-def test_unified_bridge_refuses_a_reserved_raw_identity():
-    from cloud_memory_hub.unified_read import UnifiedReadBridge
-
-    class _Colliding(_Raw):
-        def __init__(self):
-            super().__init__(0)
-            self.raw_id = "cmhe:receipt-1"
-
-    class _Sdk:
-        async def search_sdk_raw(self, query, *, user_id, limit):
-            return [_Colliding()]
-
-    with pytest.raises(ValueError, match="read_reserved_identity_conflict"):
-        asyncio.run(
-            UnifiedReadBridge(_Sdk()).search_sdk_raw(
-                "原文", user_id="cmh:instance-1:global", limit=5
-            )
-        )
-
-
-def test_paging_advances_until_the_search_cap():
-    bridge = _RawBridge(total=120)
-    reader = _pager(bridge)
+def test_paging_follows_the_archive_at_any_depth():
+    originals = _Originals(total=120)
+    reader = _pager(originals)
 
     first = _page(reader, offset=0, limit=10)
     assert [item.record_id for item in first.items] == [f"raw-{i}" for i in range(10)]
     assert first.next_offset == 10
 
-    last = _page(reader, offset=MAX_HISTORY_SEARCH - 5, limit=10)
-    assert [item.record_id for item in last.items] == [
-        f"raw-{i}" for i in range(MAX_HISTORY_SEARCH - 5, MAX_HISTORY_SEARCH)
-    ]
+    last = _page(reader, offset=115, limit=10)
+    assert [item.record_id for item in last.items] == [f"raw-{i}" for i in range(115, 120)]
     assert last.next_offset is None
 
-    beyond = _page(reader, offset=MAX_HISTORY_SEARCH, limit=10)
+    beyond = _page(reader, offset=1000, limit=10)
     assert beyond.items == () and beyond.next_offset is None
+    assert originals.calls[0][:3] == ("cmh:instance-1:global", "原文", 10)
+
+
+def test_search_without_the_archive_is_unavailable():
+    reader = _pager(None)
+    with pytest.raises(AccessError) as error:
+        _page(reader, offset=0, limit=10)
+    assert error.value.code == "read_unavailable"

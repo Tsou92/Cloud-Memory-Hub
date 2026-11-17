@@ -13,13 +13,13 @@
 | 后台「保存修改」必然 503 | `console_correct.py`、`unified_read.py` | 把 bridge 工厂当实例调用；0.1.8 宣称的记忆纠错实际不可用 |
 | 纠错写入只读投影 | `unified_read.py` | 原始原文与 productivity 记录不是可写 SDK 记忆，现在明确拒绝而不是透传 |
 | 历史原文搜索满页即报错 | `transport.py` | `HistorySearchRequest` 被当作非列表请求，任何带 `next_offset` 的回复都被判 `remote_read_mismatch` |
-| 搜索翻页永不结束 | `remote_read.py` | 超过 50 条搜索窗口后返回空页且 `next_offset` 无限增长 |
+| 搜索翻页永不结束 | `remote_read.py` | 超过 50 条搜索窗口后返回空页且 `next_offset` 无限增长；改为检索原文归档后按归档的 has-more 翻页，深度不再受限 |
 | 长会话挤掉其他会话摘要 | `source_history.py` | 排除当前会话放到 SQL，当前会话超过 48 行后其他摘要不再静默消失 |
 | 入库不复核管理员凭证 | `remote_ingest.py`、`app.py` | 粘贴进对话的管理员密码／加密密钥会落库并进入外部模型提炼 |
 | CHANGELOG 缺 0.1.8 | `CHANGELOG.md` | 已发布内容标成「未发布」，并有一份重复段落 |
 | 版本标题无人校验 | `release_artifacts.py` | 新增发布门禁：CHANGELOG 没有对应版本标题就拒绝发布 |
 | DSH 插件测试从未执行 | `.github/workflows/quality.yml` | 5 个插件测试加入 CI |
-| 真实接线缺 `search_sdk_raw` | `unified_read.py` | 实机测试发现：搜索接口拿到的是 `UnifiedReadBridge`，该桥没有此方法，0.1.8 的原文搜索在真实部署里必定 503 |
+| 原文搜索数据源错误 | `source_history.py`、`remote_read.py` | 实机测试发现：SDK 把原始块一律存为 `shadow`，搜索只召回 `ACTIVE`／`SUPERSEDED`，所以按 SDK 召回实现永远 0 条；改为检索 Hub 自己的原文归档 |
 
 ## 同时处理的可用性问题
 
@@ -55,7 +55,13 @@
 - 镜像构建成功，容器健康检查通过。
 - 20 项真实 HTTP 断言全部通过，覆盖：项目／设备／来源建立，入库拒绝 hub 自身管理员令牌（422 且不回显），事件接纳，长会话后其他会话摘要仍可见，纠错返回 404 而不是 503，历史原文搜索首页 10 条 / 次页 5 条 / 越过 50 条窗口返回空页且无游标，以及 connector 客户端接受满页。
 - 首轮实机测试暴露了 `UnifiedReadBridge` 缺 `search_sdk_raw`（见上表），修复后重建镜像复测通过。
-- 测试结束后已删除测试容器、三个测试卷、构建目录和测试镜像；生产 `cloud-memory-hub-hub-1` 仍运行 `cloud-memory-hub:v0.1.8`，状态未变。
+- 升级生产后复查发现搜索在真实数据上仍为 0 条：231 条 `l1_raw` 向量的状态全是 `shadow`，而 SDK 搜索只召回 `ACTIVE`／`SUPERSEDED`（`client.py` 的 `_search_explicit_raw_layer` 与 `reader_base.py` 的 `_recall_status`），原始块在上游设计里从写入起就是 shadow。搜索因此改为直接检索 Hub 的 `cmh_event_receipts` 原文归档，保留范围校验、忘记／彻底删除抑制和当前修订过滤。
+- 测试结束后已删除测试容器、三个测试卷、构建目录和测试镜像。
+
+## 生产升级与回滚点
+
+- 生产 NAS 已按文档从 `v0.1.8` 冷备升级到 `preview-9f6fec4`：三卷原始快照、逻辑备份 `cmh-backup-20261116T135013372443Z-…`、原 `compose.yaml` 与 `.env` 均保留在私有目录；v0.1.8 镜像未删除。
+- 升级后核对：容器 healthy、revision 一致、instance `47c4eb15…` 未变、项目 2／设备 5／来源 5／回执 236 与升级前逐项相同，现成 MCP 客户端读取正常。
 
 ## 剩余风险与回滚
 

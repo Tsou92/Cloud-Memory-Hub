@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.original_archive import validate_original
-from cloud_memory_hub.privacy import PrivacyError
+from cloud_memory_hub.privacy import CredentialFilter, PrivacyError
 from cloud_memory_hub.read_contract import SESSION_MARKDOWN_CHARS
 from cloud_memory_hub.remote_access import AccessError
 from cloud_memory_hub.remote_ingest import Conversation, Operation
@@ -143,6 +143,47 @@ class SourceHistory:
 
     async def get(self, identity):
         return await _joined_thread(self._get, identity)
+
+    def _search(self, namespace, query, limit, offset):
+        """Keyword search over the accepted originals of one scope.
+
+        The pinned SDK stores every verbatim chunk as ``shadow``, which its
+        search excludes, so its raw layer can never return these rows. The Hub
+        archive is the authoritative copy and already carries the suppression
+        table, so it is searched directly.
+        """
+        prefix = f"cmh:{self.ingest.access.instance_id}:"
+        if not namespace.startswith(prefix):
+            raise AccessError("original_scope_invalid", 503)
+        scope = namespace[len(prefix) :]
+        needle = _normalize(query)
+        hidden = self.ingest.suppressed(scope)
+        privacy = CredentialFilter()
+        # ponytail: linear scan of one scope per query. Move to SQLite FTS5 if a
+        # scope grows past a few thousand receipts and searches feel slow.
+        with self.ingest._database() as db:
+            rows = db.execute(
+                "SELECT receipt.*,source.adapter_id FROM cmh_event_receipts AS receipt "
+                "JOIN cmh_sources source USING(source_id) "
+                f"WHERE receipt.scope_id=? AND {_CURRENT_REVISION} "
+                "ORDER BY receipt.rowid DESC",
+                (scope,),
+            ).fetchall()
+        matched = []
+        for row in rows:
+            if PREFIX + row["receipt_id"] in hidden:
+                continue
+            text = "\n".join(text for _, text in self._messages(row, privacy))
+            if needle in _normalize(text):
+                matched.append(row)
+                if len(matched) > offset + limit:
+                    break
+        page = matched[offset : offset + limit]
+        records = [self._record(row, self._accepted_times(page)) for row in page]
+        return records, len(matched) > offset + limit
+
+    async def search(self, namespace, query, *, limit, offset):
+        return await _joined_thread(self._search, namespace, query, limit, offset)
 
     def _current(self, db, scope_id, position, hidden):
         row = db.execute(

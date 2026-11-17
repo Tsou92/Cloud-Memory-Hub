@@ -31,12 +31,6 @@ class UnifiedReadBridge:
             raise ValueError("read_reserved_identity_conflict")
         return list(records) + list(native[:remaining]), original_total + native_total
 
-    async def search_sdk_raw(self, query, *, user_id, limit):
-        hits = await self.bridge.search_sdk_raw(query, user_id=user_id, limit=limit)
-        if any(hit.raw_id.startswith(ORIGINAL_PREFIX) for hit in hits):
-            raise ValueError("read_reserved_identity_conflict")
-        return hits
-
     async def get_sdk_raw(self, identity):
         if self.originals is not None and identity.startswith(ORIGINAL_PREFIX):
             if await self.bridge.get_sdk_raw(identity) is not None:
