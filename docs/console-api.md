@@ -87,14 +87,14 @@ items 完全沿用 ReadItem，包括 record_id、kind、content、分页位置�
     "currency": "USD",
     "estimated": true,
     "prices_source": "builtin",
-    "price_table_date": "2026-11-03",
+    "price_table_date": "2026-11-17",
     "total": 0.0134,
     "priced_requests": 10,
     "unpriced_requests": 2,
     "models": [
       { "model": "claude-opus-5-5", "requests": 10, "prompt_tokens": 1200,
         "completion_tokens": 340, "cached_prompt_tokens": 0,
-        "estimated_cost": 0.0134 }
+        "peak_requests": 4, "off_peak_requests": 6, "estimated_cost": 0.0134 }
     ],
     "unpriced_models": ["custom-gateway-model"]
   },
@@ -104,13 +104,27 @@ items 完全沿用 ReadItem，包括 record_id、kind、content、分页位置�
 
 估算规则：`(prompt − cached) × 输入单价 + cached × 缓存读取单价 + completion × 输出单价`，单价单位为每百万 token；缓存 token 先按 prompt 上限截断，避免重复计费。表里没有的模型只计入 `unpriced_models`，不猜价格。`available=false` 表示审计库不存在或不可读，此时不输出 `total`。
 
-内置单价是 Anthropic 一方 API 在 `price_table_date` 时点的价格，实际以服务商账单为准。可用 `CMH_MODEL_PRICES` 覆盖：
+### 峰谷价
+
+峰谷分时计费的模型按每条请求的 `started_at` 归入 `peak` 或 `off_peak`，返回每个模型的 `peak_requests` 与 `off_peak_requests`。内置规则：
+
+- **DeepSeek**：峰段为 UTC 周一至周五 `01:00-04:00` 与 `06:00-10:00`，峰价为谷价两倍；其余时间（含周末）为谷价。中国法定节假日上游按谷价计，这里没有节假日日历，会按峰价估算，只会偏高不会偏低。
+- 其他内置模型为单一价格。
+- 无法解析开始时间的记录按峰价估算。
+
+内置表覆盖 Anthropic（Claude）、DeepSeek（`deepseek-flash`、`deepseek-v4.1-flash`、`deepseek-v4-flash`、`deepseek-v4-pro`）、OpenAI（GPT-5 / 5.1 / 5.2 / 5.3-codex / 5.4 / 5.5 及 mini、nano）与 Google（Gemini 3.x Flash、3.1 Pro、2.5 Flash）。Gemini 只取 ≤200K 输入的首档价，超长输入会偏低；OpenAI Batch、Gemini Batch 等折扣价不适用。价格以 `price_table_date` 时点的官方列表价为准，最终仍以服务商账单为准。
+
+### 自定义单价
 
 ```sh
-CMH_MODEL_PRICES='{"claude-opus-5-5":{"input":4,"output":20,"cache_read":0.2}}'
+CMH_MODEL_PRICES='{"claude-opus-5-5":{"input":4,"output":20,"cache_read":0.2},
+                   "my-gateway-model":{"input":0.3,"output":1.2,"cache_read":0.006,
+                     "off_peak":{"input":0.15,"output":0.6,"cache_read":0.003},
+                     "peak_windows_utc":[["01:00","04:00"],["06:00","10:00"]],
+                     "peak_weekdays":[0,1,2,3,4]}}'
 ```
 
-未填 `cache_read` 时按输入单价计；配置不是合法 JSON、为空或全部条目无效时回退到内置表，`prices_source` 为 `builtin_config_invalid`。
+`peak_weekdays` 使用 0=周一；窗口为 UTC `HH:MM`，左闭右开。未填 `cache_read` 时按输入单价计；未填 `peak_windows_utc` 时该模型为单一价格。配置不是合法 JSON、为空或全部条目无效时回退到内置表，`prices_source` 为 `builtin_config_invalid`。
 
 ## 错误与边界
 
