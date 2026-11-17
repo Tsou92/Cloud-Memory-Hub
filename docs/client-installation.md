@@ -135,4 +135,4 @@ Codex 桌面所用 TOML 配置使用同一命令加 `--format codex`。将输出
 
 交接使用 `handoff_save` 返回的完整 `handoff_id`，再由第二台 Mac 使用 `handoff_load` 读取。原文和交接不必等待模型提炼；语义搜索由 NAS 模型处理后可用。
 
-已在本机排队的内容不等于已经共享。不要将实际 Agent 未调用工具的问题与网络问题混为一谈；当前也不提供离线记忆读取缓存。对应设计与验收边界见 [ADR-0060](adr/0060-self-service-pairing.md) 与[处理状态合同](adr/0062-client-processing-status.md)。
+已在本机排队的内容不等于已经共享。不要将实际 Agent 未调用工具的问题与网络问题混为一谈。读取失败时，如果该请求此前成功过，连接组件会用本机缓存副本回答，并在结果里带 `served_from_cache` 与 `cached_at`；权限或删除类错误不会被缓存掩盖。缓存位于 `~/.cloud-memory-hub/` 状态目录、明文、30 天过期，详见[数据会去到哪里](data-and-privacy.md)。对应设计与验收边界见 [ADR-0060](adr/0060-self-service-pairing.md) 与[处理状态合同](adr/0062-client-processing-status.md)。

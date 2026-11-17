@@ -158,6 +158,7 @@ class AgentOperations:
             raise AgentAccessError("agent_event_invalid") from None
 
     async def _read(self, operation: str, request: dict):
+        """Live read used by automatic recall; the hook renders reply models."""
         try:
             return await read_remote(
                 self.connection,
@@ -169,29 +170,59 @@ class AgentOperations:
         except TransportError as error:
             raise AgentAccessError(error.code, retryable=error.retryable) from None
 
+    async def _read_cached(self, operation: str, request: dict):
+        """Read for explicit tools, falling back to the local cache when offline."""
+        body = {**request, "scope_id": self.scope_id}
+        try:
+            reply = await self._read(operation, request)
+        except AgentAccessError as error:
+            # Only a transport-level failure falls back to the cache. A 403 or
+            # 404 must reach the caller: revocation is not stale data.
+            if error.retryable:
+                cached = self._cached(operation, body)
+                if cached is not None:
+                    return cached
+            raise
+        value = reply.model_dump(mode="json")
+        self._remember(operation, body, value)
+        return value
+
+    def _cached(self, operation, body):
+        cache = getattr(self, "cache", None)
+        return cache.get(self.scope_id, operation, body) if cache is not None else None
+
+    def _remember(self, operation, body, value):
+        cache = getattr(self, "cache", None)
+        if cache is not None:
+            cache.put(self.scope_id, operation, body, value)
+
     async def search(self, query: str, *, limit: int = 5) -> dict:
-        reply = await self._read("memory-search", {"query": query, "limit": limit})
-        return reply.model_dump(mode="json")
+        return await self._read_cached("memory-search", {"query": query, "limit": limit})
 
     async def recent(self, *, limit: int = 5, offset: int = 0) -> dict:
-        reply = await self._read("history-list", {"limit": limit, "offset": offset})
-        return reply.model_dump(mode="json")
+        return await self._read_cached("history-list", {"limit": limit, "offset": offset})
 
     async def session_briefs(self, *, query: str | None = None, limit: int = 3) -> dict:
-        reply = await self._read("session-briefs", {"query": query, "limit": limit})
-        return reply.model_dump(mode="json")
+        return await self._read_cached("session-briefs", {"query": query, "limit": limit})
 
     async def session_markdown(self, session_ref: str, *, cursor: str | None = None) -> dict:
+        body = {"scope_id": self.scope_id, "session_ref": session_ref, "cursor": cursor}
         try:
             reply = await read_session_markdown_remote(
                 self.connection,
-                {"scope_id": self.scope_id, "session_ref": session_ref, "cursor": cursor},
+                body,
                 privacy=self.privacy,
                 transport=self.transport,
             )
         except TransportError as error:
+            if error.retryable:
+                cached = self._cached("session-markdown", body)
+                if cached is not None:
+                    return cached
             raise AgentAccessError(error.code, retryable=error.retryable) from None
-        return reply.model_dump(mode="json")
+        value = reply.model_dump(mode="json")
+        self._remember("session-markdown", body, value)
+        return value
 
     async def handoff_load(self, handoff_id: str) -> dict:
         try:
@@ -200,14 +231,19 @@ class AgentOperations:
             canonical_uuid(handoff_id[5:])
         except (ValueError, TypeError, AttributeError):
             raise AgentAccessError("handoff_id_invalid") from None
+        body = {"record_id": handoff_id, "scope_id": self.scope_id}
         try:
             original, item = await read_original_remote(
                 self.connection,
-                {"record_id": handoff_id, "scope_id": self.scope_id},
+                body,
                 privacy=self.privacy,
                 transport=self.transport,
             )
         except TransportError as error:
+            if error.retryable:
+                cached = self._cached("handoff-load", body)
+                if cached is not None:
+                    return cached
             code = {
                 "remote_original_too_large": "handoff_original_too_large",
                 "remote_original_invalid": "handoff_original_invalid",
@@ -230,7 +266,7 @@ class AgentOperations:
             document = _handoff(parse_json(event.content["text"]))
         except (ValueError, TypeError, PrivacyError, AgentAccessError):
             raise AgentAccessError("handoff_original_invalid") from None
-        return {
+        result = {
             "handoff_id": handoff_id,
             "event_id": event.event_id,
             "scope_id": event.scope_id,
@@ -239,6 +275,8 @@ class AgentOperations:
             "content_trust": "untrusted_history",
             "handoff": document.model_dump(mode="json"),
         }
+        self._remember("handoff-load", body, result)
+        return result
 
 
 class AgentAccess(AgentOperations):
@@ -252,6 +290,7 @@ class AgentAccess(AgentOperations):
         scope_id: str,
         source_id: str,
         transport=None,
+        cache=None,
     ):
         try:
             canonical_uuid(source_id)
@@ -279,6 +318,7 @@ class AgentAccess(AgentOperations):
         self.scope_id = scope_id
         self.source_id = source_id
         self.transport = transport
+        self.cache = cache
 
     async def capture_message(
         self, role: str, text: str, *, request_id, session_id, adapter_id="claude-code"

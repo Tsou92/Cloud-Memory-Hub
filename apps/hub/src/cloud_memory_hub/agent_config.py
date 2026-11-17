@@ -93,7 +93,20 @@ class AgentSettings:
             device_id=connection.device_id,
             privacy=privacy,
         )
-        return AgentAccess(connection, outbox, scope_id=self.scope_id, source_id=self.source_id)
+        from cloud_memory_hub.read_cache import ReadCache
+
+        cache = ReadCache(
+            self.state_dir / "read-cache.sqlite3",
+            instance_id=connection.instance_id,
+            device_id=connection.device_id,
+        )
+        return AgentAccess(
+            connection,
+            outbox,
+            scope_id=self.scope_id,
+            source_id=self.source_id,
+            cache=cache,
+        )
 
     def upgrade_outbox(self, backup_file: Path) -> dict:
         connection = RemoteConnection.from_file(self.connection_file)
