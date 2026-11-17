@@ -1,0 +1,18 @@
+--- a/hy_memory/agent/llm_provider.py
++++ b/hy_memory/agent/llm_provider.py
+@@ -101,6 +101,15 @@
+     status = getattr(exc, "status_code", None)
+     if isinstance(status, int):
+         return status == 408 or status == 429 or status >= 500
++    try:
++        import httpx
++    except ImportError:  # pragma: no cover - httpx ships with every install
++        httpx = None
++    if httpx is not None and isinstance(exc, httpx.TransportError):
++        # ConnectError / ReadTimeout / RemoteProtocolError never produced a
++        # usable response, so a retry is safe. Classifying by message text
++        # misses a DNS failure that never says "connection".
++        return True
+     return isinstance(
+         exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)
+     ) or any(
