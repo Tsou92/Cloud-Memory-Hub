@@ -28,8 +28,6 @@ from cloud_memory_hub.read_contract import (
 from cloud_memory_hub.remote_access import AccessError, DeviceAccessStore
 
 MEMBER_BUDGET = 64
-# Raw search has no cursor; cap one page so a request cannot fan out unbounded.
-MAX_HISTORY_SEARCH = 50
 
 
 @dataclass(frozen=True)
@@ -209,26 +207,19 @@ class RemoteRead:
                     break
             limited = limited or getattr(bridge, "candidate_limit_reached", False)
         elif isinstance(request, HistorySearchRequest):
-            # The pinned SDK raw search takes a query and a limit only; it has no
-            # offset. Ask for offset+limit and slice, so paging stays correct
-            # without pretending the SDK supports a cursor it does not have.
-            wanted = min(request.offset + request.limit, MAX_HISTORY_SEARCH)
-            hits = await bridge.search_sdk_raw(
+            # The SDK keeps verbatim chunks as shadow, which its search never
+            # returns, so the Hub archive is searched directly. Suppression and
+            # scope are applied inside the archive query.
+            if self.originals is None:
+                raise AccessError("read_unavailable", 503)
+            records, has_more = await self.originals.search(
+                namespace,
                 request.query,
-                user_id=namespace,
-                limit=wanted,
+                limit=request.limit,
+                offset=request.offset,
             )
-            # HySdkRawHit subclasses the record, so it can be used directly;
-            # re-reading by id would only add a round trip per hit.
-            records = [hit for hit in hits if visible(hit, history=True)]
-            if wanted < request.offset + request.limit:
-                # The SDK has no cursor. Asking past the cap would return the
-                # same 50 hits for every offset, so the window ends here.
-                next_offset = None
-            elif len(records) >= wanted:
-                # More may exist beyond this page; the caller can page again.
+            if has_more:
                 next_offset = request.offset + request.limit
-            records = records[request.offset : request.offset + request.limit]
         elif isinstance(request, ListRequest):
             if history:
                 records, total = await bridge.list_sdk_raw(

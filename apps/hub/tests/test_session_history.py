@@ -230,6 +230,48 @@ def test_long_current_conversation_does_not_hide_other_sessions(archive):
     asyncio.run(scenario())
 
 
+def test_search_matches_the_current_revision_and_respects_forget(archive):
+    history, (scope, foreign), _, source = archive
+    append = source(scope)
+    kept = append(("user", "合成关键词甲 保留的原文。"))
+    forgotten = append(("user", "合成关键词甲 忘记的原文。"))
+    outside = source(foreign)(("user", "合成关键词甲 别的项目。"))
+    history.ingest.suppressed = lambda requested: ({forgotten: "raw"} if requested == scope else {})
+    namespace = f"cmh:{history.ingest.access.instance_id}:{scope}"
+
+    async def scenario():
+        records, has_more = await history.search(namespace, "关键词甲", limit=10, offset=0)
+        assert [record.raw_id for record in records] == [kept]
+        assert has_more is False
+        other = f"cmh:{history.ingest.access.instance_id}:{foreign}"
+        records, _ = await history.search(other, "关键词甲", limit=10, offset=0)
+        assert [record.raw_id for record in records] == [outside]
+
+    asyncio.run(scenario())
+
+
+def test_search_pages_and_ignores_superseded_revisions(archive):
+    history, (scope, _), _, source = archive
+    append = source(scope)
+    identity = str(uuid4())
+    append(("user", "合成关键词乙 旧版本。"), record_id=identity)
+    newest = append(("user", "合成关键词丙 新版本。"), record_id=identity, revision=2)
+    matches = [append(("user", f"合成关键词丙 第 {index} 条。")) for index in range(24)]
+    namespace = f"cmh:{history.ingest.access.instance_id}:{scope}"
+
+    async def scenario():
+        old, _ = await history.search(namespace, "关键词乙", limit=10, offset=0)
+        assert old == []
+        first, more = await history.search(namespace, "关键词丙", limit=10, offset=0)
+        assert len(first) == 10 and more is True
+        third, more = await history.search(namespace, "关键词丙", limit=10, offset=20)
+        assert len(third) == 5 and more is False
+        assert {record.raw_id for record in first + third} <= {newest, *matches}
+        assert newest in {record.raw_id for record in third}
+
+    asyncio.run(scenario())
+
+
 def test_history_without_client_time_reports_hub_acceptance_time(archive):
     # The admin activity list and handoff overlay show a date for every original.
     history, (scope, _), _, source = archive
