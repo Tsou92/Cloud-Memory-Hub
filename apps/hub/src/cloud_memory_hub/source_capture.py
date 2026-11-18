@@ -11,6 +11,7 @@ from one_memory.imports.access import AuthorizedSourceRoot, SourceAccessError, o
 from one_memory.imports.adapters import ScanFailure, ScannedEvidence, ScanOptions, ScanSkip
 from one_memory.imports.discovery import SourceFileDiscoveryFailure, discover_source_files
 from one_memory.imports.sources.claude_code import create_claude_code_adapter
+from one_memory.imports.sources.codex import create_codex_adapter
 from one_memory.imports.sources.common import discovery_failure_code, is_unchanged, newest_first
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -27,7 +28,7 @@ from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, parse_json
 class SourceConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     schema_version: Literal[1] = 1
-    adapter_id: Literal["claude-code"]
+    adapter_id: Literal["claude-code", "codex"]
     source_id: str
     scope_id: str
     source_root: str = Field(min_length=1, max_length=4096, repr=False)
@@ -109,8 +110,7 @@ def _reject_unsupported_media(record):
             pending.extend((child, depth + 1) for child in value)
 
 
-def _claude_adapter(grant, source_version):
-    adapter = create_claude_code_adapter(grant, source_version=source_version)
+def _guarded_adapter(adapter):
     original_parser = adapter.parser
 
     def checked(record, context):
@@ -126,7 +126,15 @@ def _claude_adapter(grant, source_version):
     return adapter
 
 
-ADAPTERS = {"claude-code": _claude_adapter}
+def _claude_adapter(grant, source_version):
+    return _guarded_adapter(create_claude_code_adapter(grant, source_version=source_version))
+
+
+def _codex_adapter(grant, source_version):
+    return _guarded_adapter(create_codex_adapter(grant, source_version=source_version))
+
+
+ADAPTERS = {"claude-code": _claude_adapter, "codex": _codex_adapter}
 
 
 def _open_source(outbox, config, *, initialize=False):

@@ -1,12 +1,12 @@
 # 本地来源采集：隔离验证
 
-当前支持显式绑定的 Claude Code 原生 JSONL 文字与工具记录，复用固定上游解析器和授权文件读取。它将过滤后的记录写入现有 LocalOutbox；发送继续使用 [send／watch](local-connector.md)。设计与兼容性见 [ADR-0009](adr/0009-local-source-capture.md)，实际 CLI 证据见 [验证记录](reviews/2026-10-24-claude-native.md)。
+当前支持显式绑定的 Claude Code 与 Codex 原生 JSONL 文字与工具记录，复用固定上游解析器和授权文件读取。它将过滤后的记录写入现有 LocalOutbox；发送继续使用 [send／watch](local-connector.md)。设计与兼容性见 [ADR-0009](adr/0009-local-source-capture.md)，实际 CLI 证据见 [验证记录](reviews/2026-10-24-claude-native.md)。
 
 这是开发阶段的连接能力，不是正式安装器。本阶段使用新建合成目录，不接入日常 Agent 配置或真实历史。首轮 collect 会从指定目录的历史起点开始，后续按游标增量采集；不会自动猜测 `~/.claude` 路径。
 
 ## 显式配置
 
-先按[连接组件说明](local-connector.md)初始化本地队列并准备私有 connection 文件。NAS 管理端登记的来源 adapter ID 应为 `claude-code`，并绑定同一设备与项目；来源 UUID 和项目 UUID 使用服务端返回值。
+先按[连接组件说明](local-connector.md)初始化本地队列并准备私有 connection 文件。NAS 管理端登记的来源 adapter ID 应为 `claude-code` 或 `codex`，并绑定同一设备与项目；来源 UUID 和项目 UUID 使用服务端返回值。
 
 在源码目录之外创建权限为 0600 的 source 文件，父目录由当前用户控制。字段如下，尖括号内容必须替换：
 
@@ -21,6 +21,11 @@
   "source_version": "<实际 CLI 版本，可省略此字段>"
 }
 ```
+
+`source_root` 与文件布局：
+
+- `claude-code`：`source_root` 指向该项目的 `~/.claude/projects/<编码后的项目路径>`，读取其中的 `.jsonl`。
+- `codex`：`source_root` 指向 `~/.codex/sessions`，读取 `YYYY/MM/DD/rollout-*.jsonl`；工作目录取自会话头 `session_meta.payload.cwd`。
 
 `workspace` 必须与原生记录的 cwd 字符串精确一致；不匹配或缺失的记录单独计入 `workspace_mismatch`，不改派到其他项目。当前采集仅接受项目 scope，global 偏好的提炼／共享另行实现。source_root 应尽量限定在该项目的会话目录。路径和原生会话标识不能替代 NAS 身份。
 

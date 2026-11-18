@@ -437,3 +437,76 @@ def test_cli_collect_is_explicit_local_and_private(capture, tmp_path):
     assert failed.returncode == 2
     assert json.loads(failed.stderr)["error"] == "unsafe_capture_file"
     assert str(tmp_path) not in failed.stderr
+
+
+def codex_message(text, role="user"):
+    block = {"type": "input_text" if role == "user" else "output_text", "text": text}
+    return {
+        "type": "response_item",
+        "timestamp": "2026-11-18T00:00:00Z",
+        "payload": {"type": "message", "role": role, "content": [block]},
+    }
+
+
+def codex_config(tmp_path):
+    root = tmp_path / "synthetic-codex"
+    day = root / "2026" / "11" / "18"
+    day.mkdir(parents=True)
+    config = SourceConfiguration(
+        adapter_id="codex",
+        source_id=str(uuid4()),
+        scope_id=str(uuid4()),
+        source_root=str(root),
+        workspace=str(tmp_path / "synthetic-project"),
+    )
+    outbox = LocalOutbox.initialize(
+        tmp_path / "connector-codex" / "outbox.sqlite3",
+        instance_id=str(uuid4()),
+        device_id=str(uuid4()),
+    )
+    initialize_capture(outbox, config)
+    return outbox, config, day / "rollout-synthetic.jsonl"
+
+
+def codex_header(config, cwd=None):
+    return {
+        "type": "session_meta",
+        "timestamp": "2026-11-18T00:00:00Z",
+        "payload": {
+            "id": "synthetic-codex-session",
+            "cwd": cwd or config.workspace,
+            "source": "cli",
+        },
+    }
+
+
+def test_codex_history_is_captured_once_and_bound_to_the_workspace(tmp_path):
+    outbox, config, path = codex_config(tmp_path)
+    append(
+        path,
+        codex_header(config),
+        codex_message("A synthetic Codex decision."),
+        codex_message("Acknowledged.", role="assistant"),
+    )
+    first = collect(outbox, config)
+    assert first["queued"] == 2, first
+    assert collect(outbox, config)["queued"] == 0
+    texts = [
+        message["text"]
+        for payload in payloads(outbox)
+        for message in payload["content"]["messages"]
+    ]
+    assert texts == ["A synthetic Codex decision.", "Acknowledged."]
+    assert {payload["scope_id"] for payload in payloads(outbox)} == {config.scope_id}
+
+
+def test_codex_records_from_another_workspace_are_skipped(tmp_path):
+    outbox, config, path = codex_config(tmp_path)
+    append(
+        path,
+        codex_header(config, cwd=str(tmp_path / "other-project")),
+        codex_message("From another project."),
+    )
+    result = collect(outbox, config)
+    assert result["queued"] == 0
+    assert result["skipped"].get("workspace_mismatch") == 1
