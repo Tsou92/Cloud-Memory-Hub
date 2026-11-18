@@ -33,11 +33,11 @@ jobs:
       version: ${{ steps.source.outputs.version }}
       commit: ${{ steps.source.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
       - name: Bind existing tag, clean source and product version
@@ -63,12 +63,12 @@ jobs:
       SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
       CMH_IMAGE: cloud-memory-hub:${{ needs.preflight.outputs.tag }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
       - name: Build the versioned amd64 image
@@ -83,7 +83,7 @@ jobs:
           docker image inspect "$CMH_IMAGE" > "$RUNNER_TEMP/image-inspect.json"
           docker image save "$CMH_IMAGE" | gzip -n > "$RUNNER_TEMP/linux-artifact/cloud-memory-hub-$RELEASE_TAG-linux-amd64.tar.gz"
           python -m scripts.release_artifacts image --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --directory "$RUNNER_TEMP/linux-artifact" --inspect "$RUNNER_TEMP/image-inspect.json"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-linux
           path: ${{ runner.temp }}/linux-artifact/
@@ -100,12 +100,12 @@ jobs:
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
           architecture: arm64
@@ -122,7 +122,7 @@ jobs:
           python -m scripts.release_artifacts client --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT" --directory "$RUNNER_TEMP/mac-artifact" --unpack-to "$RUNNER_TEMP/client-final"
           python -I "$RUNNER_TEMP/client-final/cloud-memory-hub-client-$RELEASE_TAG-macos-arm64/install.py" --verify-only
           python -I "$RUNNER_TEMP/client-final/cloud-memory-hub-client-$RELEASE_TAG-macos-arm64/install.py" --target "$RUNNER_TEMP/client-installed"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-mac
           path: ${{ runner.temp }}/mac-artifact/
@@ -138,15 +138,15 @@ jobs:
       RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
       SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: release-*
           path: ${{ runner.temp }}/inputs
@@ -155,7 +155,7 @@ jobs:
           python -m scripts.release_artifacts assemble
           --tag "$RELEASE_TAG" --commit "$SOURCE_COMMIT"
           --directory "$RUNNER_TEMP/inputs" --output "$RUNNER_TEMP/release"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: verified-release
           path: ${{ runner.temp }}/release/
@@ -177,15 +177,15 @@ jobs:
       RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
       SOURCE_COMMIT: ${{ needs.preflight.outputs.commit }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: verified-release
           path: ${{ runner.temp }}/release
