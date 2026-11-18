@@ -1,5 +1,7 @@
 # 验证计划与需求追踪
 
+2026-11-18 独立管理后台重构（FR-01、FR-03、FR-07、FR-09、FR-10、FR-12、FR-13、FR-14、ENG-01）：自有前端包 `apps/console` 复用全部现有 `/hub/v1/*` 与受控 `/api/v1/*` 接口及本地幂等状态机，新增查询参数路由同步、主从记忆编辑、右侧原文／引用抽屉、治理模态框、实时流式问答、设备管理主视图及备份版本命令自动填充，并统一 `/hub/login` 与 `/hub/setup` 页面样式与 CSP 约束。设计见 [ADR-0074](adr/0074-standalone-console-redesign.md) 和 [DESIGN](../DESIGN.md)。
+
 2026-11-11 首装与管理员设置（FR-01～03、FR-07、FR-12、ENG-01）：验证从空卷部署、首台自动配对、项目授权、NAS 和电脑的下载回退、正常对话自动接续。管理员设置验证首次证明与初始密码校验、原子改密、旧证明重放拒绝、重启后的新密码登录及旧实例兼容。见[首装验收](reviews/2026-11-11-first-install.md)和 [ADR-0071](adr/0071-initial-admin-setup.md)。
 
 2026-11-11 自动会话接续（FR-01～05、FR-07、FR-08、FR-12）：用 `make probe-automatic-session-handoff` 验证普通对话自动采集、另一会话先读摘要后按需读 Markdown、已有会话下一轮更新。合成契约还覆盖同项目限定、原文修订、忘记／删除、长文续页和安装复用。实际宿主及发行边界见[自动接续验收](reviews/2026-11-11-automatic-session-handoff.md)。

@@ -29,27 +29,52 @@ AUTH_BODY_LIMIT = 4096
 
 AUTH_PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>{{title}} · Cloud Memory Hub</title>
 <style>:root{color-scheme:dark}*{box-sizing:border-box}
-body{font:15px system-ui,-apple-system,'PingFang SC',sans-serif;color:#f3f4fc;margin:0;
-min-height:100svh;display:grid;place-items:center;padding:32px 16px;background:
-radial-gradient(ellipse at 62% 30%,#3b326444,transparent 54%),
-radial-gradient(ellipse at 23% 78%,#23345655,transparent 50%),#0c1020}
-main{width:min(100%,420px);padding:38px 34px;background:linear-gradient(145deg,#222840e8,#161a2de8);
-border:1px solid #a0a6dc30;border-radius:22px;box-shadow:0 30px 100px #03061088}
-.brand{display:block;color:#c5b1ff;font-size:60px;line-height:1;margin-bottom:20px;
-text-shadow:0 0 30px #9880ff66}h1{font-size:25px;letter-spacing:-.025em;margin:0 0 12px}
-input,button{width:100%;padding:13px 15px;margin-top:12px;font:inherit;border-radius:10px}
-input{background:#0e1426;border:1px solid #a0a6dc44;color:#f3f4fc}
-button{background:linear-gradient(110deg,#7775dc,#a18be6);color:white;border:1px solid #c7baff66;
-font-weight:600;cursor:pointer;margin-top:22px;box-shadow:0 4px 22px #8670df33}
-button:hover{filter:brightness(1.1)}input:focus-visible,button:focus-visible
-{outline:2px solid #c5afff;outline-offset:3px}p{line-height:1.75;color:#b4b8d0;margin-bottom:26px}
-label{display:block;font-weight:600;margin-top:14px}small{display:block;color:#b4b8d0;margin-top:8px}
-button:disabled{opacity:.55;cursor:default}a{color:#c5b1ff}
-[role=alert]{color:#ffb0bd;background:#f28f9f12;border:1px solid #f28f9f40;
-padding:12px;border-radius:10px}@media(max-width:420px){main{padding:30px 24px}}</style>
-<main><span class="brand" aria-hidden="true">∞</span><h1>Cloud Memory Hub</h1>
+body{font:14px/1.6 Inter,-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC',
+'Microsoft YaHei',system-ui,sans-serif;color:#f1f3fb;margin:0;min-height:100svh;
+display:grid;place-items:center;padding:32px 16px;background:
+radial-gradient(ellipse 68% 38% at 54% -8%,#7c72ff24,transparent 70%),
+radial-gradient(ellipse 45% 35% at 15% 100%,#3862b416,transparent 65%),#090b14;
+-webkit-font-smoothing:antialiased}
+main{width:min(100%,432px);padding:32px 30px;background:#111628;
+border:1px solid #94a3da24;border-radius:16px;
+box-shadow:0 28px 72px #00000080,inset 0 1px 0 #ffffff0a}
+.head{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+.glyph{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;
+font-size:24px;font-weight:700;color:#dcd5ff;border:1px solid #a78bfa59;
+background:linear-gradient(135deg,#8b7cf83d,#60a5fa29)}
+.titles strong{display:block;font-size:17px;font-weight:650;letter-spacing:-.02em}
+.titles span{font-size:12px;color:#737c9c}
+h1{font-size:20px;font-weight:650;letter-spacing:-.02em;margin:0 0 8px}
+p{line-height:1.65;color:#a9b1cc;margin:0 0 18px;font-size:13.5px}
+label{display:block;font-size:12.5px;font-weight:560;color:#a9b1cc;margin:14px 0 6px}
+input,button{width:100%;padding:10px 13px;font:inherit;border-radius:8px}
+input{background:#0a0d18;border:1px solid #94a3da28;color:#f1f3fb;font-size:14px}
+input:focus{border-color:#8b7cf8}
+button{background:linear-gradient(135deg,#7467ef,#937ff7);color:#fff;
+border:1px solid #cec4ff59;font-weight:560;cursor:pointer;margin-top:18px;
+box-shadow:0 2px 12px #7467ef47}
+button.secondary{background:#ffffff0c;color:#f1f3fb;border-color:#94a3da28;
+box-shadow:none;margin-top:10px}
+button:hover:not(:disabled){filter:brightness(1.08)}
+input:focus-visible,button:focus-visible{outline:2px solid #9f92ff;outline-offset:2px}
+button:disabled{opacity:.48;cursor:not-allowed}
+hr{border:0;border-top:1px solid #94a3da18;margin:22px 0 14px}
+small{display:block;color:#737c9c;font-size:12px;line-height:1.6}
+ol{margin:0 0 16px;padding-left:18px;color:#a9b1cc;font-size:13px}
+li{margin-bottom:8px}
+code{font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace;font-size:12px;
+background:#0a0d18;border:1px solid #94a3da24;padding:2px 6px;border-radius:5px;
+color:#dcd5ff;word-break:break-all}
+.cmd{display:block;padding:9px 11px;margin-top:6px;line-height:1.5}
+a{color:#9f92ff;text-decoration:none}a:hover{text-decoration:underline}
+[role=alert]{color:#fecaca;background:#f8717124;border:1px solid #f871714d;
+padding:10px 13px;border-radius:8px;margin-bottom:14px;font-size:13px}
+@media(max-width:440px){main{padding:24px 20px}}</style>
+<main><div class="head"><span class="glyph" aria-hidden="true">∞</span>
+<div class="titles"><strong>Cloud Memory Hub</strong><span>共享记忆管理中枢</span></div></div>
 {{body}}</main>{{script}}</html>"""
 
 
@@ -63,33 +88,37 @@ def _auth_page(title: str, body: str, script: str = "") -> str:
 
 LOGIN_PAGE = _auth_page(
     "登录",
-    """<p>欢迎回来。输入管理员密码，进入你的共享记忆中枢。</p>
+    """<h1>登录管理后台</h1>
+<p>输入管理员密码，管理共享项目、设备接入、长期记忆与受控备份。</p>
 {{error}}
 <form method="post" action="/hub/login"><label for="credential">管理员密码</label>
 <input id="credential" name="credential" type="password" autocomplete="current-password"
-required><button>登录</button></form>
-<small>首次登录时由安装器设置。忘记密码时可在这台 NAS 的执行环境中重置，
-不会影响已连接的 Agent 与已有数据；步骤见使用文档的「重置管理员密码」。</small>""",
+placeholder="输入当前管理员密码" required><button type="submit">进入控制台</button></form>
+<hr><small>首次部署由安装器生成的初始化链接设密。遗忘密码时可在宿主运行环境离线重置，
+不影响已连接的 Agent 与已有记忆；步骤见文档「重置管理员密码」。</small>""",
 )
 SETUP_PAGE = _auth_page("设置管理员密码", SETUP_FORM, f"<script>{SETUP_SCRIPT}</script>")
 SETUP_REQUIRED_PAGE = _auth_page(
     "初始化",
-    """<p>此实例还需要先设置管理员密码，由安装器生成的一次性初始化链接完成。</p>
+    """<h1>完成首次密码初始化</h1>
+<p>此实例尚未设置正式管理员密码，需通过安装器生成的一次性初始化链接完成。</p>
 <ol>
-<li>在运行 Hub 的主机上进入安装目录执行：<br>
-<code>docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub setup-link</code></li>
-<li>命令会打印一个只在本机可用的初始化链接，在本机浏览器打开它。</li>
-<li>这次运行只对当前实例有效；命令不会打印或重置管理员密码。</li>
+<li>在运行 Hub 的主机安装目录执行：<code class="cmd">docker compose exec hub \
+/opt/cmh/venv/bin/python -m cloud_memory_hub setup-link</code></li>
+<li>复制命令输出的本机初始化链接并在浏览器中打开。</li>
+<li>该链接仅对当前实例有效，命令不会回显或覆盖已有密码。</li>
 </ol>
-<p><b>本机 Docker：</b>安装目录是 <code>~/.cloud-memory-hub/local-server/&lt;项目名&gt;</code>，
-也可以重新运行安装命令并加 <code>--local --open-admin</code>（Windows 加
-<code>-Local -OpenAdmin</code>）。<b>NAS：</b>安装目录默认是
-<code>~/cloud-memory-hub-install</code>，安装器完成时会打印实际路径。</p>
-<p>如果 Hub 不是用 Docker Compose 启动的，改用你实际使用的启动方式执行同一条模块命令。</p>""",
+<p><b>本机 Docker：</b>默认目录为 <code>~/.cloud-memory-hub/local-server/&lt;项目名&gt;</code>，
+也可重新运行安装命令附带 <code>--local --open-admin</code>（Windows 为
+<code>-Local -OpenAdmin</code>）。<b>NAS：</b>默认目录为
+<code>~/cloud-memory-hub-install</code>（以安装结束时打印路径为准）。</p>""",
 )
 SETUP_FINISHED_PAGE = _auth_page(
     "初始化链接已失效",
-    '<p>请使用当前管理员密码。<a href="/hub/login">返回登录</a></p>',
+    (
+        "<h1>此初始化链接已失效</h1>"
+        '<p>当前实例已完成初始化，请使用管理员密码登录。<a href="/hub/login">返回登录</a></p>'
+    ),
 )
 
 
