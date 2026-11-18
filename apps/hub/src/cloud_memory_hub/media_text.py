@@ -70,10 +70,10 @@ def _text_media_type(media_type, name):
 
 
 def _pdf_text(raw):
-    from pypdf import PdfReader
+    import pypdf
 
     try:
-        reader = PdfReader(io.BytesIO(raw), strict=False)
+        reader = pypdf.PdfReader(io.BytesIO(raw), strict=False)
         if reader.is_encrypted:
             raise MediaTextError("media_pdf_encrypted")
         pages = len(reader.pages)
@@ -87,7 +87,7 @@ def _pdf_text(raw):
     text = "\n\n".join(chunk.strip() for chunk in chunks if chunk.strip()).strip()
     if not text:
         raise MediaTextError("media_pdf_no_text")
-    return text, pages
+    return text, pages, f"pypdf/{pypdf.__version__}"
 
 
 def _document_text(block):
@@ -116,7 +116,7 @@ def _document_text(block):
             media_type.split(";", 1)[0].strip().lower() if isinstance(media_type, str) else None
         )
         if media_type == "application/pdf":
-            text, pages, extractor = (*_pdf_text(raw), "pypdf")
+            text, pages, extractor = _pdf_text(raw)
         else:
             normalized = _text_media_type(media_type, name)
             if normalized is None:
