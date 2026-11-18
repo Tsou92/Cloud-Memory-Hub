@@ -15,6 +15,17 @@ upstream/patches/*
 !upstream/patches/*.patch
 !apps/
 apps/*
+!apps/console/
+apps/console/*
+!apps/console/package.json
+!apps/console/pnpm-lock.yaml
+!apps/console/tsconfig.json
+!apps/console/vite.config.ts
+!apps/console/index.html
+!apps/console/public/
+!apps/console/public/**
+!apps/console/src/
+!apps/console/src/**
 !apps/hub/
 apps/hub/*
 !apps/hub/pyproject.toml

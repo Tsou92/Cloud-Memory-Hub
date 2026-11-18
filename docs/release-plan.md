@@ -2,7 +2,9 @@
 
 状态：2026-11-10 用户已要求按上线发布标准逐一完善，最终让其他人通过 GitHub 自行部署 NAS 并在网页配置；既有产品主页 `Memory-Hub-Website` 一并完善并重新发布 Vercel。初始基线为 `1279f1b`；下表按实际证据更新状态，未执行项不计通过。初始问题见[发布准备度审计](reviews/2026-11-10-release-readiness.md)。
 
-当前公开版为 [v0.1.9](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.9)，固定源码 `1752d07a896563fa20b92d76a2cf23e34ff7281f`，Release ID `448125521`，公开时间 2026-11-17，七个附件，公开仓库的 latest 指向它；三处真实部署上不可用的功能已修复，NAS 生产已升级到发行镜像，见 [v0.1.9 发布记录](reviews/2026-11-17-release-019.md)。
+当前公开版为 [v0.1.10](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.10)，固定源码 `0665d83811c6de92e9c7770ff83ce2e027dae7fd`，公开时间 2026-11-17，包含用量汇总兼容形状、多服务商与 DeepSeek 分时费用估算，以及按异常类型重试传输错误；`main` 主干继续合入连接组件离线读取缓存、Codex 历史会话导入及独立管理工作台重构（ADR-0073、ADR-0074）。
+
+此前公开版为 [v0.1.9](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.9)，固定源码 `1752d07a896563fa20b92d76a2cf23e34ff7281f`，Release ID `448125521`，公开时间 2026-11-17，七个附件；三处真实部署上不可用的功能已修复，NAS 生产已升级到发行镜像，见 [v0.1.9 发布记录](reviews/2026-11-17-release-019.md)。
 
 此前公开版为 [v0.1.8](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.8)，固定源码 `483ed6f2101d659924999b927f2fd7a0bff1d4d7`，公开时间 2026-11-13，七个附件；范围、验证结果、发布后 CI 差异与站点更新见 [v0.1.8 发布记录](reviews/2026-11-13-release-018.md)。
 

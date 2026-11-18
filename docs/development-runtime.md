@@ -25,7 +25,7 @@ docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub setup-link
 docker compose exec hub cat /config/admin-token
 ```
 
-只在登录页粘贴凭证，随后创建项目、配置模型，再进入「连接 Agent」为每台电脑生成独立的一次性链接。
+只在登录页粘贴凭证，随后创建项目、配置模型，再进入「设备与接入」为每台电脑生成独立的一次性链接。
 电脑端跟随页面的一条命令或 Agent 安装话术即可，无须额外安装图形 App。用一条测试记忆完成保存和跨端读回，再试任务交接。
 
 默认端口只绑定 NAS 的 `127.0.0.1:8800`，不能在另一台电脑把 `localhost` 当作 NAS 地址。

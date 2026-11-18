@@ -50,6 +50,25 @@ jobs:
       - name: Run capture plugin tests
         run: node --test packages/dsh-plugin/test/plugin.test.js
 
+  console:
+    name: Administrator console
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      - name: Install locked console dependencies and run checks
+        run: |
+          npm install --global pnpm@11.24.0
+          pnpm --dir apps/console install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps/console run typecheck
+          pnpm --dir apps/console test
+          pnpm --dir apps/console run build
+
   onboarding:
     name: Agent setup (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -11,27 +11,14 @@ RUN python -m scripts.prepare_upstream
 
 FROM node:24.10.0-bookworm-slim@sha256:b8d2197aff9129d16c801a3e3e1b2a873c4946480f5a310f38056df2268c38d9 AS web
 RUN npm install --global pnpm@11.24.0
-WORKDIR /workspace
-COPY --from=source /workspace/.local/upstream/hy-memory/memhub/ ./
-RUN pnpm --filter @one-memory/web... install --frozen-lockfile --ignore-scripts
-ENV VITE_CORE_URL=/ VITE_CMH_CONSOLE=true
-RUN pnpm --filter @one-memory/web... -r build
+WORKDIR /workspace/apps/console
+COPY apps/console/package.json apps/console/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --ignore-scripts
+COPY apps/console ./
+RUN pnpm run build
 
 FROM web AS web-tests
-RUN apt-get -o Acquire::Retries=0 update \
-    && apt-get -o Acquire::Retries=0 upgrade -y \
-    && apt-get -o Acquire::Retries=0 install -y --no-install-recommends python3 \
-    && rm -rf /var/lib/apt/lists/*
-RUN bash scripts/run-tests-isolated.sh pnpm --filter @one-memory/web test \
-    src/MemorySpace.sdk-start.test.tsx src/MemorySpace.test.tsx \
-    src/MemorySpace.library.test.tsx src/SdkMemoryLibrary.test.tsx src/SdkRawHistory.test.tsx \
-    src/ModelSettings.test.tsx src/OnboardingModelStep.test.tsx src/R6Settings.test.tsx \
-    src/HubConsole.test.tsx src/HubQuestion.test.tsx src/hub-api.test.ts src/HubGovernance.test.tsx \
-    src/HubConnections.test.tsx src/HubBackups.test.tsx src/hub-backups.test.ts \
-    src/HubAdminCredential.test.tsx src/hub-admin-credential.test.ts \
-    src/HubAgentConnect.test.tsx src/hub-invitation.test.ts \
-    src/HubDashboard.test.tsx src/HubNetwork.test.tsx src/hub-dashboard.test.ts \
-    src/HubUsage.test.tsx src/HubContext.preview.test.tsx
+RUN pnpm run typecheck && pnpm test
 
 FROM source AS python-build
 RUN python -m pip install --no-cache-dir uv==0.12.5
@@ -59,7 +46,7 @@ RUN apt-get -o Acquire::Retries=0 update \
     && chown 1000:1000 /data /config /governance /backups \
     && chmod 700 /data /config /governance /backups
 COPY --from=python-build /opt/cmh/venv /opt/cmh/venv
-COPY --from=web /workspace/apps/web/dist /opt/cmh/web
+COPY --from=web /workspace/apps/console/dist /opt/cmh/web
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/LICENSE /opt/cmh/licenses/MemHub-LICENSE
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/NOTICE /opt/cmh/licenses/MemHub-NOTICE
 COPY --from=source /workspace/.local/upstream/hy-memory/memhub/THIRD_PARTY_NOTICES.md /opt/cmh/licenses/THIRD_PARTY_NOTICES.md

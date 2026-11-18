@@ -32,8 +32,10 @@ __pycache__/
 .coverage
 htmlcov/
 node_modules/
+.pnpm-store/
 dist/
 build/
+*.tsbuildinfo
 coverage/
 test-results/
 playwright-report/

@@ -3,20 +3,24 @@
 import base64
 import hashlib
 
-SETUP_FORM = """<p>初始密码是 <code>admin</code>。请先设置新的管理员密码，再进入后台。</p>
+SETUP_FORM = """<h1>设置管理员密码</h1>
+<p>默认初始密码为 <code>admin</code>。请先设置新的管理员密码，随后自动进入控制台。</p>
 <p id="setup-message" role="alert" hidden></p>
 <form id="setup-form" method="post" action="/hub/setup">
 <label for="initial-password">初始密码</label>
-<input id="initial-password" type="password" autocomplete="current-password" required>
-<label for="new-password">新密码</label>
-<input id="new-password" type="password" autocomplete="new-password" required>
+<input id="initial-password" type="password" autocomplete="current-password"
+placeholder="输入 admin" required>
+<label for="new-password">新管理员密码</label>
+<input id="new-password" type="password" autocomplete="new-password"
+placeholder="设置你的新密码" required>
 <label for="confirm-password">再次输入新密码</label>
-<input id="confirm-password" type="password" autocomplete="new-password" required>
-<button id="generate-password" type="button" hidden>生成并显示强密码</button>
+<input id="confirm-password" type="password" autocomplete="new-password"
+placeholder="确认新密码" required>
+<button id="generate-password" class="secondary" type="button" hidden>生成并显示高强度密码</button>
 <button id="finish-setup" type="submit" disabled>保存新密码并进入后台</button>
 </form>
-<p><a href="/hub/login">返回登录</a></p>
-<noscript><p>启用 JavaScript 后，重新打开安装器提供的初始化链接。</p></noscript>"""
+<hr><small><a href="/hub/login">已有密码？返回登录页</a></small>
+<noscript><p>启用 JavaScript 后，请重新打开安装器提供的初始化链接。</p></noscript>"""
 
 SETUP_SCRIPT = """(() => {
   const params = new URLSearchParams(location.hash.slice(1));
@@ -48,7 +52,7 @@ SETUP_SCRIPT = """(() => {
       next.type = confirmation.type = 'text';
       next.value = confirmation.value = generated;
       next.select();
-      show('请先保存生成的新密码，再点保存。');
+      show('请先妥善保存生成的新密码，再点击下方保存按钮。');
     });
   }
   form.addEventListener('submit', async (event) => {
