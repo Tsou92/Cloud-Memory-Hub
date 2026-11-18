@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Nas,
     [switch]$Local,
     [ValidateRange(1024,65535)][int]$Port,
@@ -11,7 +11,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$cmhTag = 'v0.1.10'
+$cmhTag = 'v0.1.11'
 $cmhRelease = "https://github.com/Tsou92/Cloud-Memory-Hub/releases/download/$cmhTag"
 $cmhArchiveName = "cloud-memory-hub-$cmhTag-source.tar.gz"
 $cmhTemp = Join-Path ([IO.Path]::GetTempPath()) ('cmh-release-' + [Guid]::NewGuid().ToString('N'))
