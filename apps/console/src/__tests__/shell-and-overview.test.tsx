@@ -267,4 +267,250 @@ describe("Shell switcher, project creation fence, and Overview drawer", () => {
     });
     expect(localStorage.getItem(`cmh_hub_scope:${INSTANCE}`)).toBe(PROJECT_B);
   });
+
+  it("collapses and expands sidebar cleanly on desktop without mounting backdrop or mobile close button", async () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes("/hub/v1/console/bootstrap")) {
+          return jsonResponse({
+            schema_version: 1,
+            mode: "hub",
+            product: "Cloud Memory Hub",
+            instance_id: INSTANCE,
+            version: "0.1.11",
+            build_revision: null,
+            features: ["scoped_console_reads", "scoped_console_ask"],
+            projects: [{ scope_id: PROJECT_A, display_name: "合成项目 Alpha" }],
+            next_offset: null,
+            global_scope: { scope_id: "global", display_name: "全局偏好" },
+          });
+        }
+        if (url.includes("/hub/v1/console/dashboard")) {
+          return jsonResponse({
+            schema_version: 1,
+            instance_id: INSTANCE,
+            scope_id: PROJECT_A,
+            generated_at: "2026-11-18T02:00:00Z",
+            statistics: {
+              device_connections: 1,
+              agent_connections: 1,
+              shared_records: 3,
+              handoffs: 0,
+            },
+            record_types: [],
+            daily_activity: [],
+            activity_timezone: "UTC",
+            activity_state: "unavailable",
+            missing_timestamps: 0,
+          });
+        }
+        if (url.includes("/hub/v1/console/summary")) {
+          return jsonResponse({
+            schema_version: 1,
+            instance_id: INSTANCE,
+            scope: { scope_id: PROJECT_A, display_name: "合成项目 Alpha" },
+            sources: [],
+            sources_total: 0,
+            next_offset: null,
+            visible_memory_total: null,
+            visible_history_total: null,
+          });
+        }
+        if (url.includes("/hub/v1/devices")) return jsonResponse({ devices: [] });
+        if (url.includes("/hub/v1/console/read/history-list")) {
+          return jsonResponse({
+            schema_version: 1,
+            authority: "administrator",
+            instance_id: INSTANCE,
+            scope_id: PROJECT_A,
+            operation: "history-list",
+            content_trust: "untrusted_history",
+            items: [],
+            returned_count: 0,
+            next_offset: null,
+            candidate_limit_reached: false,
+          });
+        }
+        if (url.includes("/hub/v1/backups/status")) {
+          return jsonResponse({
+            schedule: { schema_version: 1, enabled: false },
+            execution: { schema_version: 1, state: "completed" },
+            next_due_at: null,
+            pending_request: null,
+            supervisor_running: "not_checked",
+          });
+        }
+        if (url.includes("/api/v1/model-profiles")) return jsonResponse([]);
+        return jsonResponse({}, 404);
+      });
+
+      const user = userEvent.setup();
+      const { container } = render(<App />);
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole("heading", { name: "合成项目 Alpha" }),
+        ).toBeTruthy();
+      });
+
+      // Mobile drawer close button must not appear on desktop
+      expect(screen.queryByRole("button", { name: "收起导航" })).toBeNull();
+      expect(container.querySelector(".cmh-sidebar-backdrop")).toBeNull();
+
+      const collapseBtn = screen.getByRole("button", { name: "收起侧边栏" });
+      expect(collapseBtn.getAttribute("aria-expanded")).toBe("true");
+
+      await user.click(collapseBtn);
+
+      const shell = container.querySelector(".cmh-shell");
+      const sidebar = container.querySelector(".cmh-sidebar") as HTMLElement;
+      expect(shell?.classList.contains("is-sidebar-collapsed")).toBe(true);
+      expect(sidebar.hidden).toBe(true);
+      // Must NEVER mount backdrop into .cmh-shell CSS Grid on desktop
+      expect(container.querySelector(".cmh-sidebar-backdrop")).toBeNull();
+
+      const expandBtn = screen.getByRole("button", { name: "展开侧边栏" });
+      expect(expandBtn.getAttribute("aria-expanded")).toBe("false");
+      await user.click(expandBtn);
+
+      expect(shell?.classList.contains("is-sidebar-collapsed")).toBe(false);
+      expect(sidebar.hidden).toBe(false);
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
+  it("opens and closes mobile drawer with backdrop on narrow viewports and clears overlay on desktop resize", async () => {
+    const originalMatchMedia = window.matchMedia;
+    let mobileMatches = true;
+    const listeners = new Set<() => void>();
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      get matches() {
+        return mobileMatches;
+      },
+      media: query,
+      onchange: null,
+      addEventListener: (_event: string, cb: () => void) => listeners.add(cb),
+      removeEventListener: (_event: string, cb: () => void) =>
+        listeners.delete(cb),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes("/hub/v1/console/bootstrap")) {
+          return jsonResponse({
+            schema_version: 1,
+            mode: "hub",
+            product: "Cloud Memory Hub",
+            instance_id: INSTANCE,
+            version: "0.1.11",
+            build_revision: null,
+            features: ["scoped_console_reads", "scoped_console_ask"],
+            projects: [{ scope_id: PROJECT_A, display_name: "合成项目 Alpha" }],
+            next_offset: null,
+            global_scope: { scope_id: "global", display_name: "全局偏好" },
+          });
+        }
+        if (url.includes("/hub/v1/console/dashboard")) {
+          return jsonResponse({
+            schema_version: 1,
+            instance_id: INSTANCE,
+            scope_id: PROJECT_A,
+            generated_at: "2026-11-18T02:00:00Z",
+            statistics: {
+              device_connections: 1,
+              agent_connections: 1,
+              shared_records: 3,
+              handoffs: 0,
+            },
+            record_types: [],
+            daily_activity: [],
+            activity_timezone: "UTC",
+            activity_state: "unavailable",
+            missing_timestamps: 0,
+          });
+        }
+        if (url.includes("/hub/v1/console/summary")) {
+          return jsonResponse({
+            schema_version: 1,
+            instance_id: INSTANCE,
+            scope: { scope_id: PROJECT_A, display_name: "合成项目 Alpha" },
+            sources: [],
+            sources_total: 0,
+            next_offset: null,
+            visible_memory_total: null,
+            visible_history_total: null,
+          });
+        }
+        if (url.includes("/hub/v1/devices")) return jsonResponse({ devices: [] });
+        if (url.includes("/hub/v1/console/read/history-list")) {
+          return jsonResponse({
+            schema_version: 1,
+            authority: "administrator",
+            instance_id: INSTANCE,
+            scope_id: PROJECT_A,
+            operation: "history-list",
+            content_trust: "untrusted_history",
+            items: [],
+            returned_count: 0,
+            next_offset: null,
+            candidate_limit_reached: false,
+          });
+        }
+        if (url.includes("/hub/v1/backups/status")) {
+          return jsonResponse({
+            schedule: { schema_version: 1, enabled: false },
+            execution: { schema_version: 1, state: "completed" },
+            next_due_at: null,
+            pending_request: null,
+            supervisor_running: "not_checked",
+          });
+        }
+        if (url.includes("/api/v1/model-profiles")) return jsonResponse([]);
+        return jsonResponse({}, 404);
+      });
+
+      const user = userEvent.setup();
+      const { container } = render(<App />);
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole("heading", { name: "合成项目 Alpha" }),
+        ).toBeTruthy();
+      });
+
+      await user.click(screen.getByRole("button", { name: "打开导航菜单" }));
+      expect(container.querySelector(".cmh-sidebar.is-open")).toBeTruthy();
+      expect(container.querySelector(".cmh-sidebar-backdrop")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "收起导航" })).toBeTruthy();
+
+      // Simulate resizing viewport back to desktop width -> mobile overlay must clear
+      mobileMatches = false;
+      for (const cb of listeners) cb();
+
+      await waitFor(() => {
+        expect(container.querySelector(".cmh-sidebar-backdrop")).toBeNull();
+      });
+      expect(screen.queryByRole("button", { name: "收起导航" })).toBeNull();
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
 });
