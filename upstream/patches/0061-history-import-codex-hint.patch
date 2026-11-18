@@ -1,0 +1,11 @@
+--- a/memhub/apps/web/src/HubConsole.tsx
++++ b/memhub/apps/web/src/HubConsole.tsx
+@@ -770,7 +770,7 @@
+         那台电脑上运行客户端：它读取本机会话、过滤凭证，再走与日常采集相同的上传通道。
+       </p>
+       <ol>
+-        <li>在「项目与设备接入」为这台电脑登记一个 <code>claude-code</code> 来源，记下来源与项目 UUID。</li>
++        <li>在「项目与设备接入」为这台电脑登记一个 <code>claude-code</code> 或 <code>codex</code> 来源，记下来源与项目 UUID。</li>
+         <li>按接入指南写一份 0600 的 source 文件，<code>source_root</code> 指向该项目的会话目录，<code>workspace</code> 必须与会话里的 cwd 完全一致。</li>
+         <li>在电脑上运行下面的命令，重复执行直到输出 <code>queued=0</code>；之后由后台服务继续补传。</li>
+       </ol>

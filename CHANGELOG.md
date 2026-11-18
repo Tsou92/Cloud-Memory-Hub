@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- 历史导入新增 Codex 来源：`source_root` 指向 `~/.codex/sessions`，按 `rollout-*.jsonl` 读取，工作目录取自会话头 `session_meta.payload.cwd`；与 Claude Code 一样走本地过滤、幂等去重和项目绑定。管理页的导入说明同时列出两种来源。
 - 连接组件新增离线读取缓存：每次成功读取的回复保存在本机 `read-cache.sqlite3`（权限 0600、明文、30 天过期），断网且传输层失败时按完全相同的请求返回上次结果，并标记 `served_from_cache` 与 `cached_at`；权限、范围或删除类错误不会被缓存掩盖。
 
 ## 0.1.10
