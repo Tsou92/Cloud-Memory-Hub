@@ -20,7 +20,8 @@
   "scope_id": "<项目 UUID>",
   "source_root": "/absolute/path/to/synthetic-transcripts",
   "workspace": "/absolute/path/to/synthetic-project",
-  "source_version": "<实际 CLI 版本，可省略此字段>"
+  "source_version": "<实际 CLI 版本，可省略此字段>",
+  "media_text_extraction": false
 }
 ```
 
@@ -30,6 +31,15 @@
 - `codex`：`source_root` 指向 `~/.codex/sessions`，读取 `YYYY/MM/DD/rollout-*.jsonl`；工作目录取自会话头 `session_meta.payload.cwd`。
 
 `workspace` 必须与原生记录的 cwd 字符串精确一致；不匹配或缺失的记录单独计入 `workspace_mismatch`，不改派到其他项目。当前采集仅接受项目 scope，global 偏好的提炼／共享另行实现。source_root 应尽量限定在该项目的会话目录。路径和原生会话标识不能替代 NAS 身份。
+
+### 附件文本抽取（可选，默认关闭）
+
+`media_text_extraction: true` 时，采集器在本地读取受支持的附件并把抽取结果当作普通文本入库；原始附件字节不上传、不写入 Hub、不发给模型。首期支持：
+
+- PDF 文本层（≤50 页、≤20 MB）；扫描件／纯图片页因没有文本层会被拒绝。
+- `text/plain`、`text/markdown` 文件（≤20 MB；抽取文本 ≤64 KiB）。
+
+图片、扫描件、加密 PDF、Office 文档与 URL 引用仍保持拒绝；任何抽取失败都会停在原记录并返回固定错误码，不越过失败位置。派生文本带文件名、MIME、页数、字节数与 sha256 前缀，便于追溯；原件仍由原 Agent／现有文件同步管理。开启前请确认 PDF／文本中的 PII 与未知凭证可能未被现有过滤器完整覆盖。
 
 ```sh
 cloud-memory-connector capture-init --state-dir /path/to/private-state \

@@ -14,6 +14,10 @@ from cloud_memory_hub.source_capture import _reject_unsupported_media
         {"type": "image", "source": {"data": "..."}},
         {"content": [{"type": "document", "name": "a.pdf"}]},
         {"message": {"attachments": [{"kind": "file"}]}},
+        {"content": [{"type": "input_image", "image_url": "data:image/png;base64,..."}]},
+        {"payload": {"content": [{"type": "input_file", "file_data": "..."}]}},
+        {"image_url": "https://example.invalid/a.png"},
+        {"file_data": "..."},
     ],
 )
 def test_real_media_is_rejected(record):
@@ -34,6 +38,8 @@ def test_real_media_is_rejected(record):
         # A schema property literally named 'attachments' is not a file.
         {"parameters": {"properties": {"attachments": {"type": "array"}}}},
         {"metadata": {"type": "turn", "attachments": []}},
+        # A tool result may mention a file id without carrying file bytes.
+        {"toolUseResult": {"file_id": "doc-1", "status": "ok"}},
     ],
 )
 def test_non_media_records_pass(record):

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -318,6 +319,30 @@ def test_failed_record_does_not_advance_and_can_be_repaired(capture, failure):
     path.write_text("")
     append(path, native(config, "Now readable."))
     assert collect(outbox, config)["queued"] == 1
+
+
+def test_media_text_extraction_is_opt_in(capture):
+    outbox, config, path = capture
+    raw = b"hello attachment"
+    block = {
+        "type": "document",
+        "name": "notes.txt",
+        "source": {
+            "type": "base64",
+            "media_type": "text/plain",
+            "data": base64.b64encode(raw).decode(),
+        },
+    }
+    append(path, native(config, ["Please review", block]))
+    with pytest.raises(CaptureError) as error:
+        collect(outbox, config)
+    assert str(error.value) == "source_media_not_supported"
+    enabled = config.model_copy(update={"media_text_extraction": True})
+    assert collect(outbox, enabled)["queued"] == 1
+    text = payloads(outbox)[0]["content"]["messages"][0]["text"]
+    assert "hello attachment" in text
+    assert "notes.txt" in text
+    assert base64.b64encode(raw).decode() not in text
 
 
 def test_key_loss_and_cursor_tampering_fail_closed(capture):
