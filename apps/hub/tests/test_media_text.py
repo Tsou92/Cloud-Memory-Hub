@@ -57,6 +57,14 @@ def test_text_document_is_extracted_without_retaining_bytes():
     assert base64.b64encode(raw).decode() not in derived
 
 
+def test_filename_is_reduced_to_basename():
+    derived = extract_document_text(
+        _document("/home/alice/private/notes.txt", "text/plain", b"hello")
+    )
+    assert "notes.txt" in derived
+    assert "/home/alice" not in derived
+
+
 def test_pdf_text_layer_is_extracted():
     derived = extract_document_text(_document("report.pdf", "application/pdf", _base_pdf()))
     assert "Hello PDF" in derived

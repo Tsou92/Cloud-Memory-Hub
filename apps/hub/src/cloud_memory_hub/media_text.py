@@ -38,6 +38,8 @@ def _filename(block, source):
         if isinstance(value, str) and value.strip():
             name = value.strip().replace("\r", " ").replace("\n", " ")
             name = "".join(ch for ch in name if ord(ch) >= 32 and ord(ch) != 127)
+            # Keep the basename; local directory layout is not shared.
+            name = name.replace("\\", "/").rsplit("/", 1)[-1]
             return name[:MAX_FILENAME_CHARS] or "attachment"
     return "attachment"
 
