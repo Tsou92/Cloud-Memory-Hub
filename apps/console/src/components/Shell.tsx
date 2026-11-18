@@ -11,6 +11,8 @@ import {
   LogOut,
   Menu,
   MessageSquareText,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   RefreshCw,
   Settings2,
@@ -24,6 +26,16 @@ import { useHub } from "../context/HubContext";
 import type { ConsoleView, SettingsTab } from "../router";
 import { CreateProjectModal } from "./CreateProjectModal";
 import { Badge, Button, Modal } from "./ui";
+
+const MOBILE_NAV_QUERY = "(max-width: 820px)";
+
+function readMobileNavMatches(): boolean {
+  if (typeof window === "undefined") return false;
+  if (typeof window.matchMedia === "function") {
+    return window.matchMedia(MOBILE_NAV_QUERY).matches;
+  }
+  return window.innerWidth <= 820;
+}
 
 const NAV_ITEMS: {
   id: ConsoleView;
@@ -96,7 +108,9 @@ export function Shell({
     error,
   } = useHub();
 
+  const [isMobileNav, setIsMobileNav] = useState<boolean>(readMobileNavMatches);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [projectFilter, setProjectFilter] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
@@ -108,6 +122,34 @@ export function Shell({
       ? `${project.display_name} · Cloud Memory Hub`
       : "Cloud Memory Hub";
   }, [project]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncViewport = () => {
+      const matches = readMobileNavMatches();
+      setIsMobileNav(matches);
+      if (!matches) setMobileMenuOpen(false);
+    };
+    syncViewport();
+    if (typeof window.matchMedia === "function") {
+      const mql = window.matchMedia(MOBILE_NAV_QUERY);
+      if (typeof mql.addEventListener === "function") {
+        mql.addEventListener("change", syncViewport);
+        return () => mql.removeEventListener("change", syncViewport);
+      }
+    }
+    window.addEventListener("resize", syncViewport);
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileMenuOpen(false);
+    };
+    document.addEventListener("keydown", onEscape);
+    return () => document.removeEventListener("keydown", onEscape);
+  }, [mobileMenuOpen]);
 
   useEffect(() => {
     if (!switcherOpen) return;
@@ -145,13 +187,34 @@ export function Shell({
     if (response.ok) window.location.assign("/hub/login");
   }
 
+  function handleSidebarToggle() {
+    if (readMobileNavMatches()) {
+      setIsMobileNav(true);
+      setMobileMenuOpen((open) => !open);
+      return;
+    }
+    setIsMobileNav(false);
+    setMobileMenuOpen(false);
+    setSidebarCollapsed((collapsed) => !collapsed);
+  }
+
+  const navToggleLabel = isMobileNav
+    ? mobileMenuOpen
+      ? "收起导航菜单"
+      : "打开导航菜单"
+    : sidebarCollapsed
+      ? "展开侧边栏"
+      : "收起侧边栏";
+
   return (
-    <div className="cmh-shell">
+    <div
+      className={`cmh-shell${!isMobileNav && sidebarCollapsed ? " is-sidebar-collapsed" : ""}`}
+    >
       <a className="cmh-skip-link" href="#main-content">
         跳到主要内容
       </a>
 
-      {mobileMenuOpen ? (
+      {isMobileNav && mobileMenuOpen ? (
         <button
           type="button"
           className="cmh-sidebar-backdrop"
@@ -161,8 +224,9 @@ export function Shell({
       ) : null}
 
       <aside
-        className={`cmh-sidebar${mobileMenuOpen ? " is-open" : ""}`}
+        className={`cmh-sidebar${isMobileNav && mobileMenuOpen ? " is-open" : ""}`}
         aria-label="Cloud Memory Hub 导航"
+        hidden={!isMobileNav && sidebarCollapsed}
       >
         <div className="cmh-sidebar__brand">
           <button
@@ -181,14 +245,16 @@ export function Shell({
               <small>共享记忆中枢</small>
             </span>
           </button>
-          <button
-            type="button"
-            className="cmh-icon-btn cmh-sidebar__close"
-            aria-label="收起导航"
-            onClick={() => setMobileMenuOpen(false)}
-          >
-            <X size={18} />
-          </button>
+          {isMobileNav ? (
+            <button
+              type="button"
+              className="cmh-icon-btn cmh-sidebar__close"
+              aria-label="收起导航"
+              onClick={() => setMobileMenuOpen(false)}
+            >
+              <X size={18} />
+            </button>
+          ) : null}
         </div>
 
         {/* Prominent Project / Scope Switcher */}
@@ -368,10 +434,18 @@ export function Shell({
             <button
               type="button"
               className="cmh-icon-btn cmh-topbar__menu"
-              aria-label="打开导航菜单"
-              onClick={() => setMobileMenuOpen(true)}
+              aria-label={navToggleLabel}
+              aria-expanded={isMobileNav ? mobileMenuOpen : !sidebarCollapsed}
+              title={navToggleLabel}
+              onClick={handleSidebarToggle}
             >
-              <Menu size={19} />
+              {isMobileNav ? (
+                <Menu size={19} />
+              ) : sidebarCollapsed ? (
+                <PanelLeftOpen size={18} />
+              ) : (
+                <PanelLeftClose size={18} />
+              )}
             </button>
             <div className="cmh-breadcrumbs">
               <span className="cmh-breadcrumbs__scope">
