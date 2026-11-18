@@ -9,13 +9,13 @@
 **Mac / Linux 终端**
 
 ```sh
-(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.11/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --nas USER@NAS --nas-only)
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.12/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --nas USER@NAS --nas-only)
 ```
 
 **Windows PowerShell**
 
 ```powershell
-& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.11/scripts/bootstrap-install.ps1').Content)) -Nas 'USER@NAS'
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.12/scripts/bootstrap-install.ps1').Content)) -Nas 'USER@NAS'
 ```
 
 也可以把填好 NAS 地址的命令交给能运行对应终端的 Agent，附上下面这句话：
@@ -44,13 +44,13 @@ NAS 需具备 Linux amd64、已启用的 Docker Compose、SSH 和已登录的 Ta
 **Mac / Linux 终端**
 
 ```sh
-(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.11/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --local)
+(cmh_installer=$(mktemp) && trap 'rm -f "$cmh_installer"' 0 && cmh_fetch() { curl -q -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 12 --max-time 45 "$@" https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.12/scripts/bootstrap-install.sh -o "$cmh_installer"; } && (cmh_fetch || cmh_fetch --noproxy '*') && sh "$cmh_installer" --local)
 ```
 
 **Windows PowerShell**
 
 ```powershell
-& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.11/scripts/bootstrap-install.ps1').Content)) -Local
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.12/scripts/bootstrap-install.ps1').Content)) -Local
 ```
 
 默认管理地址是 `http://127.0.0.1:8800/hub`。服务和端口仅供本机访问，不需要 SSH 或 Tailscale。端口已被占用时，Mac/Linux 在右括号前加 `--port 8890`，Windows 在末尾加 `-Port 8890`。重新打开管理员入口，在同一目标命令加 `--open-admin` 或 `-OpenAdmin`。
@@ -129,7 +129,7 @@ NAS 服务安装和电脑的 Agent 接入是两步：前者只需部署一次，
 从[发行页](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest)下载同一版本的 NAS 镜像、源码包和 `SHA256SUMS`，放入 NAS 的一个新目录。下面的版本号仅演示文件命名；执行前必须将第一行改为发行页实际提供且已经下载的版本号：
 
 ```sh
-CMH_VERSION=v0.1.3
+CMH_VERSION=v0.1.12
 test -f "cloud-memory-hub-${CMH_VERSION}-linux-amd64.tar.gz" &&
 test -f "cloud-memory-hub-${CMH_VERSION}-source.tar.gz" &&
 sha256sum --ignore-missing -c SHA256SUMS &&
