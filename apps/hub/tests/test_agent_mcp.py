@@ -204,7 +204,12 @@ def test_real_mcp_two_devices_share_updates_and_complete_handoff(live_hub, tmp_p
                 assert invalid_input.is_error
                 assert "CMH_FAKE_SECRET" not in str(invalid_input)
                 _app.core.state.transport_test_offline = True
-                unavailable = await reader.call_tool("memory_recent", {})
+                cached = await reader.call_tool("memory_recent", {})
+                assert not cached.is_error
+                payload = json.loads(cached.content[0].text)
+                assert payload["served_from_cache"] is True and payload["cached_at"]
+                assert payload["items"] == recent["items"]
+                unavailable = await reader.call_tool("memory_recent", {"limit": 2})
                 assert unavailable.is_error
                 error = json.loads(unavailable.content[0].text)
                 assert error["retryable"] is True

@@ -6,7 +6,7 @@
 
 在电脑运行一条命令，即可部署到 NAS 或本机 Docker。然后在后台创建共享项目并配对设备。
 
-> **实验版本。** 请勿把它当作唯一记忆来源。完整历史导入、离线读取缓存、多模态解析和费用统计尚未实现；数据存在哪、什么时候会发给外部模型，见[数据会去到哪里](docs/data-and-privacy.md)。
+> **实验版本。** 请勿把它当作唯一记忆来源。完整历史导入和多模态解析尚未实现；断网时只能读到本机上次成功读取的缓存副本；数据存在哪、什么时候会发给外部模型，见[数据会去到哪里](docs/data-and-privacy.md)。
 
 [![最新发行版](https://img.shields.io/github/v/release/Tsou92/Cloud-Memory-Hub?style=flat-square&color=8b5cf6&logo=github)](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-64748b?style=flat-square)](LICENSE)
