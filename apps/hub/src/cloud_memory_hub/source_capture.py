@@ -22,6 +22,7 @@ from cloud_memory_hub.capture_store import (
     read_capture_file,
 )
 from cloud_memory_hub.events import canonical_uuid
+from cloud_memory_hub.media_text import MediaTextError, rewrite_record_media
 from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, parse_json
 
 
@@ -34,12 +35,20 @@ class SourceConfiguration(BaseModel):
     source_root: str = Field(min_length=1, max_length=4096, repr=False)
     workspace: str = Field(min_length=1, max_length=4096, repr=False)
     source_version: str | None = Field(default=None, min_length=1, max_length=128)
+    media_text_extraction: bool = False
 
     @field_validator("schema_version", mode="before")
     @classmethod
     def version(cls, value):
         if type(value) is not int or value != 1:
             raise ValueError("unsupported_source_version")
+        return value
+
+    @field_validator("media_text_extraction", mode="before")
+    @classmethod
+    def media_text_boolean(cls, value):
+        if type(value) is not bool:
+            raise ValueError("invalid_media_text_extraction")
         return value
 
     @field_validator("source_id", "scope_id")
@@ -64,12 +73,26 @@ class SourceConfiguration(BaseModel):
             raise CaptureError("source_configuration_invalid") from None
 
     def binding_digest(self):
-        # A version upgrade is metadata, not authorization to change roots/scopes.
-        value = self.model_dump(exclude={"source_version"})
+        # A version upgrade or a local extraction toggle is not authorization
+        # to change roots/scopes.
+        value = self.model_dump(exclude={"source_version", "media_text_extraction"})
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-_MEDIA_BLOCK_TYPES = frozenset({"image", "document", "audio", "video", "file"})
+_MEDIA_BLOCK_TYPES = frozenset(
+    {
+        "image",
+        "document",
+        "audio",
+        "video",
+        "file",
+        "input_image",
+        "input_file",
+        "input_audio",
+        "input_video",
+    }
+)
+_MEDIA_FIELDS = frozenset({"image_url", "file_url", "file_data"})
 # A schema may declare a property *named* attachments; only real entries are files.
 _SCHEMA_KEYS = frozenset({"properties", "input_schema", "json_schema", "parameters"})
 
@@ -85,6 +108,8 @@ def _is_media_block(value):
         return False
     kind = value.get("type")
     if isinstance(kind, str) and kind in _MEDIA_BLOCK_TYPES:
+        return True
+    if _MEDIA_FIELDS.intersection(value) and not _SCHEMA_KEYS.intersection(value):
         return True
     attachments = value.get("attachments")
     if isinstance(attachments, list) and attachments:
@@ -110,10 +135,15 @@ def _reject_unsupported_media(record):
             pending.extend((child, depth + 1) for child in value)
 
 
-def _guarded_adapter(adapter):
+def _guarded_adapter(adapter, *, adapter_id, media_text_extraction=False):
     original_parser = adapter.parser
 
     def checked(record, context):
+        if media_text_extraction:
+            try:
+                rewrite_record_media(record, adapter_id=adapter_id)
+            except MediaTextError as error:
+                raise CaptureError(error.code) from None
         _reject_unsupported_media(record)
         result = original_parser(record, context)
         if hasattr(result, "rows"):
@@ -126,12 +156,20 @@ def _guarded_adapter(adapter):
     return adapter
 
 
-def _claude_adapter(grant, source_version):
-    return _guarded_adapter(create_claude_code_adapter(grant, source_version=source_version))
+def _claude_adapter(grant, source_version, media_text_extraction=False):
+    return _guarded_adapter(
+        create_claude_code_adapter(grant, source_version=source_version),
+        adapter_id="claude-code",
+        media_text_extraction=media_text_extraction,
+    )
 
 
-def _codex_adapter(grant, source_version):
-    return _guarded_adapter(create_codex_adapter(grant, source_version=source_version))
+def _codex_adapter(grant, source_version, media_text_extraction=False):
+    return _guarded_adapter(
+        create_codex_adapter(grant, source_version=source_version),
+        adapter_id="codex",
+        media_text_extraction=media_text_extraction,
+    )
 
 
 ADAPTERS = {"claude-code": _claude_adapter, "codex": _codex_adapter}
@@ -154,7 +192,9 @@ def _open_source(outbox, config, *, initialize=False):
         grant.root_identity,
         initialize=initialize,
     )
-    return store, ADAPTERS[config.adapter_id](grant, config.source_version)
+    return store, ADAPTERS[config.adapter_id](
+        grant, config.source_version, config.media_text_extraction
+    )
 
 
 def initialize_capture(outbox, config):
