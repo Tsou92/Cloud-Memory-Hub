@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- 历史导入新增 DeepSeek Harness 来源：`source_root` 指向 `~/.dsh/sessions`，读取 `session-*/session.v3.jsonl.zstd`；工作目录与会话 ID 取自会话头，复用本地过滤、幂等去重和项目绑定。含图片等不支持媒体的会话保持 fail-closed。
 - 备份导出新增可选加密：`--encrypt --passphrase-file` 使用 scrypt + 分块 AES-256-GCM 生成认证加密的 `.cmh.tar.enc`；`inspect`／`import`／`restore` 自动识别并要求同一口令。内部 `/backups` 版本仍为明文。
 - 历史导入新增可选的本地附件文本抽取：`media_text_extraction: true` 时，PDF 文本层与纯文本附件在来源设备本地抽取、过滤后作为普通文本入库；原始附件字节不上传、不写入 Hub、不发给模型。图片、扫描件、加密 PDF 与 Office 文档仍拒绝；默认关闭，按来源显式开启。
 - 媒体守卫补上 `input_image`、`input_file`、`input_audio`、`input_video` 与 `image_url`／`file_url`／`file_data` 的结构性拒绝，避免部分宿主把图像块静默跳过。

@@ -1,5 +1,7 @@
 # 验证计划与需求追踪
 
+2026-11-19 DSH 历史导入（FR-08、FR-14、FR-15）：新增 `deepseek-harness` 来源，读取 `~/.dsh/sessions/<编码 cwd>/session-*/session.v3.jsonl.zstd`；按会话头 `cwd` 绑定项目、`id` 作为会话，映射 `user/message`、`assistant/message`（文本 + 工具调用）与 `tool/result`，跳过插件消息、推理和未知事件。zstd 流按解压后的记录序号续读；含图片等不支持媒体的会话保持 fail-closed。见 [ADR-0077](adr/0077-dsh-history-import.md)。
+
 2026-11-19 备份导出加密（FR-11、FR-13、ENG-01）：`backup_maintenance export` 新增可选 `--encrypt`，使用 scrypt + 分块 AES-256-GCM 生成认证加密的 `.cmh.tar.enc`；`inspect`／`import`／`restore` 自动识别并要求同一口令。内部 `/backups` 版本仍为明文。测试覆盖往返、错误口令、篡改、截断、1 MiB 块边界与真实备份导出后 `unpack_backup`。设计见 [ADR-0076](adr/0076-encrypted-backup-export.md)。
 
 2026-11-19 本地附件文本抽取（FR-08、FR-14、FR-15）：source 配置新增 `media_text_extraction`（默认关闭）；PDF 文本层与 `text/plain`／`text/markdown` 在来源设备本地抽取、过滤后作为普通文本入库，原始附件字节不进入 Hub；图片、扫描件、加密 PDF 与 Office 文档仍拒绝。媒体守卫同步补上 `input_image`、`input_file`、`input_audio`、`input_video` 与 `image_url`／`file_url`／`file_data` 的结构性拒绝。设计与边界见 [ADR-0075](adr/0075-multimodal-attachments.md)。
