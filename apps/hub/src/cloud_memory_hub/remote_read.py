@@ -234,7 +234,14 @@ class RemoteRead:
                 )
                 # The pinned SDK list serializer omits is_latest. Its bridge defaults
                 # that missing flag to True, so hydrate current authority by ID.
-                records = [await bridge.get_sdk_memory(r.memory_id) for r in page.memories]
+                # A single failed hydration must not make the whole library
+                # unavailable; the list record already carries display fields.
+                records = []
+                for listed in page.memories:
+                    try:
+                        records.append(await bridge.get_sdk_memory(listed.memory_id))
+                    except Exception:
+                        records.append(listed)
                 total = page.total
             if request.offset + request.limit < total:
                 next_offset = request.offset + request.limit
@@ -251,7 +258,21 @@ class RemoteRead:
             records = [record]
         enrich = getattr(bridge, "enrich_memory", None)
         if not history and enrich is not None:
-            records = [await enrich(record) for record in records]
+            if isinstance(request, GetRequest):
+                # An exact memory-get is the authoritative read; damaged
+                # lineage stays fail-closed here.
+                records = [await enrich(record) for record in records]
+            else:
+                # List/search are overviews. One record with a missing or
+                # inconsistent edge must not turn the whole page into
+                # read_unavailable; keep the base record and its direct refs.
+                enriched = []
+                for record in records:
+                    try:
+                        enriched.append(await enrich(record))
+                    except Exception:
+                        enriched.append(record)
+                records = enriched
         offset = request.content_offset if isinstance(request, GetRequest) else 0
         return ScopedReadPage(
             items=tuple(self._item(record, privacy, offset) for record in records),
