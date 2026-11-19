@@ -13,6 +13,7 @@
 - `backup_maintenance export` 新增可选 `--encrypt`，生成认证加密的 `.cmh.tar.enc`；未加密 `.cmh.tar` 保留兼容。
 - 口令来自 `--passphrase-file`（0600 私有普通文件）或 `CMH_BACKUP_PASSPHRASE` 环境变量；不接受命令行参数，避免进程列表泄露。优先使用文件。
 - `inspect`／`import`／`restore` 的 `--archive` 按文件头自动识别加密格式，并要求同一口令；未加密归档行为不变。
+- 加密归档需要 0.1.13+ 的 `inspect`／`import`／`restore` 才能读取；旧版只识别明文 `.cmh.tar`，会把加密头当作无效归档拒绝。
 - 内部 `/backups` 版本不加密；磁盘／卷级加密仍由宿主 NAS 负责。
 
 ## 格式
@@ -45,5 +46,5 @@ scrypt 参数与块大小固定在版本 1；改变参数必须新增格式版�
 ## 验证
 
 - 加密／解密往返、错误口令、篡改、截断、1 MiB 块边界与真实备份导出后 `unpack_backup` 均通过。
-- `_source` 对加密归档要求口令文件，缺失时返回 `backup_passphrase_required`。
+- `_source` 对加密归档要求同一口令（`--passphrase-file` 或 `CMH_BACKUP_PASSPHRASE`），缺失时返回 `backup_passphrase_required`。
 - 未加密导出与原备份、导入、恢复测试保持通过。
