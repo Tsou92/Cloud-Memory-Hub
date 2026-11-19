@@ -1,21 +1,45 @@
-# Cloud Memory Hub
+<h1 align="center">Cloud Memory Hub</h1>
 
-**让不同设备和 AI Agent，共享项目记忆、接续任务。**
+<p align="center">
+  <img src="assets/brand/banner.svg" alt="Cloud Memory Hub — 共享项目记忆，接续下一轮。Docker、MCP 与会话接续。" width="1280">
+</p>
 
-服务通过 **Docker 部署在自己的 NAS**，电脑无需安装独立 App。
+<p align="center"><strong>共享项目记忆，接续下一轮。</strong><br>
+Share project memory. Pick up next turn.</p>
 
-在电脑运行一条命令，即可部署到 NAS 或本机 Docker。然后在后台创建共享项目并配对设备。
+<p align="center">
+  <a href="https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest"><img src="https://img.shields.io/github/v/release/Tsou92/Cloud-Memory-Hub?style=flat-square&amp;color=5644cb" alt="最新发行版"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-64748b?style=flat-square" alt="Apache-2.0"></a>
+  <a href="https://github.com/Tsou92/Cloud-Memory-Hub/actions/workflows/quality.yml"><img src="https://github.com/Tsou92/Cloud-Memory-Hub/actions/workflows/quality.yml/badge.svg?branch=main" alt="Tests / CI"></a>
+  <a href="docs/agent-access.md"><img src="https://img.shields.io/badge/MCP-Ready-106e88?style=flat-square" alt="MCP Ready"></a>
+  <a href="https://memoryhub.tsounas.cn"><img src="https://img.shields.io/badge/Website-Cloud_Memory_Hub-5644cb?style=flat-square" alt="产品主页"></a>
+</p>
 
-> **实验版本。** 请勿把它当作唯一记忆来源。完整历史自动导入目前按 `source_root` 显式支持 Claude Code／Codex／DSH 会话；多模态解析目前只提供历史导入路径下可选的本地 PDF 文本层与纯文本附件抽取，图片和扫描件尚未实现；断网时只能读到本机上次成功读取的缓存副本；数据存在哪、什么时候会发给外部模型，见[数据会去到哪里](docs/data-and-privacy.md)。
+Cloud Memory Hub 是可部署在 **NAS 或本机 Docker** 上的开源服务。设备配对到同一个项目后，已启用项目钩子的 Agent 可在下一轮召回相关会话摘要。需要更多细节时可读取已采集的 Markdown 原文，通用 MCP 也支持显式读写和交接。
 
-[![最新发行版](https://img.shields.io/github/v/release/Tsou92/Cloud-Memory-Hub?style=flat-square&color=8b5cf6&logo=github)](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest)
-[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-64748b?style=flat-square)](LICENSE)
-[![Docker 自托管](https://img.shields.io/badge/self--hosted-Docker-2496ed?style=flat-square&logo=docker&logoColor=white)](docs/development-runtime.md#发行版首次运行)
-[![GitHub Actions](https://img.shields.io/badge/checks-GitHub_Actions-64748b?style=flat-square&logo=githubactions&logoColor=white)](https://github.com/Tsou92/Cloud-Memory-Hub/actions/workflows/quality.yml)
+Cloud Memory Hub is an open-source, self-hosted service for sharing project memory across authorized devices and agents. Supported hosts can recall session context on the next turn. MCP tools also let agents save and load task handoffs explicitly.
 
-![Cloud Memory Hub：NAS 上的共享记忆中枢，连接不同设备与 Agent](docs/assets/readme-overview.svg)
+[产品主页](https://memoryhub.tsounas.cn) · [快速接入](#在-nas-安装发行版) · [MCP 配置](#mcp-setup) · [接入指南](docs/client-installation.md) · [问题反馈](https://github.com/Tsou92/Cloud-Memory-Hub/issues)
 
-[产品主页](https://memoryhub.tsounas.cn) · [下载发行版](https://github.com/Tsou92/Cloud-Memory-Hub/releases/latest) · [接入指南](docs/client-installation.md) · [问题反馈](https://github.com/Tsou92/Cloud-Memory-Hub/issues)
+## 为什么用它
+
+| 常见场景 | 单机／单 Agent 会话 | Cloud Memory Hub |
+| --- | --- | --- |
+| 在 Claude Code 定下方案，改用另一台电脑上的 Codex | 需要重新解释目标和已完成的工作 | 同项目、已配置钩子的 Codex 可在下一轮召回相关会话摘要 |
+| 本轮结束时网络暂时不可用 | 依赖当前设备的上下文和记录 | 已过滤的事件保存在本地待传队列，重连后补传 |
+| 想让另一端按原进度继续任务 | 手动复制下一步和阻塞事项 | 用 MCP 保存结构化交接，由同项目授权的设备按 `handoff_id` 读取 |
+
+## 会话如何接续
+
+[![Cloud Memory Hub 会话接续架构图](assets/brand/architecture-handoff.svg)](assets/brand/architecture-handoff.svg)
+
+1. **本地排队。** Claude Code 的项目钩子捕获获准的可见提示和最终回答，经凭证过滤后写入 `LocalOutbox`。
+2. **Hub 接纳。** 连接组件提交事件，Hub 核验设备、项目与来源授权，按稳定事件身份处理重投，返回持久回执。
+3. **下一轮召回。** 另一台设备上的 Codex 通过已启用的项目钩子召回相关摘要 `session_briefs`。需要详情时，用 `session_markdown` 分页读取。
+4. **异步长期记忆提炼。** 配置模型后，MemHub Core 队列在后台提炼长期记忆，产物可通过 `memory_search` 查询。会话摘要在原文接纳后即可读取。
+5. **显式 MCP 交接。** 需要指定交接时，A 端可独立调用 `handoff_save` 保存目标、进展和下一步，B 端用接纳后返回的 `handoff_id` 调用 `handoff_load`。
+
+> **实验版本。** 请保留独立记忆来源。完整历史自动导入目前按 `source_root` 显式支持 Claude Code／Codex／DSH 会话。附件解析目前限历史导入时可选的本地 PDF 文本层与纯文本抽取。断网时显式读取只可使用本机上次成功读到的缓存副本，跨端自动召回需要在线。外部模型的数据流向见[数据与隐私](docs/data-and-privacy.md)。
 
 <a id="在-nas-安装发行版"></a>
 
@@ -24,6 +48,8 @@
 在 NAS 开启 Docker Compose 和 SSH，并准备已登录的 Tailscale 或可访问的 HTTPS 入口。NAS 上还需要 `curl`、`sha256sum`、`tar`、`flock` 和 `python3`，安装器只检查、不代装。在任意目录运行对应电脑系统的命令，把 `USER@NAS` 换成 NAS 的 SSH 用户名与地址，或已有的 SSH 别名。
 
 命令使用 [v0.1.14 的正式附件](https://github.com/Tsou92/Cloud-Memory-Hub/releases/tag/v0.1.14)。
+
+<!-- website-install:nas -->
 
 **Mac / Linux 终端**
 
@@ -36,6 +62,8 @@
 ```powershell
 & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.14/scripts/bootstrap-install.ps1').Content)) -Nas 'USER@NAS'
 ```
+
+<!-- /website-install -->
 
 也可以把填好 NAS 地址的命令发给能运行对应终端的 Agent，请它原样执行一次，等安装器返回后告诉你管理页地址或具体错误。安装器负责环境检查、下载、校验和启动。
 
@@ -50,6 +78,8 @@
 
 启动 Docker Engine 或 Docker Desktop，并使用 Linux 容器。管理页默认是 `http://127.0.0.1:8800/hub`，仅本机可访问。
 
+<!-- website-install:local -->
+
 **Mac / Linux 终端**
 
 ```sh
@@ -62,6 +92,8 @@
 & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -TimeoutSec 60 -MaximumRedirection 0 'https://raw.githubusercontent.com/Tsou92/Cloud-Memory-Hub/v0.1.14/scripts/bootstrap-install.ps1').Content)) -Local
 ```
 
+<!-- /website-install -->
+
 </details>
 
 ## 🔌 三步使用
@@ -71,6 +103,48 @@
 3. **开始共享。** 在 Agent 中打开安装结果显示的目录。Codex 首次按界面提示信任已安装的钩子一次，然后正常对话即可。另一端先收到会话摘要，需要细节时再读 Markdown 原文。其他宿主可通过 MCP 接入。详见[接入指南](docs/client-installation.md)。
 
 会话接续传递任务上下文。通用 MCP 也提供显式读取和交接工具；本机旧历史与其他宿主的采集范围见[接入指南](docs/client-installation.md)。
+
+<a id="mcp-setup"></a>
+
+## 配置 Claude Code 和 Codex 的 MCP
+
+**默认走一次性链接。** 在 Hub 的「设备与接入」为 Claude Code 或 Codex 生成连接，复制页面给出的安装命令到目标电脑，然后重新加载 MCP。打开安装结果显示的项目目录，检查工具列表能否看到 `session_briefs` 和 `handoff_save`。在支持的宿主上，自动召回由项目钩子触发，Codex 首次需要按宿主提示审查并信任钩子。
+
+<details>
+<summary>手动配置 Mac 客户端（JSON / TOML）</summary>
+
+先安装 Mac 客户端并在 Hub 下载本设备的配对文件。替换以下占位路径，再用导入后返回的 `config_file` 生成配置。将对应输出合并到既有客户端配置。
+
+```sh
+"/path/to/installed/bin/cloud-memory-setup" import --pairing-file "/path/to/downloaded-pairing.json"
+"/path/to/installed/bin/cloud-memory-setup" mcp-config --config-file "/path/to/private/agent.json"
+"/path/to/installed/bin/cloud-memory-setup" mcp-config --config-file "/path/to/private/agent.json" --format codex
+```
+
+**Claude Code（JSON）**
+
+```json
+{
+  "mcpServers": {
+    "cloud-memory-hub": {
+      "command": "/path/to/installed/bin/cloud-memory-mcp",
+      "args": ["--config-file", "/path/to/private/agent.json"]
+    }
+  }
+}
+```
+
+**Codex（TOML）**
+
+```toml
+[mcp_servers.cloud-memory-hub]
+command = "/path/to/installed/bin/cloud-memory-mcp"
+args = ["--config-file", "/path/to/private/agent.json"]
+```
+
+连接凭证由已配对的私有配置管理。完成配置后重新加载 MCP 或打开新会话。远程 HTTP MCP、Linux／Windows 接入及本地补传见[客户端文档](docs/client-installation.md)，工具参数与授权见 [Agent 接入文档](docs/agent-access.md)。
+
+</details>
 
 ## ✅ 当前支持范围
 
@@ -106,6 +180,7 @@
 | 双机、Claude CLI 与自动召回 | [客户端实测](docs/reviews/2026-11-10-self-service-clients.md) · [下一轮与重连](docs/reviews/2026-11-10-next-turn-and-reconnect.md) |
 | 网页、模型与恢复 | [首次网页使用](docs/reviews/2026-11-10-browser-first-use.md) · [模型配置](docs/reviews/2026-11-10-model-catalog.md) · [自动备份](docs/reviews/2026-11-10-managed-backup.md) |
 | 架构与上游复用 | [架构](docs/architecture/overview.md) · [Hy-Memory / MemHub 复用清单](docs/research/upstream-assessment.md) |
+| 官网与品牌物料 | [产品主页](https://memoryhub.tsounas.cn) · [品牌规范与素材](docs/brand/BRAND_GUIDELINES.md) |
 | 审计与修复 | [2026-11-16 审计修复](docs/reviews/2026-11-16-audit-fixes.md) |
 | 完整测试与历史设计记录 | [验证计划](docs/verification.md) · [开发及运行检查](docs/development-runtime.md#可复现验证) |
 

@@ -1,11 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <rect width="64" height="64" rx="16" fill="#0d1122"/>
-  <rect x="1" y="1" width="62" height="62" rx="15" stroke="#8b7cf8" stroke-opacity="0.35" stroke-width="2"/>
-  <path d="M22.5 24C17.8 24 14 27.58 14 32C14 36.42 17.8 40 22.5 40C26.2 40 28.9 37.8 32 33.8C35.1 37.8 37.8 40 41.5 40C46.2 40 50 36.42 50 32C50 27.58 46.2 24 41.5 24C37.8 24 35.1 26.2 32 30.2C28.9 26.2 26.2 24 22.5 24Z" stroke="url(#g)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <defs>
-    <linearGradient id="g" x1="14" y1="24" x2="50" y2="40" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#7c83fa"/>
-      <stop offset="1" stop-color="#c4a1ff"/>
-    </linearGradient>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title description">
+  <title id="title">Cloud Memory Hub icon</title>
+  <desc id="description">Two indigo inputs converge on a central diamond that connects to an ice-blue output.</desc>
+<g aria-hidden="true">
+    <rect width="64" height="64" rx="16" fill="#111628"/>
+    <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="15.25" fill="none" stroke="#2C324D" stroke-width="1.5"/>
+    <path d="M13 18h7a9 9 0 0 1 6.4 2.6L32 26m-19 20h7a9 9 0 0 0 6.4-2.6L32 38" fill="none" stroke="#A495FF" stroke-width="4.75" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M39 32h12" fill="none" stroke="#83DDF1" stroke-width="4.75" stroke-linecap="round"/>
+    <path d="m35 25 7 7-7 7-7-7Z" fill="#111628" stroke="#F1F3FB" stroke-width="3.5" stroke-linejoin="round"/>
+    <circle cx="13" cy="18" r="3.5" fill="#A495FF"/>
+    <circle cx="13" cy="46" r="3.5" fill="#A495FF"/>
+    <circle cx="51" cy="32" r="3.5" fill="#83DDF1"/>
+  </g>
 </svg>

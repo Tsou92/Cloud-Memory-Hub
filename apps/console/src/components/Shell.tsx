@@ -237,9 +237,7 @@ export function Shell({
               setMobileMenuOpen(false);
             }}
           >
-            <span className="cmh-brand-glyph" aria-hidden="true">
-              ∞
-            </span>
+            <img className="cmh-brand-glyph" src="/brand-icon.svg" alt="" />
             <span className="cmh-brand-text">
               <strong>Cloud Memory Hub</strong>
               <small>共享记忆中枢</small>

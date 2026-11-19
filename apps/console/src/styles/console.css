@@ -179,10 +179,11 @@ a:hover {
 }
 
 .cmh-boot-logo {
-  font-size: 40px;
-  line-height: 1;
-  color: var(--cmh-accent-hover);
-  margin-bottom: 12px;
+  width: 56px;
+  height: 56px;
+  display: block;
+  margin: 0 auto 12px;
+  border-radius: 14px;
 }
 
 .cmh-boot-card h1 {
@@ -276,14 +277,9 @@ a:hover {
 .cmh-brand-glyph {
   width: 32px;
   height: 32px;
-  display: grid;
-  place-items: center;
+  display: block;
   border-radius: 9px;
-  font-size: 21px;
-  font-weight: 700;
-  background: linear-gradient(135deg, rgba(139, 124, 248, 0.24), rgba(96, 165, 250, 0.16));
-  border: 1px solid rgba(167, 139, 250, 0.35);
-  color: #dcd5ff;
+  object-fit: cover;
 }
 
 .cmh-brand-text {

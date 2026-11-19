@@ -79,8 +79,8 @@ STYLE = (
     "linear-gradient(145deg,#222840e8,#151a2de8);border:1px solid #a0a6dc26;"
     "border-radius:22px;padding:40px;box-shadow:0 28px 90px #03061066}"
     "h1{font-size:28px;line-height:1.35;letter-spacing:-.02em;margin:0 0 20px}"
-    "h1:before{content:'∞';display:block;font-size:54px;line-height:1.15;color:#c6b5ff;"
-    "text-shadow:0 0 24px #8670ff66;margin-bottom:20px}"
+    "h1:before{content:'';display:block;width:54px;height:54px;margin-bottom:20px;"
+    "background:url('/brand-icon.svg') center/contain no-repeat}"
     "h2{font-size:20px;margin-top:32px}p,li{color:#b4b8d0}"
     "label{display:block;color:#e4e5f4;margin:16px 0 8px;font-weight:600}"
     "textarea,select{font:inherit;color:#f3f4fc;background:#101528;"
@@ -325,7 +325,7 @@ def public_connection_response(path: str, method: str, origin: str) -> Response:
         digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
         style_digest = base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode()
         headers["Content-Security-Policy"] = (
-            f"default-src 'none'; script-src 'sha256-{digest}'; "
+            f"default-src 'none'; img-src 'self'; script-src 'sha256-{digest}'; "
             f"style-src 'sha256-{style_digest}'; "
             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         )
