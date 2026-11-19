@@ -77,6 +77,28 @@ def test_boundary_enforces_identity_origin_and_private_core_headers(tmp_path):
     asyncio.run(scenario())
 
 
+def test_public_static_assets_are_served_without_a_session(tmp_path):
+    config = configuration(tmp_path)
+    served = []
+
+    async def core(scope, receive, send):
+        served.append(scope["path"])
+        await JSONResponse({"accepted": True})(scope, receive, send)
+
+    app = CloudBoundary(core, config, "internal-only")
+
+    async def scenario():
+        async with AsyncClient(
+            transport=ASGITransport(app), base_url=config.public_origin
+        ) as client:
+            assert (await client.get("/")).status_code == 303
+            for path in ("/favicon.svg", "/brand-icon.svg"):
+                assert (await client.get(path)).status_code == 200
+            assert served == ["/favicon.svg", "/brand-icon.svg"]
+
+    asyncio.run(scenario())
+
+
 def test_login_session_csrf_and_logout(tmp_path):
     config = configuration(tmp_path)
 

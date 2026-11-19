@@ -23,6 +23,7 @@ from cloud_memory_hub.governance_boundary import guarded_call
 from cloud_memory_hub.onboarding_api import PUBLIC_CONNECT_PATHS, public_connection_response
 
 STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg", "/brand-icon.svg"})
+PUBLIC_STATIC_PATHS = frozenset({"/favicon.ico", "/favicon.svg", "/brand-icon.svg"})
 ADMIN_CREDENTIAL_PATH = "/hub/v1/admin/credential"
 ADMIN_SETUP_PATH = "/hub/setup"
 AUTH_BODY_LIMIT = 4096
@@ -213,6 +214,10 @@ class CloudBoundary:
             and not self.admin_credentials.setup_pending
             and self.sessions.valid_session(cookie)
         )
+        if request.method in {"GET", "HEAD"} and path in PUBLIC_STATIC_PATHS:
+            # The login/setup pages need their icon before a session exists.
+            await self.core(scope, receive, send)
+            return
         if path == ADMIN_CREDENTIAL_PATH:
             response = await self._change_credential(request, authenticated=bearer or session)
             await self._respond(response, scope, receive, send)
