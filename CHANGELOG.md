@@ -4,7 +4,7 @@
 
 2026-11-10 历史维护说明：隐私清理重新生成了 0.1.0～0.1.2 的提交与标签，旧 0.1.2 发行附件已撤回。以下旧版条目保留当时的开发与验收过程；旧提交编号和构建证明不能用于认证重写后的历史对象。
 
-## 未发布
+## 0.1.13
 
 - 历史导入新增 DeepSeek Harness 来源：`source_root` 指向 `~/.dsh/sessions`，读取 `session-*/session.v3.jsonl.zstd`；工作目录与会话 ID 取自会话头，复用本地过滤、幂等去重和项目绑定。含图片等不支持媒体的会话保持 fail-closed。
 - 备份导出新增可选加密：`--encrypt --passphrase-file` 使用 scrypt + 分块 AES-256-GCM 生成认证加密的 `.cmh.tar.enc`；`inspect`／`import`／`restore` 自动识别并要求同一口令。内部 `/backups` 版本仍为明文。
