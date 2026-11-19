@@ -167,7 +167,17 @@ def rewrite_record_media(record, *, adapter_id):
         and isinstance(payload.get("content"), list)
     ):
         lists.append(payload["content"])
-    text_type = "text" if adapter_id == "claude-code" else "input_text"
+    if adapter_id == "deepseek-harness":
+        data = record.get("data")
+        if isinstance(data, dict):
+            if record.get("type") == "assistant/message":
+                message = data.get("message")
+                if isinstance(message, dict) and isinstance(message.get("content"), list):
+                    lists.append(message["content"])
+            elif record.get("type") == "user/message":
+                if isinstance(data.get("content"), list):
+                    lists.append(data["content"])
+    text_type = "input_text" if adapter_id == "codex" else "text"
     replaced = 0
     for blocks in lists:
         for index, block in enumerate(blocks):

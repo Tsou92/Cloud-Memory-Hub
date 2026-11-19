@@ -21,6 +21,7 @@ from cloud_memory_hub.capture_store import (
     capture_lock,
     read_capture_file,
 )
+from cloud_memory_hub.dsh_source import create_dsh_adapter
 from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.media_text import MediaTextError, rewrite_record_media
 from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, parse_json
@@ -29,7 +30,7 @@ from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, parse_json
 class SourceConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     schema_version: Literal[1] = 1
-    adapter_id: Literal["claude-code", "codex"]
+    adapter_id: Literal["claude-code", "codex", "deepseek-harness"]
     source_id: str
     scope_id: str
     source_root: str = Field(min_length=1, max_length=4096, repr=False)
@@ -172,7 +173,19 @@ def _codex_adapter(grant, source_version, media_text_extraction=False):
     )
 
 
-ADAPTERS = {"claude-code": _claude_adapter, "codex": _codex_adapter}
+def _dsh_adapter(grant, source_version, media_text_extraction=False):
+    return _guarded_adapter(
+        create_dsh_adapter(grant, source_version=source_version),
+        adapter_id="deepseek-harness",
+        media_text_extraction=media_text_extraction,
+    )
+
+
+ADAPTERS = {
+    "claude-code": _claude_adapter,
+    "codex": _codex_adapter,
+    "deepseek-harness": _dsh_adapter,
+}
 
 
 def _open_source(outbox, config, *, initialize=False):
