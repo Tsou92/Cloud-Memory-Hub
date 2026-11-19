@@ -57,8 +57,13 @@ def _passphrase(value):
 
 
 def is_encrypted(path):
-    with store._read(Path(path)) as stream:
-        return stream.read(len(MAGIC)) == MAGIC
+    try:
+        with store._read(Path(path)) as stream:
+            return stream.read(len(MAGIC)) == MAGIC
+    except store.BackupError:
+        raise
+    except OSError:
+        raise store.BackupError("backup_archive_invalid") from None
 
 
 class EncryptedWriter:

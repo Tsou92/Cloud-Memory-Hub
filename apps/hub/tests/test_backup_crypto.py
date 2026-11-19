@@ -57,6 +57,12 @@ def test_plain_tar_is_not_detected_as_encrypted(tmp_path):
     assert is_encrypted(source) is False
 
 
+def test_missing_archive_is_invalid(tmp_path):
+    with pytest.raises(backup_store.BackupError) as error:
+        is_encrypted(tmp_path / "missing.cmh.tar")
+    assert error.value.code == "backup_archive_invalid"
+
+
 def test_wrong_passphrase_is_rejected(tmp_path):
     source = _private(tmp_path / "archive.enc", encrypt_bytes(_tar(b"secret"), b"right"))
     work = tmp_path / "work"
