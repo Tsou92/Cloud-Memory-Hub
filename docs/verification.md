@@ -1,5 +1,7 @@
 # 验证计划与需求追踪
 
+2026-11-19 备份导出加密（FR-11、FR-13、ENG-01）：`backup_maintenance export` 新增可选 `--encrypt`，使用 scrypt + 分块 AES-256-GCM 生成认证加密的 `.cmh.tar.enc`；`inspect`／`import`／`restore` 自动识别并要求同一口令。内部 `/backups` 版本仍为明文。测试覆盖往返、错误口令、篡改、截断、1 MiB 块边界与真实备份导出后 `unpack_backup`。设计见 [ADR-0076](adr/0076-encrypted-backup-export.md)。
+
 2026-11-19 本地附件文本抽取（FR-08、FR-14、FR-15）：source 配置新增 `media_text_extraction`（默认关闭）；PDF 文本层与 `text/plain`／`text/markdown` 在来源设备本地抽取、过滤后作为普通文本入库，原始附件字节不进入 Hub；图片、扫描件、加密 PDF 与 Office 文档仍拒绝。媒体守卫同步补上 `input_image`、`input_file`、`input_audio`、`input_video` 与 `image_url`／`file_url`／`file_data` 的结构性拒绝。设计与边界见 [ADR-0075](adr/0075-multimodal-attachments.md)。
 
 2026-11-18 独立管理后台重构（FR-01、FR-03、FR-07、FR-09、FR-10、FR-12、FR-13、FR-14、ENG-01）：自有前端包 `apps/console` 复用全部现有 `/hub/v1/*` 与受控 `/api/v1/*` 接口及本地幂等状态机，新增查询参数路由同步、主从记忆编辑、右侧原文／引用抽屉、治理模态框、实时流式问答、设备管理主视图及备份版本命令自动填充，并统一 `/hub/login` 与 `/hub/setup` 页面样式与 CSP 约束；补充桌面端侧栏收起／展开与窄屏抽屉遮罩隔离的回归测试，防止遮罩元素进入桌面 CSS Grid 流。设计见 [ADR-0074](adr/0074-standalone-console-redesign.md) 和 [DESIGN](../DESIGN.md)。

@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from cloud_memory_hub import backup_crypto
 from cloud_memory_hub import backup_store as store
 from cloud_memory_hub.storage_lease import StorageLease
 
@@ -57,8 +58,13 @@ def _header(name, *, size=0, directory=False):
     return entry
 
 
-def export_backup(backup_path: Path, output: Path) -> dict:
-    """Export a verified version into a new, non-overwriting uncompressed tar."""
+def export_backup(backup_path: Path, output: Path, *, passphrase: bytes | None = None) -> dict:
+    """Export a verified version into a new, non-overwriting archive.
+
+    With a passphrase the tar is wrapped in the authenticated encrypted
+    container from backup_crypto; without one the existing plain tar format is
+    kept for compatibility.
+    """
     output = output.absolute()
     store._plain_path(output.parent, directory=True, private=True)
     if output.is_relative_to(backup_path.absolute()):
@@ -79,7 +85,14 @@ def export_backup(backup_path: Path, output: Path) -> dict:
                 temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
             )
             with os.fdopen(descriptor, "wb") as stream:
-                with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                writer = (
+                    backup_crypto.EncryptedWriter(stream, passphrase)
+                    if passphrase is not None
+                    else None
+                )
+                with tarfile.open(
+                    fileobj=writer or stream, mode="w", format=tarfile.PAX_FORMAT
+                ) as archive:
                     # The first member gives a bounded identity before extraction.
                     for name in [
                         store.MANIFEST,
@@ -93,6 +106,8 @@ def export_backup(backup_path: Path, output: Path) -> dict:
                                 archive.addfile(
                                     _header(name, size=os.fstat(source.fileno()).st_size), source
                                 )
+                if writer is not None:
+                    writer.finalize()
                 stream.flush()
                 os.fsync(stream.fileno())
             if store.inspect_backup(backup_path) != manifest:
@@ -105,7 +120,10 @@ def export_backup(backup_path: Path, output: Path) -> dict:
             store._fsync_directory(output.parent)
             return {
                 "backup_id": manifest["backup_id"],
-                "format": "cmh-backup-tar-v1",
+                "format": (
+                    "cmh-backup-tar-v1-encrypted" if writer is not None else "cmh-backup-tar-v1"
+                ),
+                **({"encryption": backup_crypto.FORMAT} if writer is not None else {}),
                 "bytes": output.stat().st_size,
                 "sha256": store._hash(output),
             }
