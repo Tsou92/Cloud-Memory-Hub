@@ -44,7 +44,7 @@ docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub.backup_main
 
 ### 加密导出（推荐）
 
-导出归档含管理员 Bearer 与 Fernet 密钥。使用 `--encrypt` 生成认证加密的 `.cmh.tar.enc`，避免明文副本离开 Hub：
+导出归档含管理员 Bearer 与 Fernet 密钥。使用 `--encrypt` 生成认证加密的 `.cmh.tar.enc`，避免明文副本离开 Hub。先在私有目录创建 0600 口令文件（例如 `install -m 600 /dev/null /backups/private-passphrase`，再用安全方式写入），不要把口令放进命令参数或 shell 历史：
 
 ```sh
 # 口令文件必须是 0600 私有普通文件；不要把口令和归档放在同一位置
