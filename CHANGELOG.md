@@ -4,11 +4,11 @@
 
 2026-11-10 历史维护说明：隐私清理重新生成了 0.1.0～0.1.2 的提交与标签，旧 0.1.2 发行附件已撤回。以下旧版条目保留当时的开发与验收过程；旧提交编号和构建证明不能用于认证重写后的历史对象。
 
-## 未发布
+## 0.1.13
 
-- 历史导入新增 DeepSeek Harness 来源：`source_root` 指向 `~/.dsh/sessions`，读取 `session-*/session.v3.jsonl.zstd`；工作目录与会话 ID 取自会话头，复用本地过滤、幂等去重和项目绑定。含图片等不支持媒体的会话保持 fail-closed。
-- 备份导出新增可选加密：`--encrypt --passphrase-file` 使用 scrypt + 分块 AES-256-GCM 生成认证加密的 `.cmh.tar.enc`；`inspect`／`import`／`restore` 自动识别并要求同一口令。内部 `/backups` 版本仍为明文。
-- 历史导入新增可选的本地附件文本抽取：`media_text_extraction: true` 时，PDF 文本层与纯文本附件在来源设备本地抽取、过滤后作为普通文本入库；原始附件字节不上传、不写入 Hub、不发给模型。图片、扫描件、加密 PDF 与 Office 文档仍拒绝；默认关闭，按来源显式开启。
+- 历史导入新增 DeepSeek Harness 来源：`source_root` 指向 `~/.dsh/sessions`，读取 `session-*/session.v3.jsonl.zstd`；工作目录与会话 ID 取自会话头，复用本地过滤、幂等去重和项目绑定。只导入文本与工具证据，跳过 reasoning／system／控制事件；含图片等不支持媒体的会话保持 fail-closed。
+- 备份导出新增可选加密：`--encrypt --passphrase-file` 使用 scrypt + 分块 AES-256-GCM 生成认证加密的 `.cmh.tar.enc`；`inspect`／`import`／`restore` 自动识别并要求同一口令。内部 `/backups` 版本仍为明文；加密归档需 0.1.13+ 读取，口令丢失不可恢复，加密不是数字签名。
+- 历史导入新增可选的本地附件文本抽取：`media_text_extraction: true` 时，PDF 文本层与纯文本附件在来源设备本地抽取、过滤后作为普通文本入库；原始附件字节不上传、不写入 Hub、不发给模型。图片、扫描件、加密 PDF、Office 文档与 URL 引用仍拒绝；忘记／彻底删除不删除来源设备原件；默认关闭，按来源显式开启。
 - 媒体守卫补上 `input_image`、`input_file`、`input_audio`、`input_video` 与 `image_url`／`file_url`／`file_data` 的结构性拒绝，避免部分宿主把图像块静默跳过。
 
 ## 0.1.12
