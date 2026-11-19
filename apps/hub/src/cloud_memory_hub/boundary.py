@@ -22,7 +22,7 @@ from cloud_memory_hub.config import HubConfig
 from cloud_memory_hub.governance_boundary import guarded_call
 from cloud_memory_hub.onboarding_api import PUBLIC_CONNECT_PATHS, public_connection_response
 
-STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg"})
+STATIC_PATHS = frozenset({"/", "/index.html", "/favicon.ico", "/favicon.svg", "/brand-icon.svg"})
 ADMIN_CREDENTIAL_PATH = "/hub/v1/admin/credential"
 ADMIN_SETUP_PATH = "/hub/setup"
 AUTH_BODY_LIMIT = 4096
@@ -42,9 +42,7 @@ main{width:min(100%,432px);padding:32px 30px;background:#111628;
 border:1px solid #94a3da24;border-radius:16px;
 box-shadow:0 28px 72px #00000080,inset 0 1px 0 #ffffff0a}
 .head{display:flex;align-items:center;gap:12px;margin-bottom:20px}
-.glyph{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;
-font-size:24px;font-weight:700;color:#dcd5ff;border:1px solid #a78bfa59;
-background:linear-gradient(135deg,#8b7cf83d,#60a5fa29)}
+.glyph{width:38px;height:38px;border-radius:10px;display:block;object-fit:cover}
 .titles strong{display:block;font-size:17px;font-weight:650;letter-spacing:-.02em}
 .titles span{font-size:12px;color:#737c9c}
 h1{font-size:20px;font-weight:650;letter-spacing:-.02em;margin:0 0 8px}
@@ -73,7 +71,7 @@ a{color:#9f92ff;text-decoration:none}a:hover{text-decoration:underline}
 [role=alert]{color:#fecaca;background:#f8717124;border:1px solid #f871714d;
 padding:10px 13px;border-radius:8px;margin-bottom:14px;font-size:13px}
 @media(max-width:440px){main{padding:24px 20px}}</style>
-<main><div class="head"><span class="glyph" aria-hidden="true">∞</span>
+<main><div class="head"><img class="glyph" src="/brand-icon.svg" alt="">
 <div class="titles"><strong>Cloud Memory Hub</strong><span>共享记忆管理中枢</span></div></div>
 {{body}}</main>{{script}}</html>"""
 
@@ -476,7 +474,7 @@ class CloudBoundary:
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; style-src 'unsafe-inline'; "
+            "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; "
             "form-action 'self'; frame-ancestors 'none'"
         )
         if script_hash is not None:

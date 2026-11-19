@@ -126,9 +126,7 @@ export function HubProvider({ children }: { children: ReactNode }) {
     return (
       <main className="cmh-boot-screen" aria-label="Cloud Memory Hub">
         <div className="cmh-boot-card">
-          <div className="cmh-boot-logo" aria-hidden="true">
-            ∞
-          </div>
+          <img className="cmh-boot-logo" src="/brand-icon.svg" alt="" />
           <h1>Cloud Memory Hub</h1>
           {error ? (
             <>
