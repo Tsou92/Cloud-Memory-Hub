@@ -99,7 +99,12 @@ def _records(workspace, *, attachment=None):
                         {
                             "type": "tool-result",
                             "toolCallId": "call-1",
-                            "content": [{"type": "text", "text": "synthetic\x01\x02 tool output"}],
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "synthetic\x01\x02 tool output https://example.invalid/a?b={c}",
+                                }
+                            ],
                         }
                     ],
                 }
@@ -165,6 +170,7 @@ def test_dsh_history_import_maps_messages_and_tools(tmp_path):
     assert "Please inspect the project." in texts
     assert "I will list the files." in texts
     assert any("synthetic tool output" in text for text in texts)
+    assert any("[url]" in text for text in texts)
     assert all("internal reasoning" not in text for text in texts)
     assert rows[0]["content"]["metadata"]["adapter_id"] == "deepseek-harness"
     assert asyncio.run(collect_source(outbox, config))["queued"] == 0

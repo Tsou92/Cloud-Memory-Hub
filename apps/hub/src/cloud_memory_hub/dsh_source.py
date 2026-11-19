@@ -5,6 +5,7 @@ already supports zstd record checkpoints; this module only maps DSH's event
 schema onto the shared ParsedMessage contract.
 """
 
+import re
 import unicodedata
 
 from one_memory.imports.access import AuthorizedSourceRoot
@@ -89,8 +90,19 @@ def _has_block(message, block_type):
     return any(isinstance(block, dict) and block.get("type") == block_type for block in content)
 
 
+_URL = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^\s<>\"']+")
+
+
 def _plain_tool_text(text):
-    """Drop control/format bytes from tool evidence; keep line structure."""
+    """Drop URLs and control/format bytes from tool evidence; keep line structure.
+
+    Terminal output routinely embeds URLs whose query values are unbalanced
+    JSON fragments. The privacy filter tries to parse those fragments and
+    aborts the whole batch with invalid_json. Tool evidence is context, not the
+    primary memory, so links are replaced with a marker; user and assistant
+    text keep their URLs for the normal filter.
+    """
+    text = _URL.sub("[url]", text)
     value = "".join(
         ch for ch in text if ch in "\n\r\t" or unicodedata.category(ch) not in {"Cf", "Cc", "Cs"}
     )
