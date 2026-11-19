@@ -7,8 +7,10 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+from cloud_memory_hub import backup_crypto
 from cloud_memory_hub import backup_store as store
 from cloud_memory_hub.backup_archive import DEFAULT_MAX_BYTES, export_backup, unpack_backup
+from cloud_memory_hub.config import read_private_file
 from cloud_memory_hub.governance_authority import require_separate_directory
 
 
@@ -20,10 +22,48 @@ def _roots():
     }
 
 
+def _passphrase(args, *, required=False):
+    value = None
+    if args.passphrase_file is not None:
+        try:
+            raw = read_private_file(args.passphrase_file)
+        except (OSError, ValueError):
+            raise store.BackupError("backup_passphrase_file_invalid") from None
+        raw = raw.rstrip(b"\r\n")
+        if not raw or len(raw) > backup_crypto.MAX_PASSPHRASE_BYTES:
+            raise store.BackupError("backup_passphrase_file_invalid")
+        value = raw
+    else:
+        environment = os.environ.get("CMH_BACKUP_PASSPHRASE", "")
+        if environment:
+            value = environment.encode("utf-8")
+            if len(value) > backup_crypto.MAX_PASSPHRASE_BYTES:
+                raise store.BackupError("backup_passphrase_invalid")
+    if required and value is None:
+        raise store.BackupError("backup_passphrase_required")
+    return value
+
+
+@contextmanager
+def _archive_source(path, args, *, max_bytes):
+    if backup_crypto.is_encrypted(path):
+        with backup_crypto.decrypted_archive(
+            path,
+            args.backup_dir,
+            _passphrase(args, required=True),
+            max_bytes=max_bytes,
+        ) as archive:
+            with unpack_backup(archive, args.backup_dir, max_bytes=max_bytes) as version:
+                yield version
+    else:
+        with unpack_backup(path, args.backup_dir, max_bytes=max_bytes) as version:
+            yield version
+
+
 @contextmanager
 def _source(args):
     if args.archive:
-        with unpack_backup(args.archive, args.backup_dir, max_bytes=args.max_bytes) as path:
+        with _archive_source(args.archive, args, max_bytes=args.max_bytes) as path:
             yield path
     else:
         if not store._ID.fullmatch(args.version):
@@ -40,7 +80,11 @@ def _run(args):
         raise store.BackupError("backup_source_stopped_required")
     with _source(args) as version:
         if args.command == "export":
-            return export_backup(version, args.output)
+            return export_backup(
+                version,
+                args.output,
+                passphrase=_passphrase(args, required=args.encrypt) if args.encrypt else None,
+            )
         if args.command == "inspect":
             manifest = store.inspect_backup(version)
             return {
@@ -77,6 +121,16 @@ def main():
         "--backup-dir", type=Path, default=Path(os.environ.get("CMH_BACKUP_DIR", "/backups"))
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--encrypt",
+        action="store_true",
+        help="Encrypt the exported archive; requires --passphrase-file or CMH_BACKUP_PASSPHRASE",
+    )
+    parser.add_argument(
+        "--passphrase-file",
+        type=Path,
+        help="Private 0600 file containing the backup passphrase",
+    )
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     parser.add_argument(
         "--writers-stopped", action="store_true", help="确认目标 Hub 已停止；仍将核对存储租约"
@@ -89,6 +143,8 @@ def main():
         parser.error("--output is required only for export")
     if args.command == "export" and args.archive:
         parser.error("export requires --version")
+    if args.encrypt and args.command != "export":
+        parser.error("--encrypt is only valid for export")
     if args.source_stopped and args.command != "import":
         parser.error("--source-stopped is only valid for import")
     if args.writers_stopped and args.command not in {"restore", "import"}:

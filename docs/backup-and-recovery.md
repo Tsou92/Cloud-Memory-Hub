@@ -40,7 +40,23 @@ docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub.backup_main
 docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub.backup_maintenance inspect --archive /backups/private.cmh.tar
 ```
 
-目前只接受本功能生成的未压缩 `.tar`，文件须为 `0600`，父目录须为当前运行用户拥有的私有目录。检查在运行三卷之外的私有临时目录解包，核对格式、文件清单、摘要、数据库和治理身份；拒绝链接、越界路径、缺失或额外文件。默认最多展开 16 GiB，较大版本可用 `--max-bytes` 明确提高，最大 1 TiB。该上限约束解包规模，不代表可用磁盘空间；还须容纳暂存副本及恢复前保护版本。
+未加密导出只接受本功能生成的未压缩 `.tar`，文件须为 `0600`，父目录须为当前运行用户拥有的私有目录。检查在运行三卷之外的私有临时目录解包，核对格式、文件清单、摘要、数据库和治理身份；拒绝链接、越界路径、缺失或额外文件。默认最多展开 16 GiB，较大版本可用 `--max-bytes` 明确提高，最大 1 TiB。该上限约束解包规模，不代表可用磁盘空间；还须容纳暂存副本及恢复前保护版本。
+
+### 加密导出（推荐）
+
+导出归档含管理员 Bearer 与 Fernet 密钥。使用 `--encrypt` 生成认证加密的 `.cmh.tar.enc`，避免明文副本离开 Hub。先在私有目录创建 0600 口令文件（例如 `install -m 600 /dev/null /backups/private-passphrase`，再用安全方式写入），不要把口令放进命令参数或 shell 历史：
+
+```sh
+# 口令文件必须是 0600 私有普通文件；不要把口令和归档放在同一位置
+docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub.backup_maintenance export --version BACKUP_ID --output /backups/private.cmh.tar.enc --encrypt --passphrase-file /backups/private-passphrase
+docker compose exec hub /opt/cmh/venv/bin/python -m cloud_memory_hub.backup_maintenance inspect --archive /backups/private.cmh.tar.enc --passphrase-file /backups/private-passphrase
+```
+
+- `inspect`、`import`、`restore` 的 `--archive` 会自动识别加密格式，并需要同一口令。
+- 也可以使用 `CMH_BACKUP_PASSPHRASE` 环境变量；环境变量可能被有权限的进程读取，优先使用私有文件。
+- 口令丢失无法恢复。加密提供机密性与防篡改／防截断，但不是数字签名；仍只导入自己生成的归档。
+- 内部 `/backups` 版本仍是明文目录，本功能保护的是导出的 `.cmh.tar.enc` 副本；磁盘／卷级加密仍由宿主 NAS 负责。
+- 格式为 scrypt（n=2¹⁵、r=8、p=1）派生的 256 位密钥加分块 AES-GCM（每块 1 MiB、逐块认证）。设计见 [ADR-0076](adr/0076-encrypted-backup-export.md)。
 
 只导入自己控制来源的完整备份。文件摘要用于核对归档内容，不是生成者的数字签名；归档包含原生数据库，不能把来历不明的数据库或第三方归档作为可信恢复来源。
 
