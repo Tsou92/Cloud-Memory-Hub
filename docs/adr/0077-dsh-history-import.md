@@ -23,7 +23,7 @@ zstd 压缩的 JSONL，事件带 `type`、`seq`、`time` 和 `data`。上游 `Js
   - `assistant/message`：`text` 内容作为 assistant 行；`tool-call` 块作为同一记录的 tool 行；`reasoning` 不导入。
   - `tool/result`：`tool-result` 内的 text 内容作为 tool 行，保留 `callId`。
   - `system/message`、`turn/start`、`turn/end`、`agent/inbox/spliced`、`tool/call`（与 assistant 记录重复）等不生成行。
-- 工具证据沿用上游裁剪与凭证清理，并额外去掉终端控制字节（保留换行和制表符），避免真实会话的 ANSI 输出触发隐私过滤的 `hidden_control_character` 而中止整批。
+- 工具证据沿用上游裁剪与凭证清理，并额外去掉终端控制/格式字节（保留换行和制表符）、把 URL 替换为 `[url]`。真实终端输出常含 ANSI 控制符和查询值像不完整 JSON 的链接，隐私过滤器会分别以 `hidden_control_character`／`invalid_json` 中止整批；工具证据是上下文而非主记忆，因此做上述收敛，用户/助手文本仍保留 URL 走正常过滤。
 - 含图片／附件等不支持媒体时保持 fail-closed；启用 `media_text_extraction` 后只对支持的 PDF 文本层/文本附件走 ADR-0075 的本地抽取。
 
 ## 兼容与边界
