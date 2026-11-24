@@ -1150,8 +1150,11 @@ class ClientTests(unittest.TestCase):
         project = self.home / "agy workspace"
         project.mkdir()
         executable = self.home / "stable runtime/cloud-memory-setup"
+        real_run = client.subprocess.run
 
         def run(command, **options):
+            if command[0] != str(executable):
+                return real_run(command, **options)
             if command[-1] == "--help":
                 return client.subprocess.CompletedProcess(command, 0, stdout=b"")
             self.assertEqual(
