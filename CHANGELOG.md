@@ -4,6 +4,13 @@
 
 2026-11-10 历史维护说明：隐私清理重新生成了 0.1.0～0.1.2 的提交与标签，旧 0.1.2 发行附件已撤回。以下旧版条目保留当时的开发与验收过程；旧提交编号和构建证明不能用于认证重写后的历史对象。
 
+## 0.1.17
+
+- 新增 T3 Code 接入支持（ADR-0078、ADR-0079）：
+  - 一键连接与项目钩子新增 `T3 Code (Antigravity)`（`--agent t3-code` / `--agent antigravity`），新增 `antigravity-hook` 对接 `PreInvocation` 与 `Stop`（支持 `transcriptPath` 与 `transcript_full.jsonl` 截断回溯），写入 `~/.gemini/config/mcp_config.json`（仅含 stdio 代理、不含明文凭证）、`SKILL.md` 及项目 `.agents/hooks.json`，实现跨端自动召回注入与会话接续。
+  - 本地来源采集新增 `t3-code` 适配器，以只读 WAL 模式读取 `~/.t3/userdata/statev2.sqlite` 与 `-wal`，统一覆盖 T3 Code 内多 Provider（Codex、Claude Code、Antigravity 等）以及 Local / git worktree 线程，并按绑定工作区隔离过滤；`capture-init --from-now` 支持锚定当前最新已提交水位，在不回扫旧历史的前提下直接开启后续增量实时采集。
+  - 管理后台配对页与安装/采集文档同步补充 T3 Code 及 `t3-code` 接入说明；`.gitignore` 默认忽略工作区本地 `.agents/hooks.json`。
+
 ## 0.1.16
 
 - 修复登录页与初始化页面的品牌图标和 favicon 在未登录时被重定向到登录页的问题：公开静态资源 `/favicon.svg` 与 `/brand-icon.svg` 在认证前放行。
