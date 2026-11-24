@@ -8,6 +8,7 @@ credentials/
 secrets/
 .codex/
 .claude/settings.local.json
+.agents/hooks.json
 
 # User data must never become source code
 data/
