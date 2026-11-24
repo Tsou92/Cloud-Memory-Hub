@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory=$true)][string]$Link,
     [Parameter(Mandatory=$true)][ValidateSet('claude','codex','opencode','hermes','antigravity','t3-code','generic')][string]$Agent
 )
