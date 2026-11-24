@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)][string]$Link,
-    [Parameter(Mandatory=$true)][ValidateSet('claude','codex','opencode','hermes','generic')][string]$Agent
+    [Parameter(Mandatory=$true)][ValidateSet('claude','codex','opencode','hermes','antigravity','t3-code','generic')][string]$Agent
 )
 $ErrorActionPreference = 'Stop'
 $cmhOrigin = __CMH_ORIGIN_POWERSHELL__

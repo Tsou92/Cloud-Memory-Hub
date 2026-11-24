@@ -81,6 +81,7 @@ class CaptureStore:
         self.binding_digest = binding_digest
         self.root_identity = root_identity
         self.changed_times = {}
+        self.wal_states = {}
         self.marker = f"cmh-capture-v1:{outbox.instance_id}:{outbox.device_id}".encode()
         with outbox._connection(writing=initialize) as db:
             exists = db.execute(
@@ -176,20 +177,30 @@ class CaptureStore:
                     changed_ns = payload["changed_ns"]
                     if type(changed_ns) is not int or changed_ns < 0:
                         raise ValueError()
+                    wal_stat = payload.get("wal_stat")
+                    if wal_stat is not None and (
+                        type(wal_stat) is not list
+                        or len(wal_stat) != 5
+                        or any(type(item) is not int or item < 0 for item in wal_stat)
+                    ):
+                        raise ValueError()
                 except (ValueError, KeyError, TypeError, ValidationError):
                     raise CaptureError("capture_state_corrupted") from None
                 result[cursor.file_key] = cursor
                 self.changed_times[cursor.file_key] = changed_ns
+                self.wal_states[cursor.file_key] = tuple(wal_stat) if wal_stat is not None else None
         return result
 
     def _save_cursor(self, db, cursor):
-        payload = json.dumps(
-            {
-                "source_id": self.source_id,
-                "cursor": cursor.model_dump(mode="json"),
-                "changed_ns": self.changed_times[cursor.file_key],
-            }
-        ).encode()
+        body = {
+            "source_id": self.source_id,
+            "cursor": cursor.model_dump(mode="json"),
+            "changed_ns": self.changed_times[cursor.file_key],
+        }
+        wal_stat = self.wal_states.get(cursor.file_key)
+        if wal_stat is not None:
+            body["wal_stat"] = list(wal_stat)
+        payload = json.dumps(body).encode()
         db.execute(
             "INSERT INTO capture_cursors VALUES (?,?,?) ON CONFLICT(source_id,file_key) "
             "DO UPDATE SET sealed=excluded.sealed",

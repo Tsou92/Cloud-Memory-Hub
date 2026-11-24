@@ -130,7 +130,16 @@ async def _recall(service, text, conversation_id):
     )
 
 
-async def process_message(service, message, *, adapter="claude-code"):
+async def process_message(
+    service,
+    message,
+    *,
+    adapter="claude-code",
+    recall_event="UserPromptSubmit",
+    context_output=output_context,
+    failure_output=failure,
+    silent_output=SILENT,
+):
     event, role, text, native_session, native_prompt = message
     binding = (
         service.connection.instance_id,
@@ -152,31 +161,31 @@ async def process_message(service, message, *, adapter="claude-code"):
         "recall": "not_requested",
         "processing_state": "not_checked",
     }
-    output = SILENT
+    output = silent_output
     try:
         async with asyncio.timeout(HOOK_NETWORK_DEADLINE):
             delivery_error = await service._deliver()
             if delivery_error is not None:
                 status["capture_error"] = delivery_error.code
-            if event == "UserPromptSubmit":
+            if event == recall_event:
                 try:
                     context = await _recall(service, text, arguments["session_id"])
-                    output = output_context(context.text)
+                    output = context_output(context.text)
                     status.update(
                         recall=context.state, records=context.records, truncated=context.truncated
                     )
                 except AgentAccessError as error:
-                    output, recall_status = failure(error.code, denied=error.code in DENIED)
+                    output, recall_status = failure_output(error.code, denied=error.code in DENIED)
                     status.update(recall=recall_status["state"], recall_error=error.code)
     except TimeoutError:
         status["delivery_error"] = "hook_network_deadline_exceeded"
-        if event == "UserPromptSubmit":
-            output, _ = failure("hook_network_deadline_exceeded")
+        if event == recall_event:
+            output, _ = failure_output("hook_network_deadline_exceeded")
             status.update(recall="unavailable", recall_error="hook_network_deadline_exceeded")
     except Exception:
         status["delivery_error"] = "hook_network_unavailable"
-        if event == "UserPromptSubmit":
-            output, _ = failure("hook_network_unavailable")
+        if event == recall_event:
+            output, _ = failure_output("hook_network_unavailable")
             status.update(recall="unavailable", recall_error="hook_network_unavailable")
     # Local receipt lookup also runs after cancellation; a queued write stays visible.
     saved = await service.capture_message(**arguments)

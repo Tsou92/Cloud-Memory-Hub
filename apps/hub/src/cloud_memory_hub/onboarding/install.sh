@@ -35,12 +35,17 @@ for cmh_arg in "$@"; do
   esac
 done
 cmh_auto=0
+cmh_persist_python=0
 cmh_minimum_check='import sys; raise SystemExit(sys.version_info < (3, 11))'
 cmh_version_check=$cmh_minimum_check
 case "$cmh_platform:$cmh_agent:$cmh_has_workspace:$cmh_client_release" in
-  Darwin-arm64:claude:1:v[0-9]*|Darwin-arm64:codex:1:v[0-9]*)
+  Darwin-arm64:claude:1:v[0-9]*|Darwin-arm64:codex:1:v[0-9]*|Darwin-arm64:antigravity:1:v[0-9]*|Darwin-arm64:t3-code:1:v[0-9]*)
     cmh_auto=1
+    cmh_persist_python=1
     cmh_version_check='import sys; raise SystemExit(sys.version_info[:2] != (3, 12))'
+    ;;
+  Darwin-arm64:antigravity:*:*|Darwin-arm64:t3-code:*:*)
+    cmh_persist_python=1
     ;;
 esac
 cmh_python=''
@@ -80,7 +85,7 @@ else
   fi
   tar -xzf "$cmh_temp/uv.tar.gz" -C "$cmh_temp" "uv-$cmh_target/uv"
   cmh_python_home="$cmh_temp/python"
-  if [ "$cmh_auto" -eq 1 ] && [ -n "${HOME:-}" ]; then
+  if [ "$cmh_persist_python" -eq 1 ] && [ -n "${HOME:-}" ]; then
     cmh_private_root="$HOME/Library/Application Support/CloudMemoryHub"
     cmh_safe=1
     cmh_uid=$(id -u)

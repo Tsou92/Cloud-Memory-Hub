@@ -474,7 +474,8 @@ def show_client_result(result, agent):
         print("MCP、Skill 和项目钩子已安装。请在 Codex 的 Review hooks 信任本项目两条钩子。")
         print("确认后在同一项目正常聊天即可自动共享和接续。")
         return 3
-    print("MCP、Skill 和项目钩子已安装。请在这个目录打开 Claude Code，正常聊天即可。")
+    host_name = "T3 Code / Antigravity" if agent in {"antigravity", "t3-code"} else "Claude Code"
+    print(f"MCP、Skill 和项目钩子已安装。请在这个目录打开 {host_name}，正常聊天即可。")
     return 0
 
 
@@ -490,7 +491,8 @@ def main(argv=None):
     parser.add_argument("--ssh-port", type=int, help="SSH 端口，默认沿用本机 SSH 配置")
     installation = parser.add_mutually_exclusive_group()
     installation.add_argument(
-        "--agent", choices=("claude", "codex", "opencode", "hermes", "generic")
+        "--agent",
+        choices=("claude", "codex", "opencode", "hermes", "antigravity", "t3-code", "generic"),
     )
     installation.add_argument("--nas-only", action="store_true", help="只部署 NAS，随后从后台配对")
     parser.add_argument("--open-admin", action="store_true", help="打开已安装 Hub 的管理员入口")

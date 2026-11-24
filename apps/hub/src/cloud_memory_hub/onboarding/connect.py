@@ -41,6 +41,7 @@ CLIENT_ASSET_HOSTS = {
 }
 CLIENT_COMPRESSED_LIMIT = 128 * 1024 * 1024
 CLIENT_EXPANDED_LIMIT = 512 * 1024 * 1024
+AGENT_ALIASES = {"t3-code": "antigravity"}
 TOOL_NAMES = {
     "memory_status",
     "memory_recent",
@@ -739,6 +740,9 @@ def paths_for(agent, home, env):
         )
         directory = Path(env.get("HERMES_HOME", str(default))).expanduser()
         return directory / "config.yaml", directory / "skills"
+    if agent == "antigravity":
+        directory = home / ".gemini/config"
+        return directory / "mcp_config.json", directory / "skills"
     return None, None
 
 
@@ -991,11 +995,30 @@ class Installation:
         self.save()
 
 
+def stable_python():
+    try:
+        executable = Path(sys.executable).absolute()
+        resolved = executable.resolve(strict=True)
+        temporary = (Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve())
+        if (
+            sys.version_info < (3, 11)
+            or any(executable.is_relative_to(root) for root in temporary)
+            or any(resolved.is_relative_to(root) for root in temporary)
+            or not resolved.is_file()
+            or not os.access(resolved, os.X_OK)
+        ):
+            fail("automation_runtime_unavailable")
+        return executable
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        fail("automation_runtime_unavailable")
+
+
 def configure(installation, agent, home, env, bundle, token):
     name = "cloud_memory_hub_" + bundle["source_id"].replace("-", "")[:16]
     url = bundle["origin"] + "/hub/v1/mcp/" + bundle["source_id"]
     directory = installation.directory
     header_path = directory / "authorization.header"
+    bridge_path = directory / "mcp-bridge.py"
     config, skills = paths_for(agent, home, env)
     if agent == "generic":
         config, skills = directory / "mcp.json", directory / "skills"
@@ -1005,11 +1028,28 @@ def configure(installation, agent, home, env, bundle, token):
         expected_targets.add(header_path)
     if agent == "hermes":
         expected_targets.add(config.parent / ".env")
+    if agent == "antigravity":
+        expected_targets.add(bridge_path)
     if agent not in installation.state.get("plans", {}):
         raw = read_file(config)
         entry = {"type": "http", "url": url, "headers": {"Authorization": "Bearer " + token}}
         files = []
-        if agent in {"claude", "generic"}:
+        if agent == "antigravity":
+            script_path = Path(__file__).absolute()
+            if script_path.is_symlink() or not script_path.is_file():
+                fail("automation_runtime_unavailable")
+            bridge_bytes = script_path.read_bytes()
+            if len(bridge_bytes) > MAX_BYTES:
+                fail("file_too_large")
+            if read_file(bridge_path) is not None:
+                fail("managed_configuration_conflict")
+            entry = {
+                "command": str(stable_python()),
+                "args": ["-I", str(bridge_path), "mcp-stdio", "--state-dir", str(directory)],
+            }
+            files.append((bridge_path, bridge_bytes, None))
+            proposed = insert_json_server(raw, ("mcpServers",), name, entry)
+        elif agent in {"claude", "generic"}:
             proposed = insert_json_server(raw, ("mcpServers",), name, entry)
         elif agent == "codex":
             proposed = codex_config(raw, name, url, token)
@@ -1330,7 +1370,7 @@ def configure_automation(
     managed_workspace=False,
     release_assets=None,
 ):
-    if agent not in {"claude", "codex"}:
+    if agent not in {"claude", "codex", "antigravity"}:
         return {"status": "unsupported_agent"}
     if workspace is None and not managed_workspace:
         return {"status": "automation_workspace_required"}
@@ -1411,6 +1451,7 @@ def connect(
     expected_scope_id=None,
     release_assets=None,
 ):
+    agent = AGENT_ALIASES.get(agent, agent)
     if managed_workspace and workspace is not None:
         fail("automation_workspace_conflict")
     origin, pairing_id, invitation = parse_link(link)
@@ -1432,6 +1473,7 @@ def connect(
                 "pairing_id": pairing_id,
                 "invitation_sha256": digest(invitation.encode()),
                 "claimant_secret": secrets.token_urlsafe(32),
+                "network": network,
                 "plans": {},
             }
             installation = Installation(directory, state)
@@ -1449,6 +1491,9 @@ def connect(
                 or not isinstance(state.get("plans"), dict)
             ):
                 fail("pending_state_invalid")
+            network_changed = state.get("network") != network
+            if network_changed:
+                state["network"] = network
             installation = Installation(directory, state)
         remote = (
             remote_factory(origin)
@@ -1466,6 +1511,8 @@ def connect(
                 "network": network_status,
                 "private_state": str(directory),
             }
+        if pending is not None and network_changed:
+            installation.save()
         if "bundle" not in state:
             value = remote.request(
                 "/hub/v1/pairings/claim",
@@ -1681,11 +1728,103 @@ def write_connection_status(agent, result=None, *, error=None):
     print(json.dumps(status, sort_keys=True))
 
 
+def run_mcp_stdio(argv):
+    parser = argparse.ArgumentParser(prog="cloud-memory-connect mcp-stdio")
+    parser.add_argument("--state-dir", type=Path, required=True)
+    args = parser.parse_args(argv)
+    if sys.version_info < (3, 11):  # noqa: UP036 - downloaded standalone script
+        fail("python_311_required")
+    state_dir = checked_path(args.state_dir)
+    check_private(state_dir)
+    raw = read_file(state_dir / "pending.json", private=True)
+    if raw is None:
+        fail("pending_state_invalid")
+    state = parse_json(raw)
+    if (
+        not isinstance(state, dict)
+        or state.get("schema_version") != 1
+        or not isinstance(state.get("origin"), str)
+        or not isinstance(state.get("claimant_secret"), str)
+        or not SECRET.fullmatch(state["claimant_secret"])
+        or "bundle" not in state
+    ):
+        fail("pending_state_invalid")
+    origin = valid_origin(state["origin"])
+    bundle = validate_bundle(state["bundle"], origin)
+    token = "cmhdev_v1_" + bundle["device_id"] + "_" + state["claimant_secret"]
+    network = state.get("network", "auto")
+    if network not in {"auto", "environment", "direct"}:
+        network = "auto"
+    mcp_path = "/hub/v1/mcp/" + bundle["source_id"]
+    remote = None
+
+    def write_line(payload):
+        sys.stdout.buffer.write(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+        )
+        sys.stdout.buffer.flush()
+
+    while line := sys.stdin.buffer.readline(MAX_BYTES + 1):
+        if len(line) > MAX_BYTES:
+            write_line(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "file_too_large"},
+                }
+            )
+            continue
+        if not line.strip():
+            continue
+        try:
+            message = parse_json(line)
+        except ConnectError as error:
+            write_line(
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(error)}}
+            )
+            continue
+        if not isinstance(message, dict):
+            write_line(
+                {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid_json"}}
+            )
+            continue
+        req_id = message.get("id")
+        is_notification = "id" not in message or req_id is None
+        try:
+            if remote is None:
+                candidate = Remote(origin, network=network)
+                if candidate.network_status["action_required"]:
+                    fail("network_action_required")
+                remote = candidate
+            reply = remote.request(
+                mcp_path, payload=message, token=token, notification=is_notification
+            )
+            if not is_notification:
+                write_line(reply)
+        except ConnectError as error:
+            if not is_notification:
+                write_line(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32000, "message": str(error)},
+                    }
+                )
+    return 0
+
+
 def main(argv=None):
     # Downloaded scripts may run under a Windows console or a captured Agent pipe.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    if args_list[:1] == ["mcp-stdio"]:
+        try:
+            return run_mcp_stdio(args_list[1:])
+        except ConnectError as error:
+            print(str(error), file=sys.stderr)
+            return 1
     parser = argparse.ArgumentParser(
         description="将当前 Agent 连接至 Cloud Memory Hub；不安装本地记忆核心。"
     )
@@ -1694,7 +1833,9 @@ def main(argv=None):
     source.add_argument("--link-stdin", action="store_true", help="从管道读取一条私有连接链接")
     parser.add_argument("--json-status", action="store_true", help="只输出不含凭证的 JSON 状态")
     parser.add_argument(
-        "--agent", choices=("claude", "codex", "opencode", "hermes", "generic"), required=True
+        "--agent",
+        choices=("claude", "codex", "opencode", "hermes", "antigravity", "t3-code", "generic"),
+        required=True,
     )
     parser.add_argument("--home", type=Path, help="隔离安装根目录（测试或显式独立配置用）")
     workspace = parser.add_mutually_exclusive_group()
@@ -1708,7 +1849,8 @@ def main(argv=None):
         default="auto",
         help="Hub 网络路径；固定在无凭证健康检查选中的线路，不在写入结果未知后换线重放",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_list)
+    normalized_agent = AGENT_ALIASES.get(args.agent, args.agent)
     try:
         if sys.version_info < (3, 11):  # noqa: UP036 - downloaded standalone script
             fail("python_311_required")
@@ -1724,7 +1866,7 @@ def main(argv=None):
         )
     except ConnectError as error:
         if args.json_status:
-            write_connection_status(args.agent, error=str(error))
+            write_connection_status(normalized_agent, error=str(error))
             return 2 if str(error) == "network_action_required" else 1
         print(f"连接未完成（{error}）。" + recovery_message(str(error)), file=sys.stderr)
         show_recovery_directory(args)
@@ -1735,13 +1877,13 @@ def main(argv=None):
         }:
             try:
                 origin, _, _ = parse_link(args.link)
-                print(network_guidance(origin, args.agent), file=sys.stderr)
+                print(network_guidance(origin, normalized_agent), file=sys.stderr)
             except ConnectError:
                 pass
         return 1
     except (OSError, ValueError, TypeError, KeyError):
         if args.json_status:
-            write_connection_status(args.agent, error="local_state_unavailable")
+            write_connection_status(normalized_agent, error="local_state_unavailable")
             return 1
         print(
             "连接未完成（local_state_unavailable）。保留现场后重试，不要删除配对进度。",
@@ -1751,19 +1893,19 @@ def main(argv=None):
     automation = result.get("automation", {})
     automation_incomplete = (
         args.managed_workspace
-        and args.agent in {"claude", "codex"}
+        and normalized_agent in {"claude", "codex", "antigravity"}
         and automation.get("status") != "configured"
     )
     if args.json_status:
-        write_connection_status(args.agent, result)
+        write_connection_status(normalized_agent, result)
         if result.get("status") == "network_action_required":
             return 2
         return 3 if automation_incomplete else 0
     if result.get("status") == "network_action_required":
         origin, _, _ = parse_link(args.link)
-        print(network_guidance(origin, args.agent), file=sys.stderr)
+        print(network_guidance(origin, normalized_agent), file=sys.stderr)
         return 2
-    if args.agent == "generic":
+    if normalized_agent == "generic":
         print("远程 MCP 及身份验证通过，已生成通用配置；仍需将它添加到对应 Agent。")
     else:
         print(f"远程 MCP 及身份验证通过，已配置 {result['agent']} 的连接 {result['server']}。")
@@ -1774,7 +1916,7 @@ def main(argv=None):
             print("请在 Codex 首次审查并信任当前项目的 Cloud Memory Hub 钩子。")
         if automation["background_delivery"] == "unavailable":
             print("后台补传服务暂不可用，已配置的钩子仍会在对话时运行。")
-    elif args.agent in {"claude", "codex"}:
+    elif normalized_agent in {"claude", "codex", "antigravity"}:
         guidance = {
             "automation_workspace_required": "请在要共享的项目目录重试同一链接。",
             "automation_runtime_unavailable": "当前没有可用的配套自动采集客户端。",
@@ -1788,7 +1930,7 @@ def main(argv=None):
             + guidance.get(automation.get("status"), "请检查项目钩子与客户端状态后重试同一链接。")
         )
     print("请重新连接 MCP 或重启该 Agent，让当前会话加载新连接与 Skill。尚未验证宿主实际调用。")
-    if args.agent == "generic":
+    if normalized_agent == "generic":
         print("通用 MCP 配置保存在私有目录：" + result["private_state"])
     return 3 if automation_incomplete else 0
 

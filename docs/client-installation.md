@@ -6,12 +6,15 @@ Cloud Memory Hub 主体运行在 NAS Docker。电脑只需为已有的 AI 应用
 
 使用 Clash、Shadowrocket 或终端代理时，参阅[代理与网络连接指南](proxy-and-network.md)。安装器的网络检查与 Agent 实际连接是两个阶段；需要调整白名单或重新启动宿主时，应先完成提示再验证 MCP。
 
-支持[自动会话接续](adr/0069-automatic-session-handoff.md)的版本，会为 Apple Silicon Mac 上的 Claude Code CLI 和 Codex 准备项目钩子。DeepSeek Harness 没有 shell 钩子，改用随仓库提供的 DSH 插件转发同样的事件，见下方「DeepSeek Harness 自动采集」。安装器默认在本机的 `Cloud Memory Hub Projects` 中准备专用目录，也可以绑定你明确选定的已有项目。
+支持[自动会话接续](adr/0069-automatic-session-handoff.md)的版本，会为 Apple Silicon Mac 上的 Claude Code CLI、Codex 和 T3 Code（Antigravity）准备项目钩子；具体设计见 [ADR-0078](adr/0078-t3code-antigravity-capture.md)。DeepSeek Harness 没有 shell 钩子，改用随仓库提供的 DSH 插件转发同样的事件，见下方「DeepSeek Harness 自动采集」。安装器默认在本机的 `Cloud Memory Hub Projects` 中准备专用目录，也可以绑定你明确选定的已有项目。
 
 默认流程对应 [ADR-0065](adr/0065-one-link-remote-agent-onboarding.md)。正式支持的系统、实际验证的宿主及自动触发边界以发行说明和[接入验证](reviews/2026-11-10-one-link-onboarding.md)为准；接口通用不等于所有 Agent 都已实测。
 
 1. 在 NAS 管理网页创建或选择项目，进入「设备与接入」点击「一键接入新设备」。项目就是要共享的事情，例如“工作计划”；另一台设备要继续同一件事，也选择这个项目。
 2. 填写易区分的设备名称，选择使用的 Agent，生成连接链接。链接有效期 10 分钟，每个链接只能首次配对一台设备。
+   - 在 T3 Code 中使用 **Claude** 或 **Codex** 线程时，选择 `Claude Code` 或 `Codex`；使用 **Antigravity** 线程（或独立 Antigravity 2.0 / CLI）时，选择 `T3 Code (Antigravity)`（命令行参数 `--agent antigravity` 或 `--agent t3-code`）。
+   - 若在 T3 Code 中频繁切换多种 Provider 或启用独立 git worktree，可通过 [本地来源采集](source-capture.md) 使用 `adapter_id = "t3-code"` 配合 `cloud-memory-connector collect` / `collect-watch` 统一对 `~/.t3/userdata/statev2.sqlite` 执行跨 Provider 历史导入与增量自动采集（同时按主项目 `workspace_root` 归集 worktree 线程，详见 [ADR-0079](adr/0079-t3code-unified-source-capture.md)）。
+   - 若未启用统一采集而仅使用逐轮 Hook：在 T3 Code 中启用独立 git worktree 时，工作路径会偏离主仓库绑定的 `--workspace`，自动钩子不会跨 worktree 采集，请改用通用 MCP / Skill 显式读写或按需为该工作区单独绑定。
 3. 在要连接的电脑上，把页面生成的一句话交给 Agent，或运行页面给出的命令。要沿用已有本地项目时，先在 Agent 中打开该目录再发话术，或用 `--workspace` 指定目录。安装器保留其他配置，添加 MCP、Skill 和当前设备支持的自动化，无需管理员权限。
 4. 按安装结果重新加载 MCP。结果显示共享目录时，在 Agent 中打开该目录并开始新对话。Codex 首次使用时按界面提示审查并信任已安装的项目钩子。
 5. 自动化已配置后，在 A 端正常讨论一个合成项目任务，再在同项目的 B 端继续工作。B 的下一轮应先收到接续摘要，细节可按需读取会话 Markdown。长期记忆由 NAS 上已启用的模型自动整理；即使这次没有新增长期记忆，会话仍能接续。

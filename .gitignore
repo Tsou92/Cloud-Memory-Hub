@@ -8,6 +8,8 @@ credentials/
 secrets/
 .codex/
 .claude/settings.local.json
+.agents/hooks.json
+商用路线.md
 
 # User data must never become source code
 data/

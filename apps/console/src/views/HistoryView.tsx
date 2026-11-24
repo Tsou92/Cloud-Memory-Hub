@@ -310,8 +310,9 @@ export function HistoryView({ project }: { project: HubProject }) {
             <li>
               在「设备与接入」为目标电脑登记一个{" "}
               <code className="cmh-mono">claude-code</code>、{" "}
-              <code className="cmh-mono">codex</code> 或{" "}
-              <code className="cmh-mono">deepseek-harness</code> 来源，记录来源 UUID 与当前项目 UUID（
+              <code className="cmh-mono">codex</code>、{" "}
+              <code className="cmh-mono">deepseek-harness</code> 或{" "}
+              <code className="cmh-mono">t3-code</code> 来源，记录来源 UUID 与当前项目 UUID（
               <code className="cmh-mono">{scope}</code>）。
             </li>
             <li>

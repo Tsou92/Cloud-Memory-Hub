@@ -203,7 +203,12 @@ async def import_bundle(bundle, *, client_root=None, transport=None):
     return {"status": "installed", "config_file": str(target / "agent.json")}
 
 
-_HOOK_TARGETS = {"claude": ".claude/settings.local.json", "codex": ".codex/hooks.json"}
+_HOOK_TARGETS = {
+    "claude": ".claude/settings.local.json",
+    "codex": ".codex/hooks.json",
+    "antigravity": ".agents/hooks.json",
+}
+_AGENT_ALIASES = {"t3-code": "antigravity"}
 # DeepSeek Harness has no shell hooks. packages/dsh-plugin reads this home-relative
 # binding list and forwards its turn events to the same `dsh-hook` command.
 DSH_BINDINGS = ".cloud-memory-hub/dsh-capture.json"
@@ -220,8 +225,54 @@ def _managed_hook_command(value):
         parts
         and Path(parts[0]).name == "cloud-memory-agent"
         and "--config-file" in parts
-        and ("claude-hook" in parts or "codex-hook" in parts)
+        and ("claude-hook" in parts or "codex-hook" in parts or "antigravity-hook" in parts)
     )
+
+
+def _merge_antigravity_hooks(raw, command):
+    document = json_config(raw)
+    for hook_name, spec in document.items():
+        if not isinstance(spec, dict):
+            raise ClientSetupError("automation_configuration_conflict")
+        for event in ("SessionStart", "PreInvocation", "PostInvocation", "Stop"):
+            handlers = spec.get(event)
+            if handlers is None:
+                continue
+            if not isinstance(handlers, list):
+                raise ClientSetupError("automation_configuration_conflict")
+            for handler in handlers:
+                if not isinstance(handler, dict):
+                    raise ClientSetupError("automation_configuration_conflict")
+                value = handler.get("command")
+                if _managed_hook_command(value) and (
+                    hook_name != "cloud-memory-hub"
+                    or event not in {"PreInvocation", "Stop"}
+                    or value != command
+                    or handler.get("type", "command") != "command"
+                ):
+                    raise ClientSetupError("automation_configuration_conflict")
+    entry = document.get("cloud-memory-hub")
+    if entry is None:
+        entry = {}
+        document["cloud-memory-hub"] = entry
+    changed = False
+    for event in ("PreInvocation", "Stop"):
+        handlers = entry.setdefault(event, [])
+        if not isinstance(handlers, list):
+            raise ClientSetupError("automation_configuration_conflict")
+        matching = sum(
+            1
+            for handler in handlers
+            if isinstance(handler, dict)
+            and handler.get("command") == command
+            and handler.get("type", "command") == "command"
+        )
+        if matching > 1:
+            raise ClientSetupError("automation_configuration_conflict")
+        if not matching:
+            handlers.append({"type": "command", "command": command, "timeout": 12})
+            changed = True
+    return json_bytes(document) if changed else raw
 
 
 def _merge_automation_hooks(raw, command):
@@ -285,6 +336,7 @@ def _automation_agent_executable():
 
 def install_automation(config_file, *, agent, workspace, home=None, executable=None):
     """Install the selected project's native hooks using its existing local queue."""
+    agent = _AGENT_ALIASES.get(agent, agent)
     if agent not in _HOOK_TARGETS and agent != "dsh":
         raise ClientSetupError("automation_agent_unsupported")
     home = Path(home or Path.home()).absolute()
@@ -335,6 +387,8 @@ def install_automation(config_file, *, agent, workspace, home=None, executable=N
                 proposed = (
                     _merge_dsh_binding(original, project, argv)
                     if agent == "dsh"
+                    else _merge_antigravity_hooks(original, invocation)
+                    if agent == "antigravity"
                     else _merge_automation_hooks(original, invocation)
                 )
                 installation.plan(agent, [(target, proposed, original)])

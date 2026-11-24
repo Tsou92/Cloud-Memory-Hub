@@ -1,5 +1,7 @@
 # 验证计划与需求追踪
 
+2026-11-24 T3 Code / Antigravity 适配（FR-01、FR-02、FR-03、FR-05、FR-07、FR-12、ENG-01）：新增 `antigravity` 适配器（别名 `t3-code`），覆盖 `antigravity-hook`（`PreInvocation` 召回注入与工具循环防重、`Stop` 安全读取当前轮 `transcript.jsonl`/`transcript_full.jsonl` 最终回复）、`client_setup` 合并 `.agents/hooks.json`、`connect.py` 写入 `~/.gemini/config/mcp_config.json` 与 `~/.gemini/config/skills/` 并提供无凭证 `mcp-stdio` 桥接，以及控制台/引导页 `T3 Code (Antigravity)` 入口；同日补充 `t3-code` 统一线程采集器（[source_capture](adr/0079-t3code-unified-source-capture.md)），覆盖 `~/.t3/userdata/statev2.sqlite` + `-wal` 的跨 Provider（`codex`/`claudeAgent`/`antigravity`）与 worktree 历史导入和流式增量采集。真实 T3 Code 客户端多轮实测另列待验，见 [ADR-0078](adr/0078-t3code-antigravity-capture.md) 与 [ADR-0079](adr/0079-t3code-unified-source-capture.md)。
+
 2026-11-19 DSH 历史导入（FR-08、FR-14、FR-15）：新增 `deepseek-harness` 来源，读取 `~/.dsh/sessions/<编码 cwd>/session-*/session.v3.jsonl.zstd`；按会话头 `cwd` 绑定项目、`id` 作为会话，映射 `user/message`、`assistant/message`（文本 + 工具调用）与 `tool/result`，跳过插件消息、推理和未知事件。zstd 流按解压后的记录序号续读；含图片等不支持媒体的会话保持 fail-closed。见 [ADR-0077](adr/0077-dsh-history-import.md)。
 
 2026-11-19 备份导出加密（FR-11、FR-13、ENG-01）：`backup_maintenance export` 新增可选 `--encrypt`，使用 scrypt + 分块 AES-256-GCM 生成认证加密的 `.cmh.tar.enc`；`inspect`／`import`／`restore` 自动识别并要求同一口令。内部 `/backups` 版本仍为明文。测试覆盖往返、错误口令、篡改、截断、1 MiB 块边界与真实备份导出后 `unpack_backup`。设计见 [ADR-0076](adr/0076-encrypted-backup-export.md)。

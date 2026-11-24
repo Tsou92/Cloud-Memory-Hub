@@ -435,7 +435,7 @@ wheels = [
 
 [[package]]
 name = "cloud-memory-hub"
-version = "0.1.16"
+version = "0.1.17"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

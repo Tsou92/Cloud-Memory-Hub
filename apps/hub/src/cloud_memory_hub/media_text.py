@@ -28,6 +28,14 @@ class MediaTextError(Exception):
         super().__init__(code)
 
 
+def _clean_name(value):
+    name = value.strip().replace("\r", " ").replace("\n", " ")
+    name = "".join(ch for ch in name if ord(ch) >= 32 and ord(ch) != 127)
+    # Keep the basename; local directory layout is not shared.
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    return name[:MAX_FILENAME_CHARS] or "attachment"
+
+
 def _filename(block, source):
     for value in (
         block.get("title"),
@@ -36,11 +44,7 @@ def _filename(block, source):
         source.get("name"),
     ):
         if isinstance(value, str) and value.strip():
-            name = value.strip().replace("\r", " ").replace("\n", " ")
-            name = "".join(ch for ch in name if ord(ch) >= 32 and ord(ch) != 127)
-            # Keep the basename; local directory layout is not shared.
-            name = name.replace("\\", "/").rsplit("/", 1)[-1]
-            return name[:MAX_FILENAME_CHARS] or "attachment"
+            return _clean_name(value)
     return "attachment"
 
 
@@ -90,6 +94,51 @@ def _pdf_text(raw):
     return text, pages, f"pypdf/{pypdf.__version__}"
 
 
+def _format_document(raw, *, name, media_type, pages, extractor, text):
+    if len(text) > MAX_EXTRACTED_CHARS:
+        raise MediaTextError("media_text_too_large")
+    digest = hashlib.sha256(raw).hexdigest()
+    clean = _clean_name(name) if isinstance(name, str) and name.strip() else "attachment"
+    header = (
+        f"[附件 {clean} | {media_type} | {pages} 页 | "
+        f"{len(raw)} bytes | sha256:{digest[:16]} | {extractor}]"
+    )
+    return header + "\n" + text.strip()
+
+
+def extract_raw_document(raw, *, name=None, media_type=None):
+    """Extract formatted derived text from already-read local document bytes."""
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_MEDIA_BYTES:
+        raise MediaTextError("media_too_large")
+    raw = bytes(raw)
+    clean = _clean_name(name) if isinstance(name, str) and name.strip() else "attachment"
+    normalized_mime = (
+        media_type.split(";", 1)[0].strip().lower() if isinstance(media_type, str) else None
+    )
+    if normalized_mime == "application/pdf" or (
+        normalized_mime in {None, "application/octet-stream"} and clean.lower().endswith(".pdf")
+    ):
+        text, pages, extractor = _pdf_text(raw)
+        normalized_mime = "application/pdf"
+    else:
+        normalized_mime = _text_media_type(media_type, clean)
+        if normalized_mime is None:
+            raise MediaTextError("media_type_unsupported")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise MediaTextError("media_text_decode_failed") from None
+        pages, extractor = 1, "text"
+    return _format_document(
+        raw,
+        name=clean,
+        media_type=normalized_mime,
+        pages=pages,
+        extractor=extractor,
+        text=text,
+    )
+
+
 def _document_text(block):
     source = block.get("source")
     if not isinstance(source, dict):
@@ -108,33 +157,16 @@ def _document_text(block):
         normalized = _text_media_type(media_type, name)
         if normalized is None:
             raise MediaTextError("media_type_unsupported")
-        text, pages, extractor = value, 1, "text"
-        media_type = normalized
-    else:
-        raw = _decode_base64(source.get("data"))
-        media_type = (
-            media_type.split(";", 1)[0].strip().lower() if isinstance(media_type, str) else None
+        return _format_document(
+            raw,
+            name=name,
+            media_type=normalized,
+            pages=1,
+            extractor="text",
+            text=value,
         )
-        if media_type == "application/pdf":
-            text, pages, extractor = _pdf_text(raw)
-        else:
-            normalized = _text_media_type(media_type, name)
-            if normalized is None:
-                raise MediaTextError("media_type_unsupported")
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                raise MediaTextError("media_text_decode_failed") from None
-            pages, extractor = 1, "text"
-            media_type = normalized
-    if len(text) > MAX_EXTRACTED_CHARS:
-        raise MediaTextError("media_text_too_large")
-    digest = hashlib.sha256(raw).hexdigest()
-    header = (
-        f"[附件 {name} | {media_type} | {pages} 页 | "
-        f"{len(raw)} bytes | sha256:{digest[:16]} | {extractor}]"
-    )
-    return header + "\n" + text.strip()
+    raw = _decode_base64(source.get("data"))
+    return extract_raw_document(raw, name=name, media_type=media_type)
 
 
 def extract_document_text(block):

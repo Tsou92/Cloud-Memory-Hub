@@ -82,11 +82,13 @@ def test_downloads_are_bound_to_served_connector_and_configured_origin(tmp_path,
                 assert "3.12.13" in reply.text
                 assert "proxy-and-network.md" in reply.text
                 if path.endswith(".sh"):
+                    assert reply.text.startswith("#!/bin/sh\n")
                     assert "cmh_client_release=v0.1.4" in reply.text
                     assert "curl -q --fail --silent" in reply.text
                     assert "--noproxy '*'" in reply.text
                     assert "--show-error" not in reply.text
                 else:
+                    assert reply.text.startswith("param(")
                     assert "MaximumRedirection = 0" in reply.text
                     assert "$cmhRequest.Proxy = $null" in reply.text
                     assert "$cmhRequest.AllowAutoRedirect = $false" in reply.text

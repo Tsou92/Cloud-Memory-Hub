@@ -327,7 +327,8 @@ class AgentAccess(AgentOperations):
         try:
             if (
                 role not in {"user", "assistant"}
-                or adapter_id not in {"claude-code", "codex", "deepseek-harness"}
+                or adapter_id
+                not in {"claude-code", "codex", "deepseek-harness", "antigravity", "t3-code"}
                 or not isinstance(text, str)
                 or not text.strip()
                 or len(text.encode()) > MAX_CAPTURE_BYTES
