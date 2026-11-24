@@ -93,9 +93,16 @@ def main() -> int:
     parser.add_argument("--source-file", type=Path)
     parser.add_argument("--backup-file", type=Path)
     parser.add_argument("--include-global", action="store_true")
+    parser.add_argument(
+        "--from-now",
+        action="store_true",
+        help="Initialize t3-code capture at current WAL watermark without importing past history",
+    )
     args = parser.parse_args()
     if (args.command == "upgrade-outbox") != (args.backup_file is not None):
         parser.error("--backup-file is required only for upgrade-outbox")
+    if args.from_now and args.command != "capture-init":
+        parser.error("--from-now is only accepted by capture-init")
     if args.command == "claude-hook":
         return run_hook_process(args, open_configuration)
     try:
@@ -123,7 +130,11 @@ def main() -> int:
             return 0
         connection, outbox = open_outbox(args)
         if args.command == "capture-init":
-            result = initialize_capture(outbox, SourceConfiguration.from_file(args.source_file))
+            result = initialize_capture(
+                outbox,
+                SourceConfiguration.from_file(args.source_file),
+                from_now=args.from_now,
+            )
         elif args.command == "collect":
             result = asyncio.run(
                 collect_source(outbox, SourceConfiguration.from_file(args.source_file))

@@ -33,7 +33,11 @@ from one_memory.imports.adapters import (
     StorageKind,
 )
 from one_memory.imports.async_bridge import iterate_in_worker
-from one_memory.imports.discovery import SourceFileDiscoveryFailure, discovered_off_loop
+from one_memory.imports.discovery import (
+    SourceFileDiscoveryFailure,
+    discover_source_files,
+    discovered_off_loop,
+)
 from one_memory.imports.models import (
     EvidenceInput,
     EvidenceOrigin,
@@ -263,6 +267,60 @@ class T3CodeSourceAdapter:
             if stream_state.active_streaming:
                 touched = touched.model_copy(update={"read_to_end": False})
             yield ScanCursorTouch(cursor=touched)
+
+    def seed_from_now(self) -> list[tuple[AuthorizedSourceFile, SourceCursor]]:
+        """Return end-of-log watermarks for statev2 SQLite files without scanning bodies."""
+        seeded: list[tuple[AuthorizedSourceFile, SourceCursor]] = []
+        for item in discover_source_files(self.grant, suffixes=self.suffixes, max_targets=10_000):
+            if isinstance(item, SourceFileDiscoveryFailure):
+                raise CaptureError("source_scan_" + discovery_failure_code(item).value)
+            if not self.file_predicate(item):
+                continue
+            try:
+                discovered = item.admit()
+            except SourceAccessError as error:
+                if error.code in STOP_SCAN_ACCESS_CODES:
+                    raise
+                continue
+            try:
+                with open_sqlite_readonly(discovered, timeout=0.5) as connection:
+                    connection.execute("PRAGMA busy_timeout = 200")
+                    if not all(
+                        _has_columns(connection, tbl, cols) for tbl, cols in _REQUIRED_SCHEMA
+                    ):
+                        raise CaptureError("source_scan_unsupported_schema")
+                    active_streaming = bool(
+                        connection.execute(
+                            "SELECT EXISTS(SELECT 1 FROM "
+                            "orchestration_v2_projection_messages WHERE streaming != 0)"
+                        ).fetchone()[0]
+                    )
+                    latest: tuple[tuple[tuple[int, int, str], int], str, str] | None = None
+                    for row in connection.execute(
+                        "SELECT rowid AS source_rowid, message_id, updated_at "
+                        "FROM orchestration_v2_projection_messages WHERE streaming = 0"
+                    ):
+                        source_rowid = int(row["source_rowid"])
+                        updated_at = str(row["updated_at"])
+                        message_id = str(row["message_id"])
+                        key = (_timestamp_sort_key(updated_at), source_rowid)
+                        if latest is None or key > latest[0]:
+                            latest = (key, message_id, updated_at)
+            except sqlite3.Error:
+                raise CaptureError("source_scan_source_busy") from None
+            if latest is None:
+                cursor = source_cursor(discovered, "t3v2:0:", checkpoint_anchor=None)
+            else:
+                (_, max_rowid), max_message_id, max_updated_at = latest
+                cursor = source_cursor(
+                    discovered,
+                    f"t3v2:{max_rowid}:{max_updated_at}",
+                    checkpoint_anchor=_checkpoint_anchor(max_message_id, max_updated_at),
+                )
+            if active_streaming:
+                cursor = cursor.model_copy(update={"read_to_end": False})
+            seeded.append((discovered, cursor))
+        return seeded
 
     def _read_file(
         self,

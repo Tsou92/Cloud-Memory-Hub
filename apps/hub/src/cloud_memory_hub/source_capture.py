@@ -235,10 +235,40 @@ def _open_source(outbox, config, *, initialize=False):
     )
 
 
-def initialize_capture(outbox, config):
+def initialize_capture(outbox, config, *, from_now=False):
     with capture_lock(outbox):
-        _open_source(outbox, config, initialize=True)
-    return {"source_id": config.source_id, "status": "registered", "scanned": False}
+        store, adapter = _open_source(outbox, config, initialize=True)
+        if not from_now:
+            return {"source_id": config.source_id, "status": "registered", "scanned": False}
+        seed = getattr(adapter, "seed_from_now", None)
+        if seed is None:
+            raise CaptureError("from_now_unsupported")
+        existing = store.cursors()
+        seeded = 0
+        try:
+            for discovered, cursor in seed():
+                if cursor.file_key in existing:
+                    continue
+                try:
+                    changed_ns = discovered.path.stat(follow_symlinks=False).st_ctime_ns
+                except OSError:
+                    raise CaptureError("source_access_denied") from None
+                wal_state, wal_unsafe = _wal_stat(discovered.path)
+                if wal_unsafe:
+                    raise CaptureError("source_access_denied")
+                store.changed_times[cursor.file_key] = changed_ns
+                store.wal_states[cursor.file_key] = wal_state
+                store.advance(cursor)
+                seeded += 1
+        except SourceAccessError:
+            raise CaptureError("source_access_denied") from None
+    return {
+        "source_id": config.source_id,
+        "status": "registered",
+        "scanned": False,
+        "from_now": True,
+        "seeded_cursors": seeded,
+    }
 
 
 def _content(evidence, config):

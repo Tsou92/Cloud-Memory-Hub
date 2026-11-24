@@ -662,3 +662,128 @@ def test_t3_symlink_attachment_is_refused(tmp_path):
     with pytest.raises(CaptureError, match="source_access_denied"):
         asyncio.run(collect_source(outbox, config))
     assert not outbox.pending()
+
+
+def test_t3_cli_capture_init_from_now_skips_history_and_collects_new_turns(tmp_path):
+    outbox, config, _, db_path, con = _setup(tmp_path)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA wal_autocheckpoint=0")
+    try:
+        _add_project(con, "proj-1", config.workspace)
+        _add_thread(con, "th-old", "proj-1", provider="codex")
+        # Even an older image-only attachment before --from-now must not block live collection.
+        _add_message(
+            con,
+            "m-old",
+            "th-old",
+            role="user",
+            text="Old conversation before go-live.",
+            attachments=[{"id": "img-old", "type": "image", "mimeType": "image/png"}],
+            created_at="2026-11-24T01:00:01.000Z",
+        )
+        _add_message(
+            con,
+            "m-live",
+            "th-old",
+            role="assistant",
+            text="",
+            streaming=1,
+            created_at="2026-11-24T01:00:02.000Z",
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    source_file = tmp_path / "t3-source-from-now.json"
+    source_file.write_text(config.model_dump_json(), encoding="utf-8")
+    source_file.chmod(0o600)
+    common = [
+        sys.executable,
+        "-m",
+        "cloud_memory_hub.connector",
+    ]
+    init_res = subprocess.run(
+        [
+            *common,
+            "capture-init",
+            "--state-dir",
+            str(outbox.path.parent),
+            "--instance-id",
+            outbox.instance_id,
+            "--device-id",
+            outbox.device_id,
+            "--source-file",
+            str(source_file),
+            "--from-now",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    init_payload = json.loads(init_res.stdout)
+    assert init_payload["from_now"] is True
+    assert init_payload["seeded_cursors"] == 1
+
+    # Re-running capture-init --from-now does not reset an existing cursor, and collect yields 0.
+    collect_cmd = [
+        *common,
+        "collect",
+        "--state-dir",
+        str(outbox.path.parent),
+        "--instance-id",
+        outbox.instance_id,
+        "--device-id",
+        outbox.device_id,
+        "--source-file",
+        str(source_file),
+    ]
+    first_collect = json.loads(
+        subprocess.run(collect_cmd, capture_output=True, text=True, timeout=20, check=True).stdout
+    )
+    assert first_collect["queued"] == 0
+    assert not outbox.pending()
+
+    # Now finish the streaming turn and append a new prompt in WAL only.
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute("PRAGMA wal_autocheckpoint=0")
+        done_payload = json.dumps(
+            {
+                "id": "m-live",
+                "threadId": "th-old",
+                "role": "assistant",
+                "text": "Live reply completed after go-live.",
+                "streaming": False,
+                "createdAt": "2026-11-24T01:00:02.000Z",
+                "updatedAt": "2026-11-24T01:00:05.000Z",
+                "createdBy": "agent",
+                "creationSource": "provider",
+                "attachments": [],
+            }
+        )
+        con.execute(
+            "UPDATE orchestration_v2_projection_messages "
+            "SET streaming=0, updated_at=?, payload_json=?, search_text=? "
+            "WHERE message_id='m-live'",
+            ("2026-11-24T01:00:05.000Z", done_payload, "Live reply completed after go-live."),
+        )
+        _add_message(
+            con,
+            "m-new",
+            "th-old",
+            role="user",
+            text="New turn after go-live.",
+            created_at="2026-11-24T01:00:06.000Z",
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    second_collect = json.loads(
+        subprocess.run(collect_cmd, capture_output=True, text=True, timeout=20, check=True).stdout
+    )
+    assert second_collect["queued"] == 2
+    texts = [row["content"]["messages"][0]["text"] for row in _payloads(outbox)]
+    assert texts == ["Live reply completed after go-live.", "New turn after go-live."]
+    assert "Old conversation before go-live." not in texts

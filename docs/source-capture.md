@@ -50,7 +50,7 @@ cloud-memory-connector collect --state-dir /path/to/private-state \
   --connection-file /path/to/private-connection.json --source-file /path/to/private-source.json
 ```
 
-capture-init 只登记来源、创建采集扩展和私有密钥，不扫描。collect 执行一批扫描，输出入队／重复／按原因跳过的数量；不发出网络请求。NAS 离线时仍可采集。也可用明确的 `--instance-id`、`--device-id` 代替 connection 文件进行纯本地验证；这不会授予服务器写入权限。
+capture-init 只登记来源、创建采集扩展和私有密钥，不扫描。对于 `t3-code`，附加 `--from-now` 可仅以只读方式将水位游标推进到当前最新已提交消息位置，在不读取或导入旧历史正文的前提下直接开启后续增量采集。collect 执行一批扫描，输出入队／重复／按原因跳过的数量；不发出网络请求。NAS 离线时仍可采集。也可用明确的 `--instance-id`、`--device-id` 代替 connection 文件进行纯本地验证；这不会授予服务器写入权限。
 
 持续采集使用相同参数，将 collect 改为 collect-watch。它每批后等待两秒，再重新读取配置和扫描。网络补传 watch 在另一个进程运行，两者共享同一本地队列；本阶段尚未安装系统后台服务。Ctrl-C 结束进程，后续运行恢复已有状态。出现解析／媒体／权限／过滤错误会退出并返回固定错误码，不越过失败位置。已成功提交的前缀保留，不把部分完成报告成全量完成。
 
