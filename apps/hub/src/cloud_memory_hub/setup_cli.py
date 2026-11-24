@@ -39,7 +39,9 @@ def main():
     pairing.add_argument("--pairing-file", type=Path, required=True)
     pairing.add_argument("--client-root", type=Path)
     automation = commands.add_parser("automation", help="为当前项目安装自动采集与召回")
-    automation.add_argument("--agent", choices=["claude", "codex", "dsh"], required=True)
+    automation.add_argument(
+        "--agent", choices=["claude", "codex", "dsh", "antigravity", "t3-code"], required=True
+    )
     automation.add_argument("--workspace", type=Path, required=True)
     automation.add_argument(
         "--config-file", type=Path, help="复用已有配对，省略时从标准输入接收配对"
@@ -49,7 +51,7 @@ def main():
     status.add_argument("--check-remote", action="store_true")
     mcp = commands.add_parser("mcp-config", help="输出此设备的 MCP 配置，不修改已有 Agent")
     mcp.add_argument("--config-file", type=Path, required=True)
-    mcp.add_argument("--format", choices=["json", "codex"], default="json")
+    mcp.add_argument("--format", choices=["json", "codex", "antigravity"], default="json")
     service = commands.add_parser("service", help="管理 Mac 登录后运行的队列补传服务")
     service.add_argument("action", choices=["install", "start", "status", "stop", "uninstall"])
     service.add_argument("--config-file", type=Path, required=True)

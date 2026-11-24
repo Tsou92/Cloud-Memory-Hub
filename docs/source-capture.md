@@ -1,14 +1,14 @@
 # 本地来源采集：隔离验证
 
-当前支持显式绑定的 Claude Code、Codex 与 DeepSeek Harness（DSH）原生记录，复用固定上游解析器和授权文件读取。它将过滤后的记录写入现有 LocalOutbox；发送继续使用 [send／watch](local-connector.md)。设计与兼容性见 [ADR-0009](adr/0009-local-source-capture.md)，实际 CLI 证据见 [验证记录](reviews/2026-10-24-claude-native.md)。
+当前支持显式绑定的 Claude Code、Codex、DeepSeek Harness（DSH）与 T3 Code（统一多 Provider 线程库）原生记录，复用固定上游解析器和授权文件读取。它将过滤后的记录写入现有 LocalOutbox；发送继续使用 [send／watch](local-connector.md)。设计与兼容性见 [ADR-0009](adr/0009-local-source-capture.md)、[ADR-0077](adr/0077-dsh-history-import.md) 与 [ADR-0079](adr/0079-t3code-unified-source-capture.md)，实际 CLI 证据见 [验证记录](reviews/2026-10-24-claude-native.md)。
 
-以下隔离验证细节记录 2026-10-24 的阶段；当前安装器、历史导入与附件抽取的支持范围以状态说明和发行说明为准。首轮 collect 会从指定目录的历史起点开始，后续按游标增量采集；不会自动猜测 `~/.claude` 或 `~/.dsh` 路径。
+以下隔离验证细节记录 2026-10-24 的阶段；当前安装器、历史导入与附件抽取的支持范围以状态说明和发行说明为准。首轮 collect 会从指定目录的历史起点开始，后续按游标增量采集；不会自动猜测 `~/.claude`、`~/.dsh` 或 `~/.t3/userdata` 路径。
 
-状态说明（2026-11-18，2026-11-19 更新）：本页前两段描述 2026-10-24 的隔离验证阶段。v0.1.6 起安装器已支持项目钩子与自动采集，v0.1.11 起历史导入支持 Claude Code 与 Codex，v0.1.13 起加入 DSH `session.v3.jsonl.zstd`。当前支持范围以[设备与 Agent 自助接入](client-installation.md)和发行说明为准。
+状态说明（2026-11-18，2026-11-24 更新）：本页前两段描述 2026-10-24 的隔离验证阶段。v0.1.6 起安装器已支持项目钩子与自动采集，v0.1.11 起历史导入支持 Claude Code 与 Codex，v0.1.13 起加入 DSH `session.v3.jsonl.zstd`，当前分支补充 `t3-code`（统一扫描 `~/.t3/userdata/statev2.sqlite` 及 `-wal`）。当前支持范围以[设备与 Agent 自助接入](client-installation.md)和发行说明为准。
 
 ## 显式配置
 
-先按[连接组件说明](local-connector.md)初始化本地队列并准备私有 connection 文件。NAS 管理端登记的来源 adapter ID 应为 `claude-code`、`codex` 或 `deepseek-harness`，并绑定同一设备与项目；来源 UUID 和项目 UUID 使用服务端返回值。
+先按[连接组件说明](local-connector.md)初始化本地队列并准备私有 connection 文件。NAS 管理端登记的来源 adapter ID 应为 `claude-code`、`codex`、`deepseek-harness` 或 `t3-code`，并绑定同一设备与项目；来源 UUID 和项目 UUID 使用服务端返回值。
 
 在源码目录之外创建权限为 0600 的 source 文件，父目录由当前用户控制。字段如下，尖括号内容必须替换：
 
@@ -30,6 +30,7 @@
 - `claude-code`：`source_root` 指向该项目的 `~/.claude/projects/<编码后的项目路径>`，读取其中的 `.jsonl`。
 - `codex`：`source_root` 指向 `~/.codex/sessions`，读取 `YYYY/MM/DD/rollout-*.jsonl`；工作目录取自会话头 `session_meta.payload.cwd`。
 - `deepseek-harness`：`source_root` 指向 `~/.dsh/sessions`（或该项目对应的编码目录），读取 `session-*/session.v3.jsonl.zstd`；工作目录取自会话头 `cwd`，会话 ID 取自头 `id`。zstd 流按解压后的记录序号续读，不能按字节偏移续读；含图片等媒体且未启用可抽取文本的会话保持 fail-closed。
+- `t3-code`：`source_root` 指向 `~/.t3/userdata`，以只读镜像方式扫描 `statev2.sqlite` 及 `statev2.sqlite-wal`；覆盖 T3 Code 内所有 Provider（`codex`、`claudeAgent`、`antigravity` 等）以及 Local / git worktree 线程，按 `projection_projects.workspace_root` 精确匹配 `workspace`。只采集 `streaming = 0` 的已完成 `user` / `assistant` 消息（跳过宿主通知类 `user` 行），并按 `(updated_at, rowid)` 推进游标；其他项目的截图与异常记录先行跳过，当前项目内未抽取的附件/图片继续保持 fail-closed（开启 `media_text_extraction` 后支持 `<source_root>/attachments/` 中的 `.txt`/`.md`/PDF 文本层）。
 
 `workspace` 必须与原生记录的 cwd 字符串精确一致；不匹配或缺失的记录单独计入 `workspace_mismatch`，不改派到其他项目。当前采集仅接受项目 scope，global 偏好的提炼／共享另行实现。source_root 应尽量限定在该项目的会话目录。路径和原生会话标识不能替代 NAS 身份。
 

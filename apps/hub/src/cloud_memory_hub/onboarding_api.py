@@ -34,12 +34,14 @@ PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>连接 Agent · Cloud Memory Hub</title><style>__STYLE__</style>
 <main><h1>把你的 Agent 连接到 Cloud Memory Hub</h1>
-<p>记忆保存在 NAS。Apple Silicon Mac 上的 Claude Code CLI 和 Codex 支持自动共享对话和接续。
+<p>记忆保存在 NAS。Apple Silicon Mac 上的 Claude Code CLI、Codex 和 T3 Code
+（Antigravity）支持自动共享对话和接续。
 安装器可为这个 Hub 项目准备专用目录，无须安装独立 App。</p>
 <p>请确保这台设备能访问你的 NAS，例如已加入同一个 Tailscale 网络。</p>
 <p id="notice" role="status">正在检查连接链接……</p>
 <label for="agent">你要使用的 Agent</label>
 <select id="agent"><option value="claude">Claude Code</option><option value="codex">Codex</option>
+<option value="antigravity">T3 Code (Antigravity)</option>
 <option value="opencode">OpenCode</option><option value="hermes">Hermes</option>
 <option value="generic">其他支持 HTTP MCP 的 Agent</option></select>
 <h2>方法一：交给 Agent 安装</h2>
@@ -248,7 +250,7 @@ if (navigator.userAgent.includes('Windows')) byId('platform').value = 'windows';
 function render() {
   const agent = byId('agent').value;
   const windows = byId('platform').value === 'windows';
-  const projectAutomation = agent === 'claude' || agent === 'codex';
+  const projectAutomation = agent === 'claude' || agent === 'codex' || agent === 'antigravity';
   const unixProgram = 'umask 077; cmh_file=$(mktemp) || exit 1; '
     + 'trap \'rm -f -- "$cmh_file"\' EXIT; '
     + __CMH_HUB_SHELL_FETCH__
@@ -278,7 +280,8 @@ function render() {
       ? '在 Apple Silicon Mac 上，如果我已明确打开要共享的本地项目目录，'
         + '请用 --workspace 指定该目录。'
         + '其他情况下请用 --managed-workspace 为这个 Hub 项目准备专用目录。'
-        + '完成后告诉我在 Agent 中打开哪个目录。Codex 首次由我按界面提示审查并信任钩子。'
+        + '完成后告诉我在 Agent 中打开哪个目录。'
+        + (agent === 'codex' ? 'Codex 首次由我按界面提示审查并信任钩子。' : '')
       : '')
     + '保留其他配置，不要输出长期凭证。网络或代理问题请按 '
     + 'https://github.com/Tsou92/Cloud-Memory-Hub/blob/main/docs/proxy-and-network.md '

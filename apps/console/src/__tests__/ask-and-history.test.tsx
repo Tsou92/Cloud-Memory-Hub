@@ -196,5 +196,6 @@ describe("Streaming Ask workbench and History search / import modal", () => {
     });
     expect(dialog.textContent).toContain("claude-code");
     expect(dialog.textContent).toContain("codex");
+    expect(dialog.textContent).toContain("t3-code");
   });
 });

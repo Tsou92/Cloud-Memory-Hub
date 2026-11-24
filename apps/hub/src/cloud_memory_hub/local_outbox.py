@@ -303,7 +303,26 @@ class LocalOutbox:
             "INSERT INTO events(event_id,payload,payload_digest) VALUES (?,?,?)",
             (event.event_id, payload, digest),
         )
-        return {"event_id": event.event_id, "status": "queued", "receipt_id": None}
+        return {
+            "event_id": event.event_id,
+            "status": "queued",
+            "receipt_id": None,
+        }
+
+    def event_state(self, event_id: str, payload_digest: str) -> str:
+        """Return missing, matching, or conflict for a previously prepared event."""
+        try:
+            canonical_uuid(event_id)
+        except (ValueError, TypeError, AttributeError):
+            raise OutboxError("invalid_event") from None
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT payload_digest FROM events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return "missing"
+        return "matching" if row[0] == payload_digest else "conflict"
 
     def pending(self, *, limit: int = 32) -> tuple[PendingEvent, ...]:
         if type(limit) is not int or not 1 <= limit <= 256:

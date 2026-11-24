@@ -229,6 +229,60 @@ def test_dsh_automation_records_an_exact_workspace_binding(tmp_path, monkeypatch
     assert not (workspace / ".claude").exists() and not (workspace / ".codex").exists()
 
 
+@pytest.mark.parametrize("agent_name", ["antigravity", "t3-code"])
+def test_antigravity_automation_merges_hooks_json_preserving_other_hooks(
+    tmp_path, monkeypatch, agent_name
+):
+    import cloud_memory_hub.client_setup as setup
+
+    _, raw, config = install(tmp_path)
+    workspace = tmp_path / "t3 project"
+    target = workspace / ".agents/hooks.json"
+    target.parent.mkdir(parents=True)
+    foreign = {
+        "lint-checker": {"PostToolUse": [{"matcher": "run_command", "hooks": [{"command": "ls"}]}]}
+    }
+    target.write_text(json.dumps(foreign))
+    executable = tmp_path / "cloud-memory-agent"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    monkeypatch.setattr(setup.sys, "platform", "linux")
+    kwargs = {
+        "agent": agent_name,
+        "workspace": workspace,
+        "home": tmp_path,
+        "executable": executable,
+    }
+    assert install_automation(config, **kwargs) == {
+        "status": "configured",
+        "background_delivery": "unavailable",
+    }
+    first = target.read_text()
+    assert raw["credential"] not in first
+    document = json.loads(first)
+    assert document["lint-checker"] == foreign["lint-checker"]
+    cmh_hook = document["cloud-memory-hub"]
+    for event in ("PreInvocation", "Stop"):
+        assert len(cmh_hook[event]) == 1
+        assert cmh_hook[event][0]["type"] == "command"
+        assert shlex.split(cmh_hook[event][0]["command"]) == [
+            str(executable),
+            "--config-file",
+            str(config),
+            "antigravity-hook",
+            "--workspace",
+            str(workspace),
+        ]
+    assert install_automation(config, **kwargs)["status"] == "configured"
+    assert target.read_text() == first
+
+    other = tmp_path / "other t3 project"
+    other.mkdir()
+    with pytest.raises(ClientSetupError, match="automation_configuration_conflict"):
+        install_automation(config, **{**kwargs, "workspace": other})
+    assert not (other / ".agents/hooks.json").exists()
+
+
 @pytest.mark.parametrize(
     "status,code,retryable",
     [
@@ -341,7 +395,7 @@ def test_probe_rejects_mismatched_authority_before_install(tmp_path, change):
     assert not (tmp_path / "clients").exists()
 
 
-@pytest.mark.parametrize("format_name", ["json", "codex"])
+@pytest.mark.parametrize("format_name", ["json", "codex", "antigravity"])
 def test_cli_mcp_configuration_contains_paths_without_credentials(
     tmp_path, monkeypatch, capsys, format_name
 ):

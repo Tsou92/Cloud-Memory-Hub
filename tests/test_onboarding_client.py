@@ -1014,6 +1014,179 @@ class ClientTests(unittest.TestCase):
             with self.assertRaisesRegex(client.ConnectError, "private_acl_unavailable"):
                 client.windows_acl(self.home)
 
+    def test_antigravity_and_t3_alias_install_stdio_mcp_without_token_and_bridge_http(self):
+        import http.server
+        import subprocess
+        import threading
+
+        received = []
+
+        class McpHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != "/healthz":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                body = b'{"status":"ok"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                received.append((self.path, self.headers.get("Authorization", ""), payload))
+                if "id" not in payload or payload["id"] is None:
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                reply = {
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {"ok": True, "method": payload["method"]},
+                }
+                body = json.dumps(reply).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        for agent_arg in ("antigravity", "t3-code"):
+            with self.subTest(agent=agent_arg), tempfile.TemporaryDirectory() as isolated:
+                remote = FakeRemote()
+                home = Path(isolated).resolve() / "home with spaces"
+                home.mkdir(mode=0o700)
+                config = home / ".gemini/config/mcp_config.json"
+                config.parent.mkdir(parents=True)
+                original = b'{"mcpServers":{"existing":{"command":"old-mcp"}}}\n'
+                config.write_bytes(original)
+                result = client.connect(LINK, agent_arg, home=home, remote_factory=remote)
+                self.assertEqual(result["agent"], "antigravity")
+                parsed = json.loads(config.read_text(encoding="utf-8"))
+                self.assertEqual(parsed["mcpServers"]["existing"], {"command": "old-mcp"})
+                entry = parsed["mcpServers"][result["server"]]
+                self.assertNotIn("headers", entry)
+                self.assertNotIn("url", entry)
+                self.assertNotIn("cmhdev_v1_", config.read_text(encoding="utf-8"))
+                self.assertEqual(entry["args"][0], "-I")
+                self.assertEqual(entry["args"][2], "mcp-stdio")
+                bridge_path = Path(entry["args"][1])
+                client.check_private(bridge_path)
+                self.assertTrue(
+                    any(p.name == "SKILL.md" for p in (home / ".gemini/config/skills").rglob("*"))
+                )
+
+                # Re-running must be idempotent without re-claiming.
+                before = config.stat().st_mtime_ns
+                client.connect(LINK, agent_arg, home=home, remote_factory=remote)
+                self.assertEqual(before, config.stat().st_mtime_ns)
+
+                # Point pending origin at an HTTP MCP endpoint and exercise stdio bridge.
+                server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), McpHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    pending_path = Path(result["private_state"]) / "pending.json"
+                    pending_data = json.loads(pending_path.read_text(encoding="utf-8"))
+                    local_origin = f"http://127.0.0.1:{server.server_port}"
+                    pending_data["origin"] = local_origin
+                    pending_data["bundle"]["origin"] = local_origin
+                    pending_path.write_bytes(client.json_bytes(pending_data))
+                    received.clear()
+                    proc = subprocess.run(
+                        [entry["command"], *entry["args"]],
+                        input=(
+                            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+                            + "\n"
+                            + json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+                            + "\n"
+                            + json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": 2,
+                                    "method": "tools/call",
+                                    "params": {"name": "memory_status", "arguments": {}},
+                                }
+                            )
+                            + "\n"
+                        ),
+                        text=True,
+                        capture_output=True,
+                        timeout=15,
+                        check=True,
+                    )
+                    lines = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+                    self.assertEqual(
+                        lines,
+                        [
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": {"ok": True, "method": "initialize"},
+                            },
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "result": {"ok": True, "method": "tools/call"},
+                            },
+                        ],
+                    )
+                    self.assertEqual(len(received), 3)
+                    for path_seen, auth_seen, _ in received:
+                        self.assertEqual(path_seen, "/hub/v1/mcp/" + BUNDLE["source_id"])
+                        self.assertTrue(auth_seen.startswith("Bearer cmhdev_v1_"))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=5)
+
+    def test_antigravity_automation_does_not_require_codex_trust(self):
+        project = self.home / "agy workspace"
+        project.mkdir()
+        executable = self.home / "stable runtime/cloud-memory-setup"
+
+        def run(command, **options):
+            if command[-1] == "--help":
+                return client.subprocess.CompletedProcess(command, 0, stdout=b"")
+            self.assertEqual(
+                command,
+                [
+                    str(executable),
+                    "automation",
+                    "--agent",
+                    "antigravity",
+                    "--workspace",
+                    str(project),
+                ],
+            )
+            return client.subprocess.CompletedProcess(
+                command, 0, stdout=b'{"status":"configured","background_delivery":"running"}'
+            )
+
+        with (
+            patch.object(client, "installed_automation_setup", return_value=executable),
+            patch.object(client.subprocess, "run", side_effect=run),
+        ):
+            result = client.connect(
+                LINK, "antigravity", home=self.home, remote_factory=self.remote, workspace=project
+            )
+        self.assertEqual(
+            result["automation"],
+            {
+                "status": "configured",
+                "background_delivery": "running",
+                "host_review_required": False,
+                "host_verified": False,
+                "workspace": str(project),
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

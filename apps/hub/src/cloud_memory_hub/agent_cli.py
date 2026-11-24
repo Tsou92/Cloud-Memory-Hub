@@ -60,13 +60,22 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(prog="cloud-memory-agent")
     parser.add_argument("--config-file", type=Path, required=True)
-    hooks = {"claude-hook": "claude-code", "codex-hook": "codex", "dsh-hook": "deepseek-harness"}
+    hooks = {
+        "claude-hook": "claude-code",
+        "codex-hook": "codex",
+        "dsh-hook": "deepseek-harness",
+        "antigravity-hook": "antigravity",
+    }
     parser.add_argument("command", choices=["init", "upgrade-outbox", *hooks, *COMMANDS])
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--backup-file", type=Path)
     args = parser.parse_args()
     if (args.command == "upgrade-outbox") != (args.backup_file is not None):
         parser.error("--backup-file is required only for upgrade-outbox")
+    if args.command == "antigravity-hook":
+        from cloud_memory_hub.antigravity_hook import run_antigravity_hook_process
+
+        return run_antigravity_hook_process(args.config_file, args.workspace)
     if args.command in hooks:
         from cloud_memory_hub.agent_hook import run_hook_process
 

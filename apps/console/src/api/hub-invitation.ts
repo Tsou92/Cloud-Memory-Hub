@@ -4,6 +4,7 @@ import { validLabel } from "./hub-pairing";
 export const agents = {
   claude: "Claude Code",
   codex: "Codex",
+  antigravity: "T3 Code (Antigravity)",
   opencode: "OpenCode",
   hermes: "Hermes",
   generic: "其他支持 MCP 的 Agent",
@@ -236,15 +237,18 @@ const unixInstallProgram =
 export function invitationInstructions(invitation: Invitation, agent: Agent) {
   const origin = safeOrigin(invitation.origin);
   const link = `${origin}/hub/connect#pairing_id=${invitation.pairing_id}&secret=${invitation.invitation_secret}`;
-  const projectAutomation = agent === "claude" || agent === "codex";
+  const projectAutomation =
+    agent === "claude" || agent === "codex" || agent === "antigravity";
   const workspaceOption = projectAutomation
     ? 'if [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ]; then set -- "$@" --managed-workspace; fi; '
     : "";
   const program = unixInstallProgram + workspaceOption + 'sh "$cmh_file" "$@"';
+  const codexNotice =
+    agent === "codex" ? "Codex 首次由我按界面提示审查并信任钩子。" : "";
   const workspace = projectAutomation
     ? "在 Apple Silicon Mac 上，如果我已明确打开要共享的本地项目目录，请用 --workspace 指定该目录。" +
       "其他情况下请用 --managed-workspace 为这个 Hub 项目准备专用目录。完成后告诉我在 Agent 中打开哪个目录。" +
-      "Codex 首次由我按界面提示审查并信任钩子。"
+      codexNotice
     : "";
   return {
     link,

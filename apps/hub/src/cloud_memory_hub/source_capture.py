@@ -3,12 +3,20 @@
 import asyncio
 import hashlib
 import json
+import os
+import stat
 from collections import Counter
 from pathlib import Path
 from typing import Literal
 
 from one_memory.imports.access import AuthorizedSourceRoot, SourceAccessError, opaque_workspace_id
-from one_memory.imports.adapters import ScanFailure, ScannedEvidence, ScanOptions, ScanSkip
+from one_memory.imports.adapters import (
+    ScanFailure,
+    ScannedEvidence,
+    ScanOptions,
+    ScanSkip,
+    StorageKind,
+)
 from one_memory.imports.discovery import SourceFileDiscoveryFailure, discover_source_files
 from one_memory.imports.sources.claude_code import create_claude_code_adapter
 from one_memory.imports.sources.codex import create_codex_adapter
@@ -25,12 +33,13 @@ from cloud_memory_hub.dsh_source import create_dsh_adapter
 from cloud_memory_hub.events import canonical_uuid
 from cloud_memory_hub.media_text import MediaTextError, rewrite_record_media
 from cloud_memory_hub.privacy import MAX_CONTENT_BYTES, parse_json
+from cloud_memory_hub.t3_source import WorkspaceMismatchSkip, create_t3_adapter
 
 
 class SourceConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     schema_version: Literal[1] = 1
-    adapter_id: Literal["claude-code", "codex", "deepseek-harness"]
+    adapter_id: Literal["claude-code", "codex", "deepseek-harness", "t3-code"]
     source_id: str
     scope_id: str
     source_root: str = Field(min_length=1, max_length=4096, repr=False)
@@ -157,7 +166,8 @@ def _guarded_adapter(adapter, *, adapter_id, media_text_extraction=False):
     return adapter
 
 
-def _claude_adapter(grant, source_version, media_text_extraction=False):
+def _claude_adapter(grant, source_version, media_text_extraction=False, *, workspace=None):
+    del workspace
     return _guarded_adapter(
         create_claude_code_adapter(grant, source_version=source_version),
         adapter_id="claude-code",
@@ -165,7 +175,8 @@ def _claude_adapter(grant, source_version, media_text_extraction=False):
     )
 
 
-def _codex_adapter(grant, source_version, media_text_extraction=False):
+def _codex_adapter(grant, source_version, media_text_extraction=False, *, workspace=None):
+    del workspace
     return _guarded_adapter(
         create_codex_adapter(grant, source_version=source_version),
         adapter_id="codex",
@@ -173,7 +184,8 @@ def _codex_adapter(grant, source_version, media_text_extraction=False):
     )
 
 
-def _dsh_adapter(grant, source_version, media_text_extraction=False):
+def _dsh_adapter(grant, source_version, media_text_extraction=False, *, workspace=None):
+    del workspace
     return _guarded_adapter(
         create_dsh_adapter(grant, source_version=source_version),
         adapter_id="deepseek-harness",
@@ -181,10 +193,20 @@ def _dsh_adapter(grant, source_version, media_text_extraction=False):
     )
 
 
+def _t3_adapter(grant, source_version, media_text_extraction=False, *, workspace=None):
+    return create_t3_adapter(
+        grant,
+        source_version=source_version,
+        media_text_extraction=media_text_extraction,
+        workspace=workspace,
+    )
+
+
 ADAPTERS = {
     "claude-code": _claude_adapter,
     "codex": _codex_adapter,
     "deepseek-harness": _dsh_adapter,
+    "t3-code": _t3_adapter,
 }
 
 
@@ -206,7 +228,10 @@ def _open_source(outbox, config, *, initialize=False):
         initialize=initialize,
     )
     return store, ADAPTERS[config.adapter_id](
-        grant, config.source_version, config.media_text_extraction
+        grant,
+        config.source_version,
+        config.media_text_extraction,
+        workspace=config.workspace,
     )
 
 
@@ -237,8 +262,22 @@ def _content(evidence, config):
     }
 
 
+def _wal_stat(db_path):
+    wal = db_path.with_name(db_path.name + "-wal")
+    try:
+        info = os.lstat(wal)
+    except FileNotFoundError:
+        return None, False
+    except OSError:
+        return None, True
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None, True
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns), False
+
+
 def _capture_listing(adapter, store, cursors):
     changed = []
+    is_sqlite = StorageKind.SQLITE in adapter.descriptor.storage_kinds
     for item in discover_source_files(adapter.grant, suffixes=adapter.suffixes, max_targets=10_000):
         if isinstance(item, SourceFileDiscoveryFailure):
             raise CaptureError("source_scan_" + discovery_failure_code(item).value)
@@ -253,13 +292,19 @@ def _capture_listing(adapter, store, cursors):
         # Upstream's item.changed_ns is birth time, not ctime. It detects inode
         # replacement and must not be mistaken for an in-place edit timestamp.
         store.changed_times[item.safe_id] = changed_ns
-        if previous is not None and previous_change != changed_ns:
-            if previous.observed_size == item.size:
+        previous_wal = store.wal_states.get(item.safe_id)
+        wal_dirty = False
+        if is_sqlite:
+            wal_state, wal_unsafe = _wal_stat(item.path)
+            store.wal_states[item.safe_id] = wal_state
+            wal_dirty = wal_unsafe or wal_state != previous_wal
+        if previous is not None and (previous_change != changed_ns or wal_dirty):
+            if not is_sqlite and previous.observed_size == item.size:
                 # An in-place rewrite may preserve mtime and size. Re-read it,
                 # including earlier lines, with existing identity deduplication.
                 cursors.pop(item.safe_id)
             else:
-                # Let the upstream anchored reader validate append/truncation.
+                # Let the anchored/SQLite reader validate checkpoint and resume.
                 cursors[item.safe_id] = previous.model_copy(update={"read_to_end": False})
         if not is_unchanged(item, cursors):
             changed.append(item)
@@ -289,6 +334,10 @@ async def collect_source(outbox, config, *, max_messages=1000):
                 if isinstance(event, ScanFailure):
                     # Never advance past a failed/oversized/malformed record.
                     raise CaptureError("source_scan_" + event.reason_code.value)
+                if isinstance(event, WorkspaceMismatchSkip):
+                    skipped["workspace_mismatch"] += 1
+                    store.advance(event.cursor)
+                    continue
                 if isinstance(event, ScannedEvidence):
                     if event.evidence.workspace != expected_workspace:
                         skipped["workspace_mismatch"] += 1

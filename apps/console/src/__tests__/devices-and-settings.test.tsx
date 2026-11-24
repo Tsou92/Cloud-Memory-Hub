@@ -133,6 +133,10 @@ describe("Devices management, one-link wizard, and Settings tabs", () => {
 
     // Open Connect New Agent modal
     await user.click(screen.getByRole("button", { name: /连接新 Agent/ }));
+    const agyRadio = await screen.findByRole("radio", {
+      name: "T3 Code (Antigravity)",
+    });
+    await user.click(agyRadio);
     const devInput = await screen.findByLabelText(/为这台电脑起一个易识别的设备名/);
     await user.type(devInput, "家里 MacBook Pro");
     await user.click(
@@ -143,6 +147,7 @@ describe("Devices management, one-link wizard, and Settings tabs", () => {
       expect(screen.getByText(/等待目标电脑领取配对/)).toBeTruthy();
     });
     expect(screen.getByText(/https:\/\/hub\.example\.test\/hub\/connect/)).toBeTruthy();
+    expect(screen.getByText(/直接粘贴发给 T3 Code \(Antigravity\)/)).toBeTruthy();
   });
 
   it("renders usage cost estimate and binds selected backup ID into export/restore commands", async () => {

@@ -27,7 +27,8 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 const elements = new Map();
 const document = {getElementById(id) {
   if (!elements.has(id)) elements.set(id, {
-    value: id === 'agent' ? input.agent : 'unix', selectedOptions: [{text:'Codex'}],
+    value: id === 'agent' ? input.agent : 'unix',
+    selectedOptions: [{text: input.agent === 'antigravity' ? 'T3 Code (Antigravity)' : 'Codex'}],
     addEventListener() {}, focus() {}, select() {}
   });
   return elements.get(id);
@@ -131,6 +132,7 @@ class CopiedCommandTests(unittest.TestCase):
         for system, architecture, agent, expect_managed in (
             ("Darwin", "arm64", "codex", True),
             ("Darwin", "arm64", "claude", True),
+            ("Darwin", "arm64", "antigravity", True),
             ("Darwin", "x86_64", "codex", False),
             ("Linux", "aarch64", "codex", False),
             ("Darwin", "arm64", "opencode", False),
@@ -168,6 +170,11 @@ class CopiedCommandTests(unittest.TestCase):
         windows = self.instructions(origin, windows=True)
         self.assertNotIn("--managed-workspace", windows["prompt"])
         self.assertNotIn("--managed-workspace", windows["command"])
+        agy_prompt = self.instructions(origin, windows=False, agent="antigravity")["prompt"]
+        self.assertIn("--managed-workspace", agy_prompt)
+        self.assertIn("T3 Code (Antigravity)", agy_prompt)
+        self.assertNotIn("Codex", agy_prompt)
+        self.assertNotIn("审查并信任钩子", agy_prompt)
 
     def check_download(self, *, windows, powershell_runtime=None):
         for mode in ("not_found", "partial", "empty", "redirect", "complete", "installer_failure"):

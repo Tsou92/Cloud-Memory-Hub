@@ -1,6 +1,6 @@
-# Claude 当前轮自动共享
+# 当前轮自动共享（Claude / Codex / T3 Code Antigravity）
 
-此入口在已配对的 MCP／CLI 之上增加 Claude 当前轮的自动采集和召回。先按 [Agent 接入说明](agent-access.md)准备私有配置与本地队列；实现依据见 [ADR-0050](adr/0050-mvp-visible-turn-hooks.md)与[相关记忆召回设计](adr/0051-mvp-relevant-recall.md)。最近原文读取不需要启用 NAS 模型；按问题检索较早记忆，需要 NAS 已生成可搜索记忆。两条路径都不扫描本机会话文件。仅最近原文的版本已在两台 Mac 的指定项目安装并核对真实 CLI 的设置加载，具体版本与证据见[验收记录](reviews/2026-11-10-visible-turn-mvp.md)；新联合召回的测试与安装须分别核对。
+此入口在已配对的 MCP／CLI 之上增加当前轮的自动采集和召回。先按 [Agent 接入说明](agent-access.md)准备私有配置与本地队列；实现依据见 [ADR-0050](adr/0050-mvp-visible-turn-hooks.md)、[相关记忆召回设计](adr/0051-mvp-relevant-recall.md)与 [T3 Code（Antigravity）适配设计](adr/0078-t3code-antigravity-capture.md)。最近原文读取不需要启用 NAS 模型；按问题检索较早记忆，需要 NAS 已生成可搜索记忆。Claude／Codex 两条路径都不扫描本机会话文件；仅最近原文的版本已在两台 Mac 的指定项目安装并核对真实 Claude CLI 的设置加载，具体版本与证据见[验收记录](reviews/2026-11-10-visible-turn-mvp.md)；新联合召回与 T3 Code 真实宿主端到端须分别实测核对。
 
 ## 工作方式
 
@@ -53,4 +53,27 @@
 
 相关记忆与最近原文共用最多 5 条、6000 正文字符和 24 KiB 的上下文预算，截断与分页仍有提示。上传加联合读取的网络总期限仍为 8 秒。未启用 NAS 提炼或搜索为空不表示所有历史均已检索，也不能据此推断没有记忆；完整任务接续继续使用 `handoff_load`。
 
-稳定原生 session 与 prompt_id 用于重放去重，缺失这些字段时不伪造成功。该入口不读取过去会话，不提供离线读取缓存，也不恢复其他 Agent 的隐藏上下文。宿主版本、真实模型和两机链路的实测范围应以本次验收记录为准。
+稳定原生 session 与 prompt_id 用于重放去重，缺失这些字段时不伪造成功。Claude／Codex 入口不读取过去会话；Antigravity（T3 Code）入口使用 `.agents/hooks.json` 的 `PreInvocation` 与 `Stop` 事件调用 `antigravity-hook`，仅在 `Stop` 阶段按 `O_NOFOLLOW` 安全读取当前轮最后一个无未决工具调用的 `PLANNER_RESPONSE`（以及同目录 `transcript_full.jsonl` 中对应 `step_index` 的被截断长文本），不扫描其他会话目录，也不提供离线读取缓存或恢复其他 Agent 的隐藏上下文。若需在 T3 Code 下跨越所有 Provider 及独立 git worktree 统一导入历史并做后台增量采集，请改用/配合 [来源采集](source-capture.md) 的 `t3-code` 适配器（[ADR-0079](adr/0079-t3code-unified-source-capture.md)）。宿主版本、真实模型和两机链路的实测范围应以实际验收记录为准。
+
+## T3 Code（Antigravity）`.agents/hooks.json` 示例
+
+```json
+{
+  "cloud-memory-hub": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "'/path/to/cloud-memory-agent' --config-file '/path/to/private/agent.json' antigravity-hook --workspace '/path/to/project'",
+        "timeout": 12
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "'/path/to/cloud-memory-agent' --config-file '/path/to/private/agent.json' antigravity-hook --workspace '/path/to/project'",
+        "timeout": 12
+      }
+    ]
+  }
+}
+```
